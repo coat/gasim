@@ -1,2 +1,7 @@
 # Nix
 .direnv
+result
+
+# Zig
+zig-out/
+.zig-cache/
