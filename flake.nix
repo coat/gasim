@@ -35,7 +35,8 @@
 
         in {
           devShells.${system}.default = pkgs.mkShell {
-            nativeBuildInputs = [
+            nativeBuildInputs = with pkgs; [
+              kcov
               zig
               zls
             ];
