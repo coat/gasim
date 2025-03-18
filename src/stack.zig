@@ -6,7 +6,6 @@ pub fn Stack(T: type, use_s: bool) type {
         index: u3 = 0,
 
         pub fn push(self: *@This(), value: T) void {
-            // std.debug.print("push\n", .{});
             if (use_s) {
                 self.stack[self.index] = self.s;
                 self.s = self.t;
@@ -20,14 +19,12 @@ pub fn Stack(T: type, use_s: bool) type {
 
         pub fn pop(self: *@This()) T {
             self.index -%= 1;
-            // std.debug.print("pop\n", .{});
             const old_t = self.t;
             if (use_s) {
                 self.t = self.s;
                 self.s = self.stack[self.index];
             } else {
                 self.t = self.stack[self.index];
-                // std.debug.print("ndex: {d}\n", .{self.index});
             }
 
             return old_t;
@@ -103,21 +100,6 @@ test "DataStack works" {
 
     try expectEqual(1, stack.index);
     try expectEqual(0, stack.pop());
-}
-
-fn printStack(stack: DataStack) void {
-    std.debug.print("stack index: {d}\n", .{stack.index});
-    std.debug.print("stack t: {d}\n", .{stack.t});
-    std.debug.print("stack s: {d}\n", .{stack.s});
-    for (stack.stack, 0..) |s, i| {
-        if (stack.index == i) {
-            std.debug.print("-> ", .{});
-        } else {
-            std.debug.print("   ", .{});
-        }
-        std.debug.print("{d}\n", .{s});
-    }
-    std.debug.print("----\n\n", .{});
 }
 
 test ReturnStack {
