@@ -10,9 +10,6 @@
     zig-overlay.url = "github:mitchellh/zig-overlay";
     zig-overlay.inputs.nixpkgs.follows = "nixpkgs";
 
-    zls-pkg.url = "github:zigtools/zls?ref=0.14.0";
-    zls-pkg.inputs.nixpkgs.follows = "nixpkgs";
-
     gitignore.url = "github:hercules-ci/gitignore.nix";
     gitignore.inputs.nixpkgs.follows = "nixpkgs";
   };
@@ -20,7 +17,6 @@
   outputs = {
     nixpkgs,
     zig-overlay,
-    zls-pkg,
     gitignore,
     ...
   }:
@@ -29,7 +25,6 @@
         system: let
           pkgs = nixpkgs.legacyPackages.${system};
           zig = zig-overlay.packages.${system}."0.14.0";
-          zls = zls-pkg.packages.${system}.default;
           gitignoreSource = gitignore.lib.gitignoreSource;
           target = builtins.replaceStrings ["darwin"] ["macos"] system;
         in {
@@ -37,7 +32,6 @@
             nativeBuildInputs = with pkgs; [
               kcov
               zig
-              zls
             ];
           };
 
