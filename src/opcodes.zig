@@ -69,8 +69,8 @@ pub const opcodes = [_]OpCodeFn{
     call,
     unext,
     next,
-    nop,
-    nop,
+    _if,
+    minus_if,
     fetchP,
     fetchPlus,
     fetchB,
@@ -226,6 +226,49 @@ test next {
     try expectEqual(0x122, computer.return_stack.t);
     computer.step();
     try expectEqual(0x22, computer.p.address.local);
+}
+
+/// if
+///
+/// **If**. If T is nonzero, continues with the next instruction word addressed by P. If T is zero, jumps
+pub fn _if(self: *Computer) void {
+    if (self.data_stack.t == 0) {
+        self.p.jump(self.slot, self.i);
+    }
+}
+
+test _if {
+    var computer: Computer = .reset;
+    computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
+    computer.slot = 1;
+    computer.data_stack.t = 0;
+
+    _if(&computer);
+    try expectEqual(0x44, computer.p.address.local);
+    computer.step();
+    try expectEqual(0, computer.p.address.local);
+}
+
+/// -if
+///
+/// Minus-if. If T is negative (T17 set), continues with the next instruction
+/// word addressed by P. If T is positive, jumps
+pub fn minus_if(self: *Computer) void {
+    if (self.data_stack.t >= 0) {
+        self.p.jump(self.slot, self.i);
+    }
+}
+
+test minus_if {
+    var computer: Computer = .reset;
+    computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
+    computer.slot = 1;
+    computer.data_stack.t = 1;
+
+    minus_if(&computer);
+    try expectEqual(0x44, computer.p.address.local);
+    computer.step();
+    try expectEqual(0, computer.p.address.local);
 }
 
 /// @p
