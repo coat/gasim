@@ -120,6 +120,8 @@ pub const Computer = struct {
     return_stack: stack.ReturnStack,
     data_stack: stack.DataStack,
 
+    carry: u1,
+
     state: State = .fetch,
 
     slot: u2,
@@ -219,6 +221,8 @@ pub const Computer = struct {
 
         .return_stack = .empty,
         .data_stack = .empty,
+
+        .carry = 0,
 
         .mem = [_]Word{0} ** 128,
 
@@ -373,6 +377,7 @@ test "computer is initialized" {
     try expectEqual(0, computer.i);
     try expectEqual(stack.ReturnStack.empty, computer.return_stack);
     try expectEqual(stack.DataStack.empty, computer.data_stack);
+    try expectEqual(0, computer.carry);
     try expectEqual(.fetch, computer.state);
     try expectEqual([_]Word{0} ** 128, computer.mem);
 }
