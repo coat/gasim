@@ -37,9 +37,9 @@ jobs:
 
       - name: Run zig fmt
         if: matrix.os == 'ubuntu-latest'
-        run: zig fmt --check .
+        run: nix develop -c zig fmt --check .
 
-      - name: test
+      - name: Run tests with coverage
         run: nix develop -c zig build --summary all -Dcoverage -Dtarget=${{ matrix.target }}
 
       - name: Upload to Codecov
