@@ -68,7 +68,7 @@ pub const opcodes = [_]OpCodeFn{
     jump,
     call,
     unext,
-    nop,
+    next,
     nop,
     nop,
     fetchP,
@@ -190,7 +190,43 @@ test call {
 /// Micronext. If R is zero, pops the return stack and continues with the next
 /// opcode. If R is nonzero, decrements R by 1 and causes execution to continue
 /// with slot 0 of the current instruction word without re-fetching the word.
-pub fn unext(_: *Computer) void {}
+pub fn unext(self: *Computer) void {
+    self.return_stack.t -= 1;
+}
+
+test unext {
+    var computer: Computer = .reset;
+    computer.return_stack.push(0x123);
+
+    unext(&computer);
+    try expectEqual(0x122, computer.return_stack.t);
+}
+
+/// next
+///
+/// **Next**. If R is zero, pops the return stack and continues with the next
+/// instruction word addressed by P. If R is nonzero, decrements R by 1 and
+/// jumps
+pub fn next(self: *Computer) void {
+    if (self.return_stack.t == 0) {
+        _ = self.return_stack.pop();
+    } else {
+        self.return_stack.t -= 1;
+        self.p.jump(self.slot, self.i);
+    }
+}
+
+test next {
+    var computer: Computer = .reset;
+    computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
+    computer.slot = 1;
+    computer.return_stack.push(0x123);
+
+    next(&computer);
+    try expectEqual(0x122, computer.return_stack.t);
+    computer.step();
+    try expectEqual(0x22, computer.p.address.local);
+}
 
 /// @p
 ///
