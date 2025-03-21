@@ -1,4 +1,4 @@
-//! F18A is a 18-bit computer architecture designed by Chuck Moore.
+//! The F18A is an 18-bit computer designed by Chuck Moore.
 
 pub const Word = i18;
 
@@ -106,7 +106,7 @@ pub const Computer = struct {
     };
     /// control and status for communication ports and I/O logic.
     io: Word,
-    /// serves as a "program computer"
+    /// serves as a "program counter" and extended arithmetic flag
     p: ProgramCounter,
     /// general purpose read/write address or data register
     a: Word,
@@ -114,16 +114,17 @@ pub const Computer = struct {
     b: u9,
     /// instruction words containing 1, 2, 3 or 4 opcodes for execution
     i: Word,
-
+    /// top 64 words are RAM, bottom half are ROM
     mem: [128]Word,
-
+    // 9 word stack
     return_stack: stack.ReturnStack,
+    // 10 word stack
     data_stack: stack.DataStack,
-
+    // involved in some Extended Arithmetic mode instructions
     carry: u1,
 
     state: State = .fetch,
-
+    // keeps track of current slot to help address decoding
     slot: u2,
 
     pub fn step(self: *Computer) void {
