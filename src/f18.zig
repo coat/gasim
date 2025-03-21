@@ -127,6 +127,8 @@ pub const Computer = struct {
     // keeps track of current slot to help address decoding
     slot: u2,
 
+    execution_time: f32,
+
     pub fn step(self: *Computer) void {
         var instruction: Instruction = undefined;
 
@@ -143,12 +145,12 @@ pub const Computer = struct {
                 self.state = .execution;
                 current_slot: switch (self.slot) {
                     0...2 => {
-                        _ = self.execute(instruction.getSlot(self.slot));
+                        self.execute(instruction.getSlot(self.slot));
                         if (self.state != .execution) continue :current_state self.state;
                         continue :current_slot self.slot;
                     },
                     3 => {
-                        _ = self.execute(Opcode.fromInt(instruction.slot_3));
+                        self.execute(instruction.getSlot(self.slot));
                         if (self.state != .execution) continue :current_state self.state;
                         break :current_state;
                     },
@@ -167,29 +169,29 @@ pub const Computer = struct {
         }
     }
 
-    pub fn execute(self: *Computer, opcode: Opcode) f64 {
+    pub fn execute(self: *Computer, opcode: Opcode) void {
         const code: u5 = @intCast(@intFromEnum(opcode));
-        switch (code) {
+        self.execution_time += time: switch (code) {
             0x00...0x03, 0x05...0x07 => {
                 self.state = .next;
                 opcodes.opcodes[code](self);
 
-                return 5.1;
+                break :time 5.1;
             },
             0x04 => {
                 self.state = .unext;
                 opcodes.opcodes[code](self);
 
-                return 2.0;
+                break :time 2.0;
             },
             else => {
                 self.state = .execution;
                 self.slot +%= 1;
                 opcodes.opcodes[code](self);
 
-                return 1.5;
+                break :time 1.5;
             },
-        }
+        };
     }
 
     pub fn fetch(self: Computer, address: Address) Word {
@@ -229,6 +231,7 @@ pub const Computer = struct {
 
         .state = .fetch,
         .slot = 0,
+        .execution_time = 0.0,
     };
 };
 
