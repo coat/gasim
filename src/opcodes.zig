@@ -101,8 +101,8 @@ pub const opcodes = [_]OpCodeFn{
 ///
 /// **Return**. Moves R into P, popping the return stack. Skips any remaining slots
 /// and fetches next instruction word.
-fn ret(self: *Computer) void {
-    self.p.address = @bitCast(@as(u9, @intCast(self.return_stack.pop() & 0x1ff)));
+fn ret(c: *Computer) void {
+    c.p.address = @bitCast(@as(u9, @intCast(c.return_stack.pop() & 0x1ff)));
 }
 
 test ret {
@@ -116,10 +116,10 @@ test ret {
 /// ex
 ///
 /// **Execute**. Exchanges R and P, skips any remaining slots and fetches next instruction word.
-fn ex(self: *Computer) void {
-    const current_address = self.p.address;
-    self.p.address = Address.fromWord(self.return_stack.t);
-    self.return_stack.t = current_address.toWord();
+fn ex(c: *Computer) void {
+    const current_address = c.p.address;
+    c.p.address = Address.fromWord(c.return_stack.t);
+    c.return_stack.t = current_address.toWord();
 }
 
 test ex {
@@ -134,8 +134,8 @@ test ex {
 /// name ;
 ///
 /// **Jump**. Sets P to destination address and fetches next instruction word.
-fn jump(self: *Computer) void {
-    self.p.jump(self.slot, self.i);
+fn jump(c: *Computer) void {
+    c.p.jump(c.slot, c.i);
 }
 
 test "slot 0 jump" {
@@ -190,8 +190,8 @@ test call {
 /// Micronext. If R is zero, pops the return stack and continues with the next
 /// opcode. If R is nonzero, decrements R by 1 and causes execution to continue
 /// with slot 0 of the current instruction word without re-fetching the word.
-pub fn unext(self: *Computer) void {
-    self.return_stack.t -= 1;
+pub fn unext(c: *Computer) void {
+    c.return_stack.t -= 1;
 }
 
 test unext {
@@ -207,12 +207,12 @@ test unext {
 /// **Next**. If R is zero, pops the return stack and continues with the next
 /// instruction word addressed by P. If R is nonzero, decrements R by 1 and
 /// jumps
-pub fn next(self: *Computer) void {
-    if (self.return_stack.t == 0) {
-        _ = self.return_stack.pop();
+pub fn next(c: *Computer) void {
+    if (c.return_stack.t == 0) {
+        _ = c.return_stack.pop();
     } else {
-        self.return_stack.t -= 1;
-        self.p.jump(self.slot, self.i);
+        c.return_stack.t -= 1;
+        c.p.jump(c.slot, c.i);
     }
 }
 
@@ -231,9 +231,9 @@ test next {
 /// if
 ///
 /// **If**. If T is nonzero, continues with the next instruction word addressed by P. If T is zero, jumps
-pub fn _if(self: *Computer) void {
-    if (self.data_stack.t == 0) {
-        self.p.jump(self.slot, self.i);
+pub fn _if(c: *Computer) void {
+    if (c.data_stack.t == 0) {
+        c.p.jump(c.slot, c.i);
     }
 }
 
@@ -253,9 +253,9 @@ test _if {
 ///
 /// Minus-if. If T is negative (T17 set), continues with the next instruction
 /// word addressed by P. If T is positive, jumps
-pub fn minus_if(self: *Computer) void {
-    if (self.data_stack.t >= 0) {
-        self.p.jump(self.slot, self.i);
+pub fn minus_if(c: *Computer) void {
+    if (c.data_stack.t >= 0) {
+        c.p.jump(c.slot, c.i);
     }
 }
 
@@ -274,9 +274,9 @@ test minus_if {
 /// @p
 ///
 /// Pushes data stack, reads [P] into T, and increments P
-pub fn fetchP(self: *Computer) void {
-    self.data_stack.push(self.fetch(self.p.address));
-    self.p.increment();
+pub fn fetchP(c: *Computer) void {
+    c.data_stack.push(c.fetch(c.p.address));
+    c.p.increment();
 }
 
 test fetchP {
@@ -292,11 +292,11 @@ test fetchP {
 /// @+
 ///
 /// **Fetch-plus**. Pushes data stack, reads [A] into T, and increments A
-pub fn fetchPlus(self: *Computer) void {
-    var address = Address.fromWord(self.a);
-    self.data_stack.push(self.fetch(address));
+pub fn fetchPlus(c: *Computer) void {
+    var address = Address.fromWord(c.a);
+    c.data_stack.push(c.fetch(address));
     address.local +%= 1;
-    self.a = address.toWord();
+    c.a = address.toWord();
 }
 
 test fetchPlus {
@@ -344,9 +344,9 @@ test fetch {
 /// !p
 ///
 /// **Store-P**. Writes T into [P], pops the data stack, and increments P
-pub fn storeP(self: *Computer) void {
-    self.store(self.p.address, self.data_stack.pop());
-    self.p.increment();
+pub fn storeP(c: *Computer) void {
+    c.store(c.p.address, c.data_stack.pop());
+    c.p.increment();
 }
 
 test storeP {
@@ -363,12 +363,12 @@ test storeP {
 /// !+
 ///
 /// **Store-plus**. Writes T into [A], pops the data stack, and increments A
-pub fn storePlus(self: *Computer) void {
-    var address = Address.fromWord(self.a);
-    self.store(address, self.data_stack.pop());
+pub fn storePlus(c: *Computer) void {
+    var address = Address.fromWord(c.a);
+    c.store(address, c.data_stack.pop());
 
     address.local +%= 1;
-    self.a = address.toWord();
+    c.a = address.toWord();
 }
 
 test storePlus {
@@ -385,8 +385,8 @@ test storePlus {
 /// !b
 ///
 /// **Store-B**. Writes T into [B] and pops the data stack.
-pub fn storeB(self: *Computer) void {
-    self.store(Address.fromWord(self.b), self.data_stack.pop());
+pub fn storeB(c: *Computer) void {
+    c.store(Address.fromWord(c.b), c.data_stack.pop());
 }
 
 test storeB {
@@ -402,8 +402,8 @@ test storeB {
 /// !
 ///
 /// **Store**. Writes T into [A] and pops the data stack.
-pub fn store(self: *Computer) void {
-    self.store(Address.fromWord(self.a), self.data_stack.pop());
+pub fn store(c: *Computer) void {
+    c.store(Address.fromWord(c.a), c.data_stack.pop());
 }
 
 test store {
@@ -419,8 +419,8 @@ test store {
 /// 2*
 ///
 /// **Two-Star**. Shifts T left one bit logically (shifts zero into T0, discards T17) thus multiplying a signed or unsigned value by two.
-pub fn shl(self: *Computer) void {
-    self.data_stack.t <<= 1;
+pub fn shl(c: *Computer) void {
+    c.data_stack.t <<= 1;
 }
 
 test shl {
@@ -434,8 +434,8 @@ test shl {
 /// 2/
 ///
 /// **Two-Slash**. Shifts T right one bit arithmetically (propagates T17 by leaving it unchanged; discards T0) thus dividing a signed value by two and discarding the positive remainder.
-pub fn shr(self: *Computer) void {
-    self.data_stack.t >>= 1;
+pub fn shr(c: *Computer) void {
+    c.data_stack.t >>= 1;
 }
 
 test shr {
@@ -449,8 +449,8 @@ test shr {
 /// inv
 ///
 /// **Invert**. Inverts each bit of T, replacing T with its ones complement.
-pub fn inv(self: *Computer) void {
-    self.data_stack.t = ~self.data_stack.t;
+pub fn inv(c: *Computer) void {
+    c.data_stack.t = ~c.data_stack.t;
 }
 
 test inv {
@@ -468,14 +468,14 @@ test inv {
 /// +
 ///
 /// **Plus**. Replaces T with the twos complement sum of S and T. Pops data stack into S. This instruction is affected in Extended Arithmetic Mode, becoming **Add with carry**. Includes the latched carry in the sum, and latches the carry out from bit 17.
-pub fn add(self: *Computer) void {
+pub fn add(c: *Computer) void {
     var result: f18.Word = 0;
-    if (self.p.extended_arithmetic) {
-        result, self.carry = @addWithOverflow(self.data_stack.s + self.carry, self.data_stack.pop());
+    if (c.p.extended_arithmetic) {
+        result, c.carry = @addWithOverflow(c.data_stack.s + c.carry, c.data_stack.pop());
     } else {
-        result = self.data_stack.s + self.data_stack.pop();
+        result = c.data_stack.s + c.data_stack.pop();
     }
-    self.data_stack.push(result);
+    c.data_stack.push(result);
 }
 
 test add {
@@ -508,8 +508,8 @@ test "add in extended_arithmetic mode" {
 /// and
 ///
 /// Replaces T with the Boolean AND of S and T. Pops data stack.
-pub fn _and(self: *Computer) void {
-    self.data_stack.push(self.data_stack.s & self.data_stack.pop());
+pub fn _and(c: *Computer) void {
+    c.data_stack.push(c.data_stack.s & c.data_stack.pop());
 }
 
 test _and {
@@ -524,8 +524,8 @@ test _and {
 /// xor
 ///
 /// **Exclusive Or**. Replaces T with the Boolean XOR of S and T. Pops data stack.
-pub fn xor(self: *Computer) void {
-    self.data_stack.push(self.data_stack.s ^ self.data_stack.pop());
+pub fn xor(c: *Computer) void {
+    c.data_stack.push(c.data_stack.s ^ c.data_stack.pop());
 }
 
 test xor {
@@ -540,8 +540,8 @@ test xor {
 /// drop
 ///
 /// Drops the top item from the data stack by copying S into T and popping the data stack.
-pub fn drop(self: *Computer) void {
-    _ = self.data_stack.pop();
+pub fn drop(c: *Computer) void {
+    _ = c.data_stack.pop();
 }
 
 test drop {
@@ -557,8 +557,8 @@ test drop {
 /// dup
 ///
 /// Duplicates the top item on the data stack by pushing the data stack and copying T into S.
-pub fn dup(self: *Computer) void {
-    self.data_stack.push(self.data_stack.t);
+pub fn dup(c: *Computer) void {
+    c.data_stack.push(c.data_stack.t);
 }
 
 test dup {
@@ -573,8 +573,8 @@ test dup {
 /// r>
 ///
 /// Moves R into T, popping the return stack and pushing the data stack.
-pub fn pop(self: *Computer) void {
-    self.data_stack.push(self.return_stack.pop());
+pub fn pop(c: *Computer) void {
+    c.data_stack.push(c.return_stack.pop());
 }
 
 test pop {
@@ -590,8 +590,8 @@ test pop {
 ///
 /// Makes a copy of S on top of the data stack by pushing S onto the stack,
 /// moving T into S, and replacing T by the previous value of S.
-pub fn over(self: *Computer) void {
-    self.data_stack.push(self.data_stack.s);
+pub fn over(c: *Computer) void {
+    c.data_stack.push(c.data_stack.s);
 }
 
 test over {
@@ -611,8 +611,8 @@ test over {
 /// a
 ///
 /// Fetches the contents of register A into T, pushing the data stack.
-pub fn a(self: *Computer) void {
-    self.data_stack.push(self.a);
+pub fn a(c: *Computer) void {
+    c.data_stack.push(c.a);
 }
 
 test a {
@@ -631,8 +631,8 @@ fn nop(_: *Computer) void {}
 /// >r
 ///
 /// Moves T into R, pushing the return stack and popping the data stack.
-pub fn push(self: *Computer) void {
-    self.return_stack.push(self.data_stack.pop());
+pub fn push(c: *Computer) void {
+    c.return_stack.push(c.data_stack.pop());
 }
 
 test push {
@@ -647,8 +647,8 @@ test push {
 /// b!
 ///
 /// **B-Store**. Stores T into register B, popping the data stack.
-pub fn bStore(self: *Computer) void {
-    self.b = @intCast(self.data_stack.pop() & 0x1ff);
+pub fn bStore(c: *Computer) void {
+    c.b = @intCast(c.data_stack.pop() & 0x1ff);
 }
 
 test bStore {
@@ -663,8 +663,8 @@ test bStore {
 /// a!
 ///
 /// **A-Store**. Stores T into register A, popping the data stack.
-pub fn aStore(self: *Computer) void {
-    self.a = self.data_stack.pop();
+pub fn aStore(c: *Computer) void {
+    c.a = c.data_stack.pop();
 }
 
 test aStore {
