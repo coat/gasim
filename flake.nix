@@ -29,10 +29,11 @@
           target = builtins.replaceStrings ["darwin"] ["macos"] system;
         in {
           devShells.${system}.default = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [
-              kcov
-              zig
-            ];
+            nativeBuildInputs = with pkgs;
+              [
+                zig
+              ]
+              ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [kcov]);
           };
 
           formatter.${system} = pkgs.alejandra;
