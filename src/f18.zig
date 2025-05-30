@@ -11,7 +11,7 @@ const ProgramCounter = packed struct(u10) {
 
     /// Within RAM or ROM, an address is incremented after each word is fetched,
     /// circularly within whichever storage class it currently points to. Within I/O
-    /// space, it is not incremented.
+    /// space, it is not incremented. Incrementing never affects bits P8 or P9
     pub fn increment(self: *ProgramCounter) void {
         if (!self.address.io) self.address.local +%= 1;
     }
@@ -85,6 +85,15 @@ pub const Instruction = packed struct(Word) {
     slot_2: Opcode,
     slot_1: Opcode,
     slot_0: Opcode,
+
+    pub fn getSlot(self: Instruction, slot: u2) Opcode {
+        return switch (slot) {
+            0 => self.slot_0,
+            1 => self.slot_1,
+            2 => self.slot_2,
+            3 => Opcode.fromInt(self.slot_3),
+        };
+    }
 };
 
 /// An F18A computer
@@ -130,28 +139,18 @@ pub const Computer = struct {
                 self.slot = 0;
                 self.state = .execution;
                 current_slot: switch (self.slot) {
-                    0 => {
-                        _ = self.execute(instruction.slot_0);
-                        if (self.state != .execution) continue :current_state self.state;
-                        continue :current_slot self.slot;
-                    },
-                    1 => {
-                        _ = self.execute(instruction.slot_1);
-                        if (self.state != .execution) continue :current_state self.state;
-                        continue :current_slot self.slot;
-                    },
-                    2 => {
-                        _ = self.execute(instruction.slot_2);
+                    0...2 => {
+                        _ = self.execute(instruction.getSlot(self.slot));
                         if (self.state != .execution) continue :current_state self.state;
                         continue :current_slot self.slot;
                     },
                     3 => {
                         _ = self.execute(Opcode.fromInt(instruction.slot_3));
                         if (self.state != .execution) continue :current_state self.state;
-                        return;
+                        break :current_state;
                     },
                 }
-                continue :current_state self.state;
+                return;
             },
             .unext => {
                 const r = self.return_stack.t;
@@ -368,6 +367,21 @@ test ShortJump {
 
     const short_jump: ShortJump = .{ .destination = 0b101 };
     try expectEqual(word, @as(Word, @bitCast(short_jump)));
+}
+
+test Instruction {
+    const instruction: Instruction = .{
+        .slot_0 = .@"@p",
+        .slot_1 = .@";",
+        .slot_2 = .@";",
+        .slot_3 = 1,
+    };
+
+    try expectEqual(0b010000000000000001, @as(Word, @bitCast(instruction)));
+    try expectEqual(instruction.getSlot(0), instruction.slot_0);
+    try expectEqual(instruction.getSlot(1), instruction.slot_1);
+    try expectEqual(instruction.getSlot(2), instruction.slot_2);
+    try expectEqual(instruction.getSlot(3), .unext);
 }
 
 test "computer is initialized" {
