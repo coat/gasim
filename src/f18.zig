@@ -98,6 +98,12 @@ pub const Instruction = packed struct(Word) {
 
 /// An F18A computer
 pub const Computer = struct {
+    const State = enum {
+        fetch,
+        execution,
+        unext,
+        next,
+    };
     /// control and status for communication ports and I/O logic.
     io: Word,
     /// serves as a "program computer"
@@ -114,24 +120,19 @@ pub const Computer = struct {
     return_stack: stack.ReturnStack,
     data_stack: stack.DataStack,
 
-    state: enum {
-        fetch,
-        execution,
-        unext,
-        next,
-    },
+    state: State = .fetch,
 
     slot: u2,
 
     pub fn step(self: *Computer) void {
-        self.state = .fetch;
-        self.i = self.mem[self.p.address.local];
-        const instruction: Instruction = @bitCast(self.i);
+        var instruction: Instruction = undefined;
 
-        self.p.increment();
-
-        current_state: switch (self.state) {
+        current_state: switch (State.fetch) {
             .fetch => {
+                self.i = self.mem[self.p.address.local];
+                instruction = @bitCast(self.i);
+
+                self.p.increment();
                 continue :current_state .execution;
             },
             .execution => {
@@ -149,7 +150,6 @@ pub const Computer = struct {
                         break :current_state;
                     },
                 }
-                return;
             },
             .unext => {
                 if (self.return_stack.t == 0) {
