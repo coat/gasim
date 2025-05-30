@@ -468,10 +468,13 @@ test inv {
 /// +
 ///
 /// **Plus**. Replaces T with the twos complement sum of S and T. Pops data stack into S. This instruction is affected in Extended Arithmetic Mode, becoming **Add with carry**. Includes the latched carry in the sum, and latches the carry out from bit 17.
-/// TODO: handle add with carry
 pub fn add(self: *Computer) void {
-    const result, const overflow = @addWithOverflow(self.data_stack.s, self.data_stack.pop());
-    _ = overflow;
+    var result: f18.Word = 0;
+    if (self.p.extended_arithmetic) {
+        result, self.carry = @addWithOverflow(self.data_stack.s + self.carry, self.data_stack.pop());
+    } else {
+        result = self.data_stack.s + self.data_stack.pop();
+    }
     self.data_stack.push(result);
 }
 
@@ -482,6 +485,24 @@ test add {
 
     add(&computer);
     try expectEqual(0x579, computer.data_stack.t);
+}
+
+test "add in extended_arithmetic mode" {
+    var computer: Computer = .reset;
+    computer.p.extended_arithmetic = true;
+    computer.data_stack.push(0x123);
+    computer.data_stack.push(0x456);
+
+    add(&computer);
+    try expectEqual(0x579, computer.data_stack.t);
+    try expectEqual(0, computer.carry);
+
+    computer.data_stack.push(0x1ffff);
+    computer.data_stack.push(0x1ffff);
+
+    add(&computer);
+    try expectEqual(-2, computer.data_stack.t);
+    try expectEqual(1, computer.carry);
 }
 
 /// and
