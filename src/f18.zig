@@ -119,7 +119,6 @@ pub const Computer = struct {
         execution,
         unext,
         next,
-        skip,
     },
 
     slot: u2,
@@ -153,27 +152,13 @@ pub const Computer = struct {
                 return;
             },
             .unext => {
-                const r = self.return_stack.t;
-                if (r == 0) {
+                if (self.return_stack.t == 0) {
                     _ = self.return_stack.pop();
                     return;
-                } else {
-                    self.return_stack.t -= 1;
                 }
                 continue :current_state .execution;
             },
             .next => {
-                const r = self.return_stack.t;
-                if (r == 0) {
-                    _ = self.return_stack.pop();
-                } else {
-                    self.return_stack.t -= 1;
-                    self.p.jump(self.slot, self.i);
-                }
-
-                return;
-            },
-            .skip => {
                 return;
             },
         }
@@ -182,8 +167,8 @@ pub const Computer = struct {
     pub fn execute(self: *Computer, opcode: Opcode) f64 {
         const code: u5 = @intCast(@intFromEnum(opcode));
         switch (code) {
-            0x00...0x03 => {
-                self.state = .skip;
+            0x00...0x03, 0x05...0x07 => {
+                self.state = .next;
                 opcodes.opcodes[code](self);
 
                 return 5.1;
@@ -193,12 +178,6 @@ pub const Computer = struct {
                 opcodes.opcodes[code](self);
 
                 return 2.0;
-            },
-            0x05...0x07 => {
-                self.state = .next;
-                opcodes.opcodes[code](self);
-
-                return 5.1;
             },
             else => {
                 self.state = .execution;
