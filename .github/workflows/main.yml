@@ -42,7 +42,7 @@ jobs:
         run: nix develop -c zig fmt --check .
 
       - name: Run tests with coverage
-        run: nix develop -c zig build --summary all -Dcoverage -Dtarget=${{ matrix.target }}
+        run: nix develop -c zig build test -Dcoverage -Dtarget=${{ matrix.target }} --summary all
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
