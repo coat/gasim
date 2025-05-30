@@ -35,6 +35,8 @@ jobs:
       # Run our checks to catch quick issues
       - run: nix flake check
 
+      - run: nix develop -c zig env
+
       - name: Run zig fmt
         if: matrix.os == 'ubuntu-latest'
         run: nix develop -c zig fmt --check .
