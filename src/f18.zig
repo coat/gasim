@@ -1,6 +1,6 @@
 //! F18A is a 18-bit computer architecture designed by Chuck Moore.
 
-pub const Word = u18;
+pub const Word = i18;
 
 /// type used by the P register
 const ProgramCounter = packed struct(u10) {

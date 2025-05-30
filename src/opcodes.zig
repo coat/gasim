@@ -382,10 +382,10 @@ pub fn shl(self: *Computer) void {
 
 test shl {
     var computer: Computer = .reset;
-    computer.data_stack.t = 0b101010101010101010;
+    computer.data_stack.t = 0b00101010101010101;
 
     shl(&computer);
-    try expectEqual(0b010101010101010100, computer.data_stack.t);
+    try expectEqual(0b1010101010101010, computer.data_stack.t);
 }
 
 /// 2/
@@ -397,10 +397,10 @@ pub fn shr(self: *Computer) void {
 
 test shr {
     var computer: Computer = .reset;
-    computer.data_stack.t = 0b101010101010101010;
+    computer.data_stack.t = 0b001010101010101010;
 
     shr(&computer);
-    try expectEqual(0b010101010101010101, computer.data_stack.t);
+    try expectEqual(0b101010101010101, computer.data_stack.t);
 }
 
 /// inv
@@ -412,14 +412,14 @@ pub fn inv(self: *Computer) void {
 
 test inv {
     var computer: Computer = .reset;
-    computer.data_stack.t = 0b101010101010101010;
+    computer.data_stack.t = 0b001010101010101010;
 
     inv(&computer);
-    try expectEqual(0b010101010101010101, computer.data_stack.t);
+    try expectEqual(-0b1010101010101011, computer.data_stack.t);
 
     computer.data_stack.t = 0;
     inv(&computer);
-    try expectEqual(0x3ffff, computer.data_stack.t);
+    try expectEqual(-1, computer.data_stack.t);
 }
 
 /// +
