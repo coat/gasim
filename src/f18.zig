@@ -40,81 +40,6 @@ const ProgramCounter = packed struct(u10) {
     };
 };
 
-test "ProgramCounter is reset" {
-    var p: ProgramCounter = .reset;
-    try expectEqual(false, p.extended_arithmetic);
-    try expectEqual(Address.reset, p.address);
-    p.address.io = true;
-    p.address.rom = false;
-}
-
-test "I/O address is not incremented" {
-    const io_address: Address = .{ .io = true, .rom = false, .local = 0x00 };
-    var p: ProgramCounter = .{ .address = io_address, .extended_arithmetic = false };
-    p.increment();
-    try expectEqual(0x00, p.address.local);
-}
-
-test "RAM address is incremented" {
-    const ram_address: Address = .{ .io = false, .rom = false, .local = 0x0a };
-    var p: ProgramCounter = .{ .address = ram_address, .extended_arithmetic = false };
-    p.increment();
-    try expectEqual(0x0b, p.address.local);
-
-    // RAM address wraps
-    p.address.local = 0x7f;
-    p.increment();
-    try expectEqual(0, p.address.local);
-}
-
-test "ROM address is incremented" {
-    const rom_address: Address = .{ .io = false, .rom = true, .local = 0x0a };
-    var p: ProgramCounter = .{ .address = rom_address, .extended_arithmetic = false };
-    p.increment();
-    try expectEqual(0x0b, p.address.local);
-
-    // ROM address wraps
-    p.address.local = 0x7f;
-    p.increment();
-    try expectEqual(0, p.address.local);
-}
-
-test "long jump" {
-    var p: ProgramCounter = .reset;
-
-    const instruction: Word = @bitCast(LongJump{ .destination = 0b1100000010 });
-    p.jump(0, instruction);
-
-    try expectEqual(true, p.extended_arithmetic);
-    try expectEqual(true, p.address.io);
-    try expectEqual(false, p.address.rom);
-    try expectEqual(0b10, p.address.local);
-}
-
-test "jump" {
-    var p: ProgramCounter = .reset;
-
-    const instruction: Word = @bitCast(Jump{ .destination = 0b0101010 });
-    p.jump(1, instruction);
-
-    try expectEqual(false, p.extended_arithmetic);
-    try expectEqual(false, p.address.io);
-    try expectEqual(true, p.address.rom);
-    try expectEqual(0b0101010, p.address.local);
-}
-
-test "short jump" {
-    var p: ProgramCounter = .reset;
-
-    const instruction: Word = @bitCast(ShortJump{ .destination = 0b101 });
-    p.jump(2, instruction);
-
-    try expectEqual(false, p.extended_arithmetic);
-    try expectEqual(false, p.address.io);
-    try expectEqual(true, p.address.rom);
-    try expectEqual(0b101, p.address.local);
-}
-
 /// Address is a 9-bit value that points to a location in memory or
 /// memory-mapped I/O.
 pub const Address = packed struct(u9) {
@@ -139,40 +64,10 @@ pub const Address = packed struct(u9) {
     };
 };
 
-test "address is set on reset" {
-    // reset
-    const reset_address: Address = .reset;
-    try expectEqual(reset_address.io, false);
-    try expectEqual(reset_address.rom, true);
-    try expectEqual(reset_address.local, 0x42);
-}
-
-test "toWord" {
-    const address: Address = .reset;
-
-    try expectEqual(0xc2, address.toWord());
-}
-
-test "fromWord" {
-    const word: Word = 0b0000000011100010;
-    const address: Address = Address.fromWord(word);
-
-    try expectEqual(false, address.io);
-    try expectEqual(true, address.rom);
-    try expectEqual(0b1100010, address.local);
-}
-
 pub const LongJump = packed struct(Word) {
     destination: u10,
     _: u8 = 0,
 };
-
-test LongJump {
-    const word: Word = 0b000000001111111101;
-
-    const long_jump: LongJump = .{ .destination = 0b1111111101 };
-    try expectEqual(word, @as(Word, @bitCast(long_jump)));
-}
 
 pub const Jump = packed struct(Word) {
     destination: u7,
@@ -180,26 +75,10 @@ pub const Jump = packed struct(Word) {
     _: u10 = 0,
 };
 
-test Jump {
-    const word: Word = 0b000000000001010101;
-
-    const jump: Jump = .{ .destination = 0b1010101 };
-    try expectEqual(word, @as(Word, @bitCast(jump)));
-    try expectEqual(word, jump.destination);
-    try expectEqual(0, jump._);
-}
-
 pub const ShortJump = packed struct(Word) {
     destination: u3,
     _: u15 = 0,
 };
-
-test ShortJump {
-    const word: Word = 0b101;
-
-    const short_jump: ShortJump = .{ .destination = 0b101 };
-    try expectEqual(word, @as(Word, @bitCast(short_jump)));
-}
 
 pub const Instruction = packed struct(Word) {
     slot_3: u3,
@@ -369,6 +248,127 @@ pub const Computer = struct {
         .slot = 0,
     };
 };
+
+test "ProgramCounter is reset" {
+    var p: ProgramCounter = .reset;
+    try expectEqual(false, p.extended_arithmetic);
+    try expectEqual(Address.reset, p.address);
+    p.address.io = true;
+    p.address.rom = false;
+}
+
+test "I/O address is not incremented" {
+    const io_address: Address = .{ .io = true, .rom = false, .local = 0x00 };
+    var p: ProgramCounter = .{ .address = io_address, .extended_arithmetic = false };
+    p.increment();
+    try expectEqual(0x00, p.address.local);
+}
+
+test "RAM address is incremented" {
+    const ram_address: Address = .{ .io = false, .rom = false, .local = 0x0a };
+    var p: ProgramCounter = .{ .address = ram_address, .extended_arithmetic = false };
+    p.increment();
+    try expectEqual(0x0b, p.address.local);
+
+    // RAM address wraps
+    p.address.local = 0x7f;
+    p.increment();
+    try expectEqual(0, p.address.local);
+}
+
+test "ROM address is incremented" {
+    const rom_address: Address = .{ .io = false, .rom = true, .local = 0x0a };
+    var p: ProgramCounter = .{ .address = rom_address, .extended_arithmetic = false };
+    p.increment();
+    try expectEqual(0x0b, p.address.local);
+
+    // ROM address wraps
+    p.address.local = 0x7f;
+    p.increment();
+    try expectEqual(0, p.address.local);
+}
+
+test "long jump" {
+    var p: ProgramCounter = .reset;
+
+    const instruction: Word = @bitCast(LongJump{ .destination = 0b1100000010 });
+    p.jump(0, instruction);
+
+    try expectEqual(true, p.extended_arithmetic);
+    try expectEqual(true, p.address.io);
+    try expectEqual(false, p.address.rom);
+    try expectEqual(0b10, p.address.local);
+}
+
+test "jump" {
+    var p: ProgramCounter = .reset;
+
+    const instruction: Word = @bitCast(Jump{ .destination = 0b0101010 });
+    p.jump(1, instruction);
+
+    try expectEqual(false, p.extended_arithmetic);
+    try expectEqual(false, p.address.io);
+    try expectEqual(true, p.address.rom);
+    try expectEqual(0b0101010, p.address.local);
+}
+
+test "short jump" {
+    var p: ProgramCounter = .reset;
+
+    const instruction: Word = @bitCast(ShortJump{ .destination = 0b101 });
+    p.jump(2, instruction);
+
+    try expectEqual(false, p.extended_arithmetic);
+    try expectEqual(false, p.address.io);
+    try expectEqual(true, p.address.rom);
+    try expectEqual(0b101, p.address.local);
+}
+
+test "address is set on reset" {
+    // reset
+    const reset_address: Address = .reset;
+    try expectEqual(reset_address.io, false);
+    try expectEqual(reset_address.rom, true);
+    try expectEqual(reset_address.local, 0x42);
+}
+
+test "toWord" {
+    const address: Address = .reset;
+
+    try expectEqual(0xc2, address.toWord());
+}
+
+test "fromWord" {
+    const word: Word = 0b0000000011100010;
+    const address: Address = Address.fromWord(word);
+
+    try expectEqual(false, address.io);
+    try expectEqual(true, address.rom);
+    try expectEqual(0b1100010, address.local);
+}
+
+test LongJump {
+    const word: Word = 0b000000001111111101;
+
+    const long_jump: LongJump = .{ .destination = 0b1111111101 };
+    try expectEqual(word, @as(Word, @bitCast(long_jump)));
+}
+
+test Jump {
+    const word: Word = 0b000000000001010101;
+
+    const jump: Jump = .{ .destination = 0b1010101 };
+    try expectEqual(word, @as(Word, @bitCast(jump)));
+    try expectEqual(word, jump.destination);
+    try expectEqual(0, jump._);
+}
+
+test ShortJump {
+    const word: Word = 0b101;
+
+    const short_jump: ShortJump = .{ .destination = 0b101 };
+    try expectEqual(word, @as(Word, @bitCast(short_jump)));
+}
 
 test "computer is initialized" {
     const computer: Computer = .reset;
