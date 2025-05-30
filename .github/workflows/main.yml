@@ -14,13 +14,13 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         target: [
-          # aarch64-linux-gnu,
-          # aarch64-linux-musl,
+          aarch64-linux-gnu,
+          aarch64-linux-musl,
           x86_64-linux-gnu,
           x86_64-linux-musl,
-          # aarch64-macos,
-          # x86_64-macos,
-          # x86_64-windows-gnu
+          aarch64-macos,
+          x86_64-macos,
+          x86_64-windows-gnu
         ]
     runs-on: ${{ matrix.os }}
     steps:
