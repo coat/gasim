@@ -32,7 +32,6 @@
           zls = zls-pkg.packages.${system}.default;
           gitignoreSource = gitignore.lib.gitignoreSource;
           target = builtins.replaceStrings ["darwin"] ["macos"] system;
-
         in {
           devShells.${system}.default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
