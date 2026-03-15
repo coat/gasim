@@ -4,16 +4,6 @@ A cross-platform simulator for the [GreenArrays,
 Inc.](https://www.greenarraychips.com) [GA144 multi-computer
 chip](https://www.greenarraychips.com/home/documents/index.php#GA144).
 
-## Building
-
-To build `gasim`, [zig 0.14.0](https://ziglang.org/download/) is required.
-
-```bash
-zig build -Doptimize=ReleaseFast
-```
-
-`gasim` executable will be available in `./zig-out/bin/gasim`.
-
 ## Usage
 
 ```bash
@@ -24,7 +14,23 @@ Currently, this just launches the simulator with node 001's RAM and ROM loaded
 with the contents of the provided binary file.
 
 The expected file format is 288 8-bit bytes, with the first 144 bytes
-containing the RAM contents and the next 144 bytes containing the ROM contents.
+containing the RAM contents and the next 144 bytes containing the ROM.
+
+## Download
+
+[Download](https://sadbeast.com/gasim/download.html) a static binary for your operating system.
+
+If you have Nix installed, try `nix run github:coat/gasim#`.
+
+## Building
+
+To build `gasim`, [zig 0.16.0-dev](https://ziglang.org/download/) is required.
+
+```bash
+zig build -Doptimize=ReleaseFast
+```
+
+`gasim` will be available in `./zig-out/bin/gasim`.
 
 ### TODO
 
@@ -33,7 +39,7 @@ containing the RAM contents and the next 144 bytes containing the ROM contents.
 
 ## Prior Art
 
-- GreenArrays own SOFTSIM available in their free [arrayForth
+- GreenArrays' own SOFTSIM available in their free [arrayForth
 distribution](https://www.greenarraychips.com/home/support/download-03d.php).
 Works well under wine.
 - [AshleyF/Color](https://github.com/AshleyF/Color) - A colorForth editor,
@@ -47,7 +53,7 @@ from an [alternative toolchain](https://github.com/mschuldt/ga-tools).
 series](https://github.com/AshleyF/Color/blob/master/Docs/chuck_moores_creations.md)
 by [AshleyF](https://github.com/AshleyF) that introduces the F18 architecture
 and instruction set.
-- GreenArrays own concise, but very informative
+- GreenArrays' own concise, but very informative
 [documentation](https://www.greenarraychips.com/home/documents/index.php) on
 the GA144 chip and F18 architecture.
 - [colorForth instruction

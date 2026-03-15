@@ -21,7 +21,7 @@ pub const DataStack = struct {
         return old_t;
     }
 
-    pub const empty: @This() = .{
+    pub const empty: DataStack = .{
         .stack = @splat(0),
         .index = 0,
         .t = 0,
@@ -49,7 +49,7 @@ pub const ReturnStack = struct {
         return old_t;
     }
 
-    pub const empty: @This() = .{
+    pub const empty: ReturnStack = .{
         .stack = @splat(0),
         .index = 0,
         .t = 0,
