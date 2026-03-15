@@ -2,6 +2,14 @@
 
 pub const Word = i18;
 
+const Slot = enum(u2) {
+    _,
+
+    pub fn slot(num: u2) Slot {
+        return @enumFromInt(num);
+    }
+};
+
 /// type used by the P register
 const ProgramCounter = packed struct(u10) {
     /// holds the address of the next word in the instruction stream
@@ -16,17 +24,17 @@ const ProgramCounter = packed struct(u10) {
         if (!self.address.io) self.address.local +%= 1;
     }
 
-    pub fn jump(self: *ProgramCounter, slot: u2, instruction: Word) void {
+    pub fn jump(self: *ProgramCounter, slot: Slot, instruction: Word) void {
         return switch (slot) {
-            0 => {
+            .slot(0) => {
                 const long_jump: LongJump = @bitCast(instruction);
                 self.* = @bitCast(@as(u10, @intCast(long_jump.destination)));
             },
-            1 => {
+            .slot(1) => {
                 const med_jump: Jump = @bitCast(instruction);
                 self.address.local = (self.address.local & ~@as(u7, 0b1111111)) | (med_jump.destination & 0b1111111);
             },
-            2 => {
+            .slot(2) => {
                 const short_jump: ShortJump = @bitCast(instruction);
                 self.address.local = (self.address.local & ~@as(u3, 0b111)) | (short_jump.destination & 0b111);
             },
@@ -86,12 +94,13 @@ pub const Instruction = packed struct(Word) {
     slot_1: Opcode,
     slot_0: Opcode,
 
-    pub fn getSlot(self: Instruction, slot: u2) Opcode {
+    pub fn getSlot(self: Instruction, slot: Slot) Opcode {
         return switch (slot) {
-            0 => self.slot_0,
-            1 => self.slot_1,
-            2 => self.slot_2,
-            3 => Opcode.fromInt(self.slot_3),
+            .slot(0) => self.slot_0,
+            .slot(1) => self.slot_1,
+            .slot(2) => self.slot_2,
+            .slot(3) => Opcode.fromInt(self.slot_3),
+            else => unreachable,
         };
     }
 };
@@ -125,7 +134,7 @@ pub const Computer = struct {
 
     state: State = .fetch,
     // keeps track of current slot to help address decoding
-    slot: u2,
+    slot: Slot,
 
     execution_time: f32,
 
@@ -141,13 +150,13 @@ pub const Computer = struct {
                 continue :current_state .execution;
             },
             .execution => {
-                self.slot = 0;
+                self.slot = .slot(0);
                 self.state = .execution;
-                current_slot: switch (self.slot) {
+                current_slot: switch (@intFromEnum(self.slot)) {
                     0...2 => {
                         self.execute(instruction.getSlot(self.slot));
                         if (self.state != .execution) continue :current_state self.state;
-                        continue :current_slot self.slot;
+                        continue :current_slot @intFromEnum(self.slot);
                     },
                     3 => {
                         self.execute(instruction.getSlot(self.slot));
@@ -163,9 +172,7 @@ pub const Computer = struct {
                 }
                 continue :current_state .execution;
             },
-            .next => {
-                return;
-            },
+            .next => return,
         }
     }
 
@@ -186,7 +193,7 @@ pub const Computer = struct {
             },
             else => {
                 self.state = .execution;
-                self.slot +%= 1;
+                self.slot = @enumFromInt(@intFromEnum(self.slot) +% 1);
                 opcodes.opcodes[code](self);
 
                 break :time 1.5;
@@ -227,10 +234,10 @@ pub const Computer = struct {
 
         .carry = 0,
 
-        .mem = [_]Word{0} ** 128,
+        .mem = @splat(0),
 
         .state = .fetch,
-        .slot = 0,
+        .slot = .slot(0),
         .execution_time = 0.0,
     };
 };
@@ -278,7 +285,7 @@ test "long jump" {
     var p: ProgramCounter = .reset;
 
     const instruction: Word = @bitCast(LongJump{ .destination = 0b1100000010 });
-    p.jump(0, instruction);
+    p.jump(.slot(0), instruction);
 
     try expectEqual(true, p.extended_arithmetic);
     try expectEqual(true, p.address.io);
@@ -290,7 +297,7 @@ test "jump" {
     var p: ProgramCounter = .reset;
 
     const instruction: Word = @bitCast(Jump{ .destination = 0b0101010 });
-    p.jump(1, instruction);
+    p.jump(.slot(1), instruction);
 
     try expectEqual(false, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
@@ -302,7 +309,7 @@ test "short jump" {
     var p: ProgramCounter = .reset;
 
     const instruction: Word = @bitCast(ShortJump{ .destination = 0b101 });
-    p.jump(2, instruction);
+    p.jump(.slot(2), instruction);
 
     try expectEqual(false, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
@@ -365,10 +372,10 @@ test Instruction {
     };
 
     try expectEqual(0b010000000000000001, @as(Word, @bitCast(instruction)));
-    try expectEqual(instruction.getSlot(0), instruction.slot_0);
-    try expectEqual(instruction.getSlot(1), instruction.slot_1);
-    try expectEqual(instruction.getSlot(2), instruction.slot_2);
-    try expectEqual(instruction.getSlot(3), .unext);
+    try expectEqual(instruction.getSlot(.slot(0)), instruction.slot_0);
+    try expectEqual(instruction.getSlot(.slot(1)), instruction.slot_1);
+    try expectEqual(instruction.getSlot(.slot(2)), instruction.slot_2);
+    try expectEqual(instruction.getSlot(.slot(3)), .unext);
 }
 
 test "computer is initialized" {
