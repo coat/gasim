@@ -56,8 +56,8 @@ pub const Address = packed struct(u9) {
     io: bool,
 
     pub fn toWord(self: Address) Word {
-        const foo: u9 = @bitCast(self);
-        return @intCast(foo);
+        const word: u9 = @bitCast(self);
+        return @intCast(word);
     }
 
     pub fn fromWord(word: Word) Address {
