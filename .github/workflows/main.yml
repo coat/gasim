@@ -71,7 +71,7 @@ jobs:
         run: nix develop -c zig build test -Dcoverage -Dtarget=x86_64-linux-musl --summary all
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           directory: zig-out/coverage/kcov-merged
           fail_ci_if_error: true
