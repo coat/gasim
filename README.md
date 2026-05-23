@@ -24,7 +24,7 @@ If you have Nix installed, try `nix run github:coat/gasim#`.
 
 ## Building
 
-To build `gasim`, [zig 0.16.0-dev](https://ziglang.org/download/) is required.
+To build `gasim`, [zig 0.16.0](https://ziglang.org/download/) is required.
 
 ```bash
 zig build -Doptimize=ReleaseFast
