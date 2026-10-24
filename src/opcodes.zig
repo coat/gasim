@@ -469,22 +469,32 @@ test inv {
 ///
 /// **Plus**. Replaces T with the twos complement sum of S and T. Pops data stack into S. This instruction is affected in Extended Arithmetic Mode, becoming **Add with carry**. Includes the latched carry in the sum, and latches the carry out from bit 17.
 pub fn add(c: *Computer) void {
-    var result: f18.Word = 0;
+    const t = c.data_stack.pop();
     if (c.p.extended_arithmetic) {
-        result, c.carry = @addWithOverflow(c.data_stack.s + c.carry, c.data_stack.pop());
+        const sum = @as(u19, @as(u18, @bitCast(c.data_stack.t))) + @as(u18, @bitCast(t)) + c.carry;
+        c.carry = @truncate(sum >> 18);
+        c.data_stack.t = @bitCast(@as(u18, @truncate(sum)));
     } else {
-        result = c.data_stack.s + c.data_stack.pop();
+        c.data_stack.t +%= t;
     }
-    c.data_stack.push(result);
 }
 
 test add {
     var computer: Computer = .reset;
+    computer.data_stack.push(0x99);
     computer.data_stack.push(0x123);
     computer.data_stack.push(0x456);
 
     add(&computer);
     try expectEqual(0x579, computer.data_stack.t);
+    try expectEqual(0x99, computer.data_stack.s);
+    try expectEqual(2, computer.data_stack.index);
+
+    // wraps instead of overflowing
+    computer.data_stack.push(0x1ffff);
+    computer.data_stack.push(1);
+    add(&computer);
+    try expectEqual(-0x20000, computer.data_stack.t);
 }
 
 test "add in extended_arithmetic mode" {
@@ -501,40 +511,62 @@ test "add in extended_arithmetic mode" {
     computer.data_stack.push(0x1ffff);
 
     add(&computer);
-    try expectEqual(-2, computer.data_stack.t);
+    try expectEqual(0x3fffe, @as(u18, @bitCast(computer.data_stack.t)));
+    try expectEqual(0, computer.carry);
+
+    // carry out of bit 17 without signed overflow
+    computer.data_stack.push(-1);
+    computer.data_stack.push(1);
+    add(&computer);
+    try expectEqual(0, computer.data_stack.t);
     try expectEqual(1, computer.carry);
+
+    // latched carry is included in the sum
+    computer.data_stack.push(0x10);
+    computer.data_stack.push(0x20);
+    add(&computer);
+    try expectEqual(0x31, computer.data_stack.t);
+    try expectEqual(0, computer.carry);
 }
 
 /// and
 ///
 /// Replaces T with the Boolean AND of S and T. Pops data stack.
 pub fn _and(c: *Computer) void {
-    c.data_stack.push(c.data_stack.s & c.data_stack.pop());
+    const t = c.data_stack.pop();
+    c.data_stack.t &= t;
 }
 
 test _and {
     var computer: Computer = .reset;
+    computer.data_stack.push(0x99);
     computer.data_stack.push(0b101);
     computer.data_stack.push(0b110);
 
     _and(&computer);
     try expectEqual(0b100, computer.data_stack.t);
+    try expectEqual(0x99, computer.data_stack.s);
+    try expectEqual(2, computer.data_stack.index);
 }
 
 /// xor
 ///
 /// **Exclusive Or**. Replaces T with the Boolean XOR of S and T. Pops data stack.
 pub fn xor(c: *Computer) void {
-    c.data_stack.push(c.data_stack.s ^ c.data_stack.pop());
+    const t = c.data_stack.pop();
+    c.data_stack.t ^= t;
 }
 
 test xor {
     var computer: Computer = .reset;
+    computer.data_stack.push(0x99);
     computer.data_stack.push(0b101);
     computer.data_stack.push(0b110);
 
     xor(&computer);
     try expectEqual(0b011, computer.data_stack.t);
+    try expectEqual(0x99, computer.data_stack.s);
+    try expectEqual(2, computer.data_stack.index);
 }
 
 /// drop
