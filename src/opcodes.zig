@@ -335,10 +335,35 @@ test fetchP {
 ///
 /// **Fetch-plus**. Pushes data stack, reads [A] into T, and increments A
 pub fn fetchPlus(c: *Computer) void {
-    var address = Address.fromWord(c.a);
-    c.data_stack.push(c.fetch(address));
-    address.local +%= 1;
-    c.a = address.toWord();
+    c.data_stack.push(c.fetch(Address.fromWord(c.a)));
+    incrementA(c);
+}
+
+/// Increments A the same way as P: only the low 7 bits change, wrapping from
+/// x07F to x000, and A is not incremented at all when it addresses I/O space.
+fn incrementA(c: *Computer) void {
+    const value: u18 = @bitCast(c.a);
+    if (value & 0x100 != 0) return;
+    c.a = @bitCast((value & ~@as(u18, 0x7f)) | ((value +% 1) & 0x7f));
+}
+
+test incrementA {
+    var computer: Computer = .reset;
+
+    // high bits are preserved and the low 7 bits wrap
+    computer.a = @bitCast(@as(u18, 0x3fe7f));
+    incrementA(&computer);
+    try expectEqual(@as(Word, @bitCast(@as(u18, 0x3fe00))), computer.a);
+
+    // ROM addresses stay in ROM
+    computer.a = 0x0ff;
+    incrementA(&computer);
+    try expectEqual(0x080, computer.a);
+
+    // I/O addresses are not incremented
+    computer.a = 0x15d;
+    incrementA(&computer);
+    try expectEqual(0x15d, computer.a);
 }
 
 test fetchPlus {
@@ -406,11 +431,8 @@ test storeP {
 ///
 /// **Store-plus**. Writes T into [A], pops the data stack, and increments A
 pub fn storePlus(c: *Computer) void {
-    var address = Address.fromWord(c.a);
-    c.store(address, c.data_stack.pop());
-
-    address.local +%= 1;
-    c.a = address.toWord();
+    c.store(Address.fromWord(c.a), c.data_stack.pop());
+    incrementA(c);
 }
 
 test storePlus {
