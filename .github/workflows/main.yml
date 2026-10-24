@@ -70,6 +70,16 @@ jobs:
       - name: Run tests with coverage
         run: nix develop -c zig build test -Dcoverage -Dtarget=x86_64-linux-musl --summary all
 
+      # Codecov happily accepts an empty report, so fail if kcov found nothing
+      - name: Check coverage report is not empty
+        run: |
+          total_lines=$(jq .total_lines zig-out/coverage/kcov-merged/coverage.json)
+          echo "total_lines: $total_lines"
+          if [ "$total_lines" -eq 0 ]; then
+            echo "::error::Coverage report is empty (total_lines is 0)"
+            exit 1
+          fi
+
       - name: Upload to Codecov
         uses: codecov/codecov-action@v7
         with:

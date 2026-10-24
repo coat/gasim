@@ -70,7 +70,8 @@ pub fn build(b: *std.Build) void {
             // prepend the kcov exec args
             const argv = step.argv.toOwnedSlice(b.allocator) catch @panic("OOM");
             step.addArgs(&.{ kcov_bin, "--collect-only" });
-            step.addPrefixedDirectoryArg("--include-pattern=", b.path("src"));
+            // kcov matches against the absolute paths in the debug info
+            step.addDirectoryArg2(b.path("src"), .{ .prefix = "--include-pattern=", .make_absolute = true });
             merge_step.addDirectoryArg(step.addOutputFileArg(step.producer.?.name));
             step.argv.appendSlice(b.allocator, argv) catch @panic("OOM");
         }
