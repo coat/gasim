@@ -48,9 +48,23 @@ pub fn build(b: *std.Build) void {
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const example_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "gasim", .module = mod },
+            },
+        }),
+    });
+
+    const run_example_tests = b.addRunArtifact(example_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_example_tests.step);
 
     if (coverage) {
         var run_test_steps: std.ArrayList(*std.Build.Step.Run) = .empty;

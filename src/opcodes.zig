@@ -42,8 +42,7 @@ pub const Opcode = enum(u5) {
     // zig fmt: on
 
     pub fn fromInt(value: u3) Opcode {
-        const full_code = @as(u5, @intCast(value)) << 2;
-        return @fromBackingInt(@intCast(full_code));
+        return @fromBackingInt(@as(u5, value) << 2);
     }
 };
 
@@ -149,7 +148,7 @@ test "slot 0 jump" {
 
 test "slot 1 jump" {
     var computer: Computer = .reset;
-    computer.slot = .slot(1);
+    computer.slot = 1;
     const expected_dest: u7 = 0b1111101;
     computer.i = @bitCast(f18.Jump{ .destination = expected_dest });
 
@@ -159,7 +158,7 @@ test "slot 1 jump" {
 
 test "slot 2 jump" {
     var computer: Computer = .reset;
-    computer.slot = .slot(2);
+    computer.slot = 2;
     const expected_dest: u3 = 0b101;
     computer.i = @bitCast(f18.ShortJump{ .destination = expected_dest });
 
@@ -179,7 +178,7 @@ pub fn call(c: *Computer) void {
 test "call and return preserve extended arithmetic mode" {
     var computer: Computer = .reset;
     computer.p.extended_arithmetic = true;
-    computer.slot = .slot(1);
+    computer.slot = 1;
     computer.i = @bitCast(f18.Jump{ .destination = 0x10 });
 
     call(&computer);
@@ -223,9 +222,9 @@ test call {
 pub fn unext(c: *Computer) void {
     if (c.return_stack.t == 0) {
         _ = c.return_stack.pop();
-        c.state = .execution;
     } else {
         c.return_stack.t -%= 1;
+        c.state = .unext;
     }
 }
 
@@ -234,11 +233,12 @@ test unext {
     computer.return_stack.push(0x55);
     computer.return_stack.push(1);
 
-    computer.state = .unext;
+    computer.state = .execution;
     unext(&computer);
     try expectEqual(0, computer.return_stack.t);
     try expectEqual(.unext, computer.state);
 
+    computer.state = .execution;
     unext(&computer);
     try expectEqual(0x55, computer.return_stack.t);
     try expectEqual(.execution, computer.state);
@@ -261,13 +261,19 @@ pub fn next(c: *Computer) void {
 test next {
     var computer: Computer = .reset;
     computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
-    computer.slot = .slot(1);
+    computer.slot = 1;
     computer.return_stack.push(0x123);
 
     next(&computer);
     try expectEqual(0x122, computer.return_stack.t);
-    computer.step();
-    try expectEqual(0x22, computer.p.address.local);
+    try expectEqual(0x44, computer.p.address.local);
+
+    // R is popped once it reaches zero, without jumping
+    computer.return_stack.t = 0;
+    computer.p.address.local = 0x10;
+    next(&computer);
+    try expectEqual(0, computer.return_stack.t);
+    try expectEqual(0x10, computer.p.address.local);
 }
 
 /// if
@@ -282,13 +288,16 @@ pub fn _if(c: *Computer) void {
 test _if {
     var computer: Computer = .reset;
     computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
-    computer.slot = .slot(1);
+    computer.slot = 1;
     computer.data_stack.t = 0;
 
     _if(&computer);
     try expectEqual(0x44, computer.p.address.local);
-    computer.step();
-    try expectEqual(0, computer.p.address.local);
+
+    computer.data_stack.t = 1;
+    computer.p.address.local = 0x10;
+    _if(&computer);
+    try expectEqual(0x10, computer.p.address.local);
 }
 
 /// -if
@@ -304,20 +313,23 @@ pub fn minus_if(c: *Computer) void {
 test minus_if {
     var computer: Computer = .reset;
     computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
-    computer.slot = .slot(1);
+    computer.slot = 1;
     computer.data_stack.t = 1;
 
     minus_if(&computer);
     try expectEqual(0x44, computer.p.address.local);
-    computer.step();
-    try expectEqual(0, computer.p.address.local);
+
+    computer.data_stack.t = -1;
+    computer.p.address.local = 0x10;
+    minus_if(&computer);
+    try expectEqual(0x10, computer.p.address.local);
 }
 
 /// @p
 ///
 /// Pushes data stack, reads [P] into T, and increments P
 pub fn fetchP(c: *Computer) void {
-    c.data_stack.push(c.fetch(c.p.address));
+    c.data_stack.push(c.read(c.p.address) orelse return);
     c.p.increment();
 }
 
@@ -335,7 +347,7 @@ test fetchP {
 ///
 /// **Fetch-plus**. Pushes data stack, reads [A] into T, and increments A
 pub fn fetchPlus(c: *Computer) void {
-    c.data_stack.push(c.fetch(Address.fromWord(c.a)));
+    c.data_stack.push(c.read(Address.fromWord(c.a)) orelse return);
     incrementA(c);
 }
 
@@ -380,7 +392,7 @@ test fetchPlus {
 ///
 /// Fetch-B. Pushes data stack and reads [B] into T.
 pub fn fetchB(c: *Computer) void {
-    c.data_stack.push(c.fetch(Address.fromWord(c.b)));
+    c.data_stack.push(c.read(Address.fromWord(c.b)) orelse return);
 }
 
 test fetchB {
@@ -396,7 +408,7 @@ test fetchB {
 ///
 /// **Fetch**. Pushes data stack and reads [A] into T.
 pub fn fetch(c: *Computer) void {
-    c.data_stack.push(c.fetch(Address.fromWord(c.a)));
+    c.data_stack.push(c.read(Address.fromWord(c.a)) orelse return);
 }
 
 test fetch {
@@ -412,7 +424,8 @@ test fetch {
 ///
 /// **Store-P**. Writes T into [P], pops the data stack, and increments P
 pub fn storeP(c: *Computer) void {
-    c.store(c.p.address, c.data_stack.pop());
+    if (!c.write(c.p.address, c.data_stack.t)) return;
+    _ = c.data_stack.pop();
     c.p.increment();
 }
 
@@ -431,7 +444,8 @@ test storeP {
 ///
 /// **Store-plus**. Writes T into [A], pops the data stack, and increments A
 pub fn storePlus(c: *Computer) void {
-    c.store(Address.fromWord(c.a), c.data_stack.pop());
+    if (!c.write(Address.fromWord(c.a), c.data_stack.t)) return;
+    _ = c.data_stack.pop();
     incrementA(c);
 }
 
@@ -450,7 +464,8 @@ test storePlus {
 ///
 /// **Store-B**. Writes T into [B] and pops the data stack.
 pub fn storeB(c: *Computer) void {
-    c.store(Address.fromWord(c.b), c.data_stack.pop());
+    if (!c.write(Address.fromWord(c.b), c.data_stack.t)) return;
+    _ = c.data_stack.pop();
 }
 
 test storeB {
@@ -467,7 +482,8 @@ test storeB {
 ///
 /// **Store**. Writes T into [A] and pops the data stack.
 pub fn store(c: *Computer) void {
-    c.store(Address.fromWord(c.a), c.data_stack.pop());
+    if (!c.write(Address.fromWord(c.a), c.data_stack.t)) return;
+    _ = c.data_stack.pop();
 }
 
 test store {
