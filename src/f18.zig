@@ -72,7 +72,7 @@ pub const Address = packed struct(u9) {
     pub const reset: Address = .{
         .io = false,
         .rom = true,
-        .local = 0x42,
+        .local = 0x2a,
     };
 };
 
@@ -228,7 +228,7 @@ pub const Computer = struct {
         .io = 0x15555,
         .p = .reset,
         .a = 0,
-        .b = 0,
+        .b = 0x15d,
         .i = 0,
 
         .return_stack = .empty,
@@ -331,10 +331,10 @@ test "slot 1 and 2 jumps force P8 to zero and preserve P9" {
 
 test "ProgramCounter toWord and fromWord keep P9" {
     const p: ProgramCounter = .{ .address = .reset, .extended_arithmetic = true };
-    try expectEqual(0x2c2, p.toWord());
+    try expectEqual(0x2aa, p.toWord());
     try expectEqual(p, ProgramCounter.fromWord(p.toWord()));
     // bits above P9 are ignored
-    try expectEqual(p, ProgramCounter.fromWord(@bitCast(@as(u18, 0x3fec2))));
+    try expectEqual(p, ProgramCounter.fromWord(@bitCast(@as(u18, 0x3feaa))));
 }
 
 test "short jump" {
@@ -346,8 +346,8 @@ test "short jump" {
     try expectEqual(false, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
     try expectEqual(true, p.address.rom);
-    // only the low 3 bits are replaced: x42 -> x45
-    try expectEqual(0x45, p.address.local);
+    // only the low 3 bits are replaced: x2A -> x2D
+    try expectEqual(0x2d, p.address.local);
 }
 
 test "address is set on reset" {
@@ -355,13 +355,13 @@ test "address is set on reset" {
     const reset_address: Address = .reset;
     try expectEqual(reset_address.io, false);
     try expectEqual(reset_address.rom, true);
-    try expectEqual(reset_address.local, 0x42);
+    try expectEqual(reset_address.local, 0x2a);
 }
 
 test "toWord" {
     const address: Address = .reset;
 
-    try expectEqual(0xc2, address.toWord());
+    try expectEqual(0xaa, address.toWord());
 }
 
 test "fromWord" {
@@ -417,7 +417,7 @@ test "computer is initialized" {
     try expectEqual(0x15555, computer.io);
     try expectEqual(ProgramCounter.reset, computer.p);
     try expectEqual(0, computer.a);
-    try expectEqual(0, computer.b);
+    try expectEqual(0x15d, computer.b);
     try expectEqual(0, computer.i);
     try expectEqual(stack.ReturnStack.empty, computer.return_stack);
     try expectEqual(stack.DataStack.empty, computer.data_stack);
@@ -516,7 +516,7 @@ test "computer steps correctly" {
         .slot_2 = .@".",
         .slot_3 = 7,
     };
-    computer.mem[0x42] = @bitCast(inst_1);
+    computer.mem[64 + 0x2a] = @bitCast(inst_1);
     computer.mem[0] = @bitCast(inst_2);
     computer.mem[1] = @bitCast(inst_3);
     computer.mem[2] = 100;
@@ -527,7 +527,7 @@ test "computer steps correctly" {
     computer.mem[7] = @bitCast(inst_6);
     computer.mem[8] = @bitCast(nops);
 
-    try expectEqual(0x42, computer.p.address.local);
+    try expectEqual(0x2a, computer.p.address.local);
     try expectEqual(true, computer.p.address.rom);
 
     computer.step();

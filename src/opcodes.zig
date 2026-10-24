@@ -128,7 +128,7 @@ test ex {
 
     ex(&computer);
     try expectEqual(@as(Address, @bitCast(@as(u9, 0x123))), computer.p.address);
-    try expectEqual(0xc2, computer.return_stack.t);
+    try expectEqual(0xaa, computer.return_stack.t);
 }
 
 /// name ;
@@ -184,7 +184,7 @@ test "call and return preserve extended arithmetic mode" {
 
     call(&computer);
     try expectEqual(true, computer.p.extended_arithmetic);
-    try expectEqual(0x2c2, computer.return_stack.t);
+    try expectEqual(0x2aa, computer.return_stack.t);
 
     computer.p.extended_arithmetic = false;
     ret(&computer);
@@ -199,7 +199,7 @@ test "ex preserves extended arithmetic mode" {
 
     ex(&computer);
     try expectEqual(false, computer.p.extended_arithmetic);
-    try expectEqual(0x2c2, computer.return_stack.t);
+    try expectEqual(0x2aa, computer.return_stack.t);
 
     ex(&computer);
     try expectEqual(true, computer.p.extended_arithmetic);
@@ -212,7 +212,7 @@ test call {
 
     call(&computer);
     try expectEqual(0x23, computer.p.address.local);
-    try expectEqual(0xc2, computer.return_stack.t);
+    try expectEqual(0xaa, computer.return_stack.t);
 }
 
 /// unext
@@ -323,7 +323,7 @@ pub fn fetchP(c: *Computer) void {
 
 test fetchP {
     var computer: Computer = .reset;
-    computer.p.address.rom = false;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0x42 };
     computer.mem[2] = 0x456;
 
     fetchP(&computer);
@@ -418,7 +418,7 @@ pub fn storeP(c: *Computer) void {
 
 test storeP {
     var computer: Computer = .reset;
-    computer.p.address.rom = false;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0x42 };
     computer.data_stack.push(0x456);
 
     storeP(&computer);
