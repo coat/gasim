@@ -37,6 +37,15 @@ const ProgramCounter = packed struct(u10) {
         });
     }
 
+    /// R holds all 10 bits of P, so Extended Arithmetic Mode survives call/return.
+    pub fn toWord(self: ProgramCounter) Word {
+        return @intCast(@as(u10, @bitCast(self)));
+    }
+
+    pub fn fromWord(word: Word) ProgramCounter {
+        return @bitCast(@as(u10, @truncate(@as(u18, @bitCast(word)))));
+    }
+
     pub const reset: ProgramCounter = .{
         .extended_arithmetic = false,
         .address = .reset,
@@ -318,6 +327,14 @@ test "slot 1 and 2 jumps force P8 to zero and preserve P9" {
     try expectEqual(false, p.address.io);
     try expectEqual(true, p.address.rom);
     try expectEqual(0x52, p.address.local);
+}
+
+test "ProgramCounter toWord and fromWord keep P9" {
+    const p: ProgramCounter = .{ .address = .reset, .extended_arithmetic = true };
+    try expectEqual(0x2c2, p.toWord());
+    try expectEqual(p, ProgramCounter.fromWord(p.toWord()));
+    // bits above P9 are ignored
+    try expectEqual(p, ProgramCounter.fromWord(@bitCast(@as(u18, 0x3fec2))));
 }
 
 test "short jump" {

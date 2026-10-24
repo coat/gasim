@@ -102,7 +102,7 @@ pub const opcodes = [_]OpCodeFn{
 /// **Return**. Moves R into P, popping the return stack. Skips any remaining slots
 /// and fetches next instruction word.
 fn ret(c: *Computer) void {
-    c.p.address = @bitCast(@as(u9, @intCast(c.return_stack.pop() & 0x1ff)));
+    c.p = .fromWord(c.return_stack.pop());
 }
 
 test ret {
@@ -117,9 +117,9 @@ test ret {
 ///
 /// **Execute**. Exchanges R and P, skips any remaining slots and fetches next instruction word.
 fn ex(c: *Computer) void {
-    const current_address = c.p.address;
-    c.p.address = Address.fromWord(c.return_stack.t);
-    c.return_stack.t = current_address.toWord();
+    const current = c.p;
+    c.p = .fromWord(c.return_stack.t);
+    c.return_stack.t = current.toWord();
 }
 
 test ex {
@@ -172,8 +172,38 @@ test "slot 2 jump" {
 /// **Call**. Moves P into R, pushing an item onto the return stack, sets P to
 /// destination address and fetches next instruction word.
 pub fn call(c: *Computer) void {
-    c.return_stack.push(c.p.address.toWord());
+    c.return_stack.push(c.p.toWord());
     c.p.jump(c.slot, c.i);
+}
+
+test "call and return preserve extended arithmetic mode" {
+    var computer: Computer = .reset;
+    computer.p.extended_arithmetic = true;
+    computer.slot = .slot(1);
+    computer.i = @bitCast(f18.Jump{ .destination = 0x10 });
+
+    call(&computer);
+    try expectEqual(true, computer.p.extended_arithmetic);
+    try expectEqual(0x2c2, computer.return_stack.t);
+
+    computer.p.extended_arithmetic = false;
+    ret(&computer);
+    try expectEqual(true, computer.p.extended_arithmetic);
+    try expectEqual(Address.reset, computer.p.address);
+}
+
+test "ex preserves extended arithmetic mode" {
+    var computer: Computer = .reset;
+    computer.p.extended_arithmetic = true;
+    computer.return_stack.push(0x010);
+
+    ex(&computer);
+    try expectEqual(false, computer.p.extended_arithmetic);
+    try expectEqual(0x2c2, computer.return_stack.t);
+
+    ex(&computer);
+    try expectEqual(true, computer.p.extended_arithmetic);
+    try expectEqual(0x010, computer.return_stack.t);
 }
 
 test call {
