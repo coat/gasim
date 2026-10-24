@@ -36,14 +36,14 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
-        .use_llvm = coverage,
+        .use_llvm = if (coverage) true else null,
     });
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
-        .use_llvm = coverage,
+        .use_llvm = if (coverage) true else null,
     });
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
