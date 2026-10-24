@@ -143,7 +143,7 @@ pub const Computer = struct {
 
         current_state: switch (State.fetch) {
             .fetch => {
-                self.i = self.mem[self.p.address.local];
+                self.i = self.fetch(self.p.address);
                 instruction = @bitCast(self.i);
 
                 self.p.increment();
@@ -530,6 +530,24 @@ test "computer steps correctly" {
     computer.step();
     computer.step();
     computer.step();
+}
+
+test "step fetches through the memory map" {
+    var computer: Computer = .reset;
+    computer.data_stack.push(7);
+
+    // RAM word 1 via its mirror at x041
+    computer.p.address = .{ .io = false, .rom = false, .local = 0x41 };
+    computer.mem[1] = @bitCast(Instruction{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
+    computer.step();
+    try expectEqual(7, computer.data_stack.s);
+    try expectEqual(0x42, computer.p.address.local);
+
+    // ROM word 5 lives at mem[64 + 5], not mem[5]
+    computer.p.address = .{ .io = false, .rom = true, .local = 0x05 };
+    computer.mem[64 + 5] = @bitCast(Instruction{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
+    computer.step();
+    try expectEqual(0, computer.data_stack.s);
 }
 
 const opcodes = @import("opcodes.zig");
