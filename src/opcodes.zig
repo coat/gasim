@@ -266,8 +266,14 @@ test next {
 
     next(&computer);
     try expectEqual(0x122, computer.return_stack.t);
-    computer.step();
-    try expectEqual(0x22, computer.p.address.local);
+    try expectEqual(0x44, computer.p.address.local);
+
+    // R is popped once it reaches zero, without jumping
+    computer.return_stack.t = 0;
+    computer.p.address.local = 0x10;
+    next(&computer);
+    try expectEqual(0, computer.return_stack.t);
+    try expectEqual(0x10, computer.p.address.local);
 }
 
 /// if
@@ -287,8 +293,11 @@ test _if {
 
     _if(&computer);
     try expectEqual(0x44, computer.p.address.local);
-    computer.step();
-    try expectEqual(0, computer.p.address.local);
+
+    computer.data_stack.t = 1;
+    computer.p.address.local = 0x10;
+    _if(&computer);
+    try expectEqual(0x10, computer.p.address.local);
 }
 
 /// -if
@@ -309,8 +318,11 @@ test minus_if {
 
     minus_if(&computer);
     try expectEqual(0x44, computer.p.address.local);
-    computer.step();
-    try expectEqual(0, computer.p.address.local);
+
+    computer.data_stack.t = -1;
+    computer.p.address.local = 0x10;
+    minus_if(&computer);
+    try expectEqual(0x10, computer.p.address.local);
 }
 
 /// @p

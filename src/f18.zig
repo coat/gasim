@@ -2,7 +2,7 @@
 
 pub const Word = i18;
 
-const Slot = enum(u2) {
+pub const Slot = enum(u2) {
     _,
 
     pub fn slot(num: u2) Slot {
@@ -97,6 +97,34 @@ pub const Instruction = packed struct(Word) {
     slot_1: Opcode,
     slot_0: Opcode,
 
+    /// Instruction words are stored XORed with this value. Jump destination
+    /// fields are the exception: they are stored as-is.
+    pub const encoding: Word = 0x15555;
+
+    pub fn encode(self: Instruction) Word {
+        return @as(Word, @bitCast(self)) ^ encoding;
+    }
+
+    pub fn decode(word: Word) Instruction {
+        return @bitCast(word ^ encoding);
+    }
+
+    /// Encodes an instruction ending with a jump, call, next, if or -if in
+    /// `slot` whose destination field replaces the remaining slots.
+    pub fn encodeJump(self: Instruction, slot: Slot, destination: u10) Word {
+        return (self.encode() & ~destinationMask(slot)) | destination;
+    }
+
+    /// Mask of the destination field of a jump in `slot`
+    pub fn destinationMask(slot: Slot) Word {
+        return switch (slot) {
+            .slot(0) => 0x3ff,
+            .slot(1) => 0xff,
+            .slot(2) => 0x7,
+            else => 0,
+        };
+    }
+
     pub fn getSlot(self: Instruction, slot: Slot) Opcode {
         return switch (slot) {
             .slot(0) => self.slot_0,
@@ -147,7 +175,7 @@ pub const Computer = struct {
         current_state: switch (State.fetch) {
             .fetch => {
                 self.i = self.fetch(self.p.address);
-                instruction = @bitCast(self.i);
+                instruction = .decode(self.i);
 
                 self.p.increment();
                 continue :current_state .execution;
@@ -517,47 +545,47 @@ test "computer steps correctly" {
         .slot_2 = .@".",
         .slot_3 = 7,
     };
-    computer.mem[64 + 0x2a] = @bitCast(inst_1);
-    computer.mem[0] = @bitCast(inst_2);
-    computer.mem[1] = @bitCast(inst_3);
+    computer.mem[64 + 0x2a] = inst_1.encodeJump(.slot(0), 0);
+    computer.mem[0] = inst_2.encode();
+    computer.mem[1] = inst_3.encode();
     computer.mem[2] = 100;
-    computer.mem[3] = @bitCast(inst_4);
-    computer.mem[4] = @bitCast(inst_5);
+    computer.mem[3] = inst_4.encode();
+    computer.mem[4] = inst_5.encode();
     computer.mem[5] = 2;
-    computer.mem[6] = @bitCast(nops);
-    computer.mem[7] = @bitCast(inst_6);
-    computer.mem[8] = @bitCast(nops);
+    computer.mem[6] = nops.encode();
+    computer.mem[7] = inst_6.encodeJump(.slot(0), 6);
+    computer.mem[8] = nops.encode();
 
     try expectEqual(0x2a, computer.p.address.local);
     try expectEqual(true, computer.p.address.rom);
 
     computer.step();
-    try expectEqual(inst_1, @as(Instruction, @bitCast(computer.i)));
+    try expectEqual(computer.mem[64 + 0x2a], computer.i);
     try expectEqual(0, computer.p.address.local);
     try expectEqual(false, computer.p.address.rom);
 
     computer.step();
-    try expectEqual(inst_2, @as(Instruction, @bitCast(computer.i)));
+    try expectEqual(inst_2, Instruction.decode(computer.i));
     try expectEqual(1, computer.p.address.local);
 
     computer.step();
-    try expectEqual(inst_3, @as(Instruction, @bitCast(computer.i)));
+    try expectEqual(inst_3, Instruction.decode(computer.i));
     try expectEqual(3, computer.p.address.local);
 
     computer.step();
-    try expectEqual(inst_4, @as(Instruction, @bitCast(computer.i)));
+    try expectEqual(inst_4, Instruction.decode(computer.i));
     try expectEqual(4, computer.p.address.local);
 
     computer.step();
-    try expectEqual(inst_5, @as(Instruction, @bitCast(computer.i)));
+    try expectEqual(inst_5, Instruction.decode(computer.i));
     try expectEqual(6, computer.p.address.local);
 
     computer.step();
-    try expectEqual(nops, @as(Instruction, @bitCast(computer.i)));
+    try expectEqual(nops, Instruction.decode(computer.i));
     try expectEqual(7, computer.p.address.local);
 
     computer.step();
-    try expectEqual(inst_6, @as(Instruction, @bitCast(computer.i)));
+    try expectEqual(computer.mem[7], computer.i);
     try expectEqual(6, computer.p.address.local);
 
     computer.step();
@@ -572,14 +600,14 @@ test "step fetches through the memory map" {
 
     // RAM word 1 via its mirror at x041
     computer.p.address = .{ .io = false, .rom = false, .local = 0x41 };
-    computer.mem[1] = @bitCast(Instruction{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
+    computer.mem[1] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
     computer.step();
     try expectEqual(7, computer.data_stack.s);
     try expectEqual(0x42, computer.p.address.local);
 
     // ROM word 5 lives at mem[64 + 5], not mem[5]
     computer.p.address = .{ .io = false, .rom = true, .local = 0x05 };
-    computer.mem[64 + 5] = @bitCast(Instruction{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
+    computer.mem[64 + 5] = Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
     computer.step();
     try expectEqual(0, computer.data_stack.s);
 }
@@ -589,7 +617,7 @@ test "unext loops R+1 times then continues with the next slot" {
     computer.p.address = .{ .io = false, .rom = false, .local = 0 };
     computer.return_stack.push(2);
     computer.data_stack.push(1);
-    computer.mem[0] = @bitCast(Instruction{ .slot_0 = .dup, .slot_1 = .@"2*", .slot_2 = .unext, .slot_3 = 6 });
+    computer.mem[0] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@"2*", .slot_2 = .unext, .slot_3 = 6 });
 
     computer.step();
     // dup 2* runs 3 times, then slot 3 dup runs once
@@ -619,13 +647,26 @@ test "execution time depends on the opcode class" {
     try expectApproxEqAbs(1.5, computer.execution_time, 0.001);
 }
 
+test "instruction encoding" {
+    const nops: Instruction = .{ .slot_0 = .@".", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 };
+    try expectEqual(0x2c9b2, @as(u18, @bitCast(nops.encode())));
+    try expectEqual(nops, Instruction.decode(nops.encode()));
+
+    // destination fields are not encoded
+    const call: Instruction = .{ .slot_0 = .@"@p", .slot_1 = .call, .slot_2 = .@";", .slot_3 = 0 };
+    const word = call.encodeJump(.slot(1), 0x12);
+    try expectEqual(0x12, word & 0xff);
+    try expectEqual(.@"@p", Instruction.decode(word).slot_0);
+    try expectEqual(.call, Instruction.decode(word).slot_1);
+}
+
 test "unext with R zero falls through without looping" {
     var computer: Computer = .reset;
     computer.p.address = .{ .io = false, .rom = false, .local = 0 };
     computer.return_stack.push(0x99);
     computer.return_stack.push(0);
     computer.data_stack.push(5);
-    computer.mem[0] = @bitCast(Instruction{ .slot_0 = .@".", .slot_1 = .unext, .slot_2 = .dup, .slot_3 = 7 });
+    computer.mem[0] = Instruction.encode(.{ .slot_0 = .@".", .slot_1 = .unext, .slot_2 = .dup, .slot_3 = 7 });
 
     computer.step();
     try expectEqual(5, computer.data_stack.t);
