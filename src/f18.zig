@@ -198,7 +198,8 @@ pub const Computer = struct {
                 self.slot = @fromBackingInt(@intCast(@backingInt(self.slot) +% 1));
                 opcodes.opcodes[code](self);
 
-                break :time 1.5;
+                // memory read and write (x08-x0F) are slower than ALU and register operations
+                break :time if (code <= 0x0f) 5.1 else 1.5;
             },
         };
     }
@@ -598,6 +599,26 @@ test "unext loops R+1 times then continues with the next slot" {
     try expectEqual(1, computer.p.address.local);
 }
 
+test "execution time depends on the opcode class" {
+    var computer: Computer = .reset;
+    computer.slot = .slot(1);
+
+    computer.execute(.@".");
+    try expectApproxEqAbs(1.5, computer.execution_time, 0.001);
+
+    computer.execution_time = 0;
+    computer.execute(.@"@b");
+    try expectApproxEqAbs(5.1, computer.execution_time, 0.001);
+
+    computer.execution_time = 0;
+    computer.execute(.@"!");
+    try expectApproxEqAbs(5.1, computer.execution_time, 0.001);
+
+    computer.execution_time = 0;
+    computer.execute(.@"+*");
+    try expectApproxEqAbs(1.5, computer.execution_time, 0.001);
+}
+
 test "unext with R zero falls through without looping" {
     var computer: Computer = .reset;
     computer.p.address = .{ .io = false, .rom = false, .local = 0 };
@@ -619,3 +640,4 @@ const stack = @import("stack.zig");
 
 const std = @import("std");
 const expectEqual = std.testing.expectEqual;
+const expectApproxEqAbs = std.testing.expectApproxEqAbs;
