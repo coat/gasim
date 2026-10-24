@@ -7,14 +7,19 @@ chip](https://www.greenarraychips.com/home/documents/index.php#GA144).
 ## Usage
 
 ```bash
-gasim examples/hello.node
+gasim examples/hello.ga
 ```
 
-Currently, this just launches the simulator with node 001's RAM and ROM loaded
-with the contents of the provided binary file.
+This assembles the program into the RAM of a single F18A node and runs it
+until the node is waiting on something that cannot happen. A console is
+attached to the node's `up` port. Each word written to it is printed as a
+byte, and each read from it takes a byte from stdin:
 
-The expected file format is 288 8-bit bytes, with the first 144 bytes
-containing the RAM contents and the next 144 bytes containing the ROM.
+```bash
+echo "hello" | gasim examples/echo.ga
+```
+
+See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
 
 ## Download
 
@@ -34,8 +39,11 @@ zig build -Doptimize=ReleaseFast
 
 ### TODO
 
-- [ ] I/O
+- [x] Comm ports and console I/O
+- [ ] Multi-node chip
 - [ ] ROM implementations
+- [ ] TUI
+- [ ] colorForth editor and compiler
 
 ## Prior Art
 

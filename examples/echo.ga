@@ -1,0 +1,8 @@
+\ echo.ga - copy console input to the console until the input ends
+\
+\ Reading the up port takes a byte of input from the console, and writing
+\ the up port outputs a byte.
+
+: main
+    up b!
+    begin @b !b again
