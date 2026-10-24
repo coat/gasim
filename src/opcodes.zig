@@ -223,9 +223,9 @@ test call {
 pub fn unext(c: *Computer) void {
     if (c.return_stack.t == 0) {
         _ = c.return_stack.pop();
-        c.state = .execution;
     } else {
         c.return_stack.t -%= 1;
+        c.state = .unext;
     }
 }
 
@@ -234,11 +234,12 @@ test unext {
     computer.return_stack.push(0x55);
     computer.return_stack.push(1);
 
-    computer.state = .unext;
+    computer.state = .execution;
     unext(&computer);
     try expectEqual(0, computer.return_stack.t);
     try expectEqual(.unext, computer.state);
 
+    computer.state = .execution;
     unext(&computer);
     try expectEqual(0x55, computer.return_stack.t);
     try expectEqual(.execution, computer.state);
@@ -329,7 +330,7 @@ test minus_if {
 ///
 /// Pushes data stack, reads [P] into T, and increments P
 pub fn fetchP(c: *Computer) void {
-    c.data_stack.push(c.fetch(c.p.address));
+    c.data_stack.push(c.read(c.p.address) orelse return);
     c.p.increment();
 }
 
@@ -347,7 +348,7 @@ test fetchP {
 ///
 /// **Fetch-plus**. Pushes data stack, reads [A] into T, and increments A
 pub fn fetchPlus(c: *Computer) void {
-    c.data_stack.push(c.fetch(Address.fromWord(c.a)));
+    c.data_stack.push(c.read(Address.fromWord(c.a)) orelse return);
     incrementA(c);
 }
 
@@ -392,7 +393,7 @@ test fetchPlus {
 ///
 /// Fetch-B. Pushes data stack and reads [B] into T.
 pub fn fetchB(c: *Computer) void {
-    c.data_stack.push(c.fetch(Address.fromWord(c.b)));
+    c.data_stack.push(c.read(Address.fromWord(c.b)) orelse return);
 }
 
 test fetchB {
@@ -408,7 +409,7 @@ test fetchB {
 ///
 /// **Fetch**. Pushes data stack and reads [A] into T.
 pub fn fetch(c: *Computer) void {
-    c.data_stack.push(c.fetch(Address.fromWord(c.a)));
+    c.data_stack.push(c.read(Address.fromWord(c.a)) orelse return);
 }
 
 test fetch {
@@ -424,7 +425,8 @@ test fetch {
 ///
 /// **Store-P**. Writes T into [P], pops the data stack, and increments P
 pub fn storeP(c: *Computer) void {
-    c.store(c.p.address, c.data_stack.pop());
+    if (!c.write(c.p.address, c.data_stack.t)) return;
+    _ = c.data_stack.pop();
     c.p.increment();
 }
 
@@ -443,7 +445,8 @@ test storeP {
 ///
 /// **Store-plus**. Writes T into [A], pops the data stack, and increments A
 pub fn storePlus(c: *Computer) void {
-    c.store(Address.fromWord(c.a), c.data_stack.pop());
+    if (!c.write(Address.fromWord(c.a), c.data_stack.t)) return;
+    _ = c.data_stack.pop();
     incrementA(c);
 }
 
@@ -462,7 +465,8 @@ test storePlus {
 ///
 /// **Store-B**. Writes T into [B] and pops the data stack.
 pub fn storeB(c: *Computer) void {
-    c.store(Address.fromWord(c.b), c.data_stack.pop());
+    if (!c.write(Address.fromWord(c.b), c.data_stack.t)) return;
+    _ = c.data_stack.pop();
 }
 
 test storeB {
@@ -479,7 +483,8 @@ test storeB {
 ///
 /// **Store**. Writes T into [A] and pops the data stack.
 pub fn store(c: *Computer) void {
-    c.store(Address.fromWord(c.a), c.data_stack.pop());
+    if (!c.write(Address.fromWord(c.a), c.data_stack.t)) return;
+    _ = c.data_stack.pop();
 }
 
 test store {

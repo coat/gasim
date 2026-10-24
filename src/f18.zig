@@ -141,9 +141,16 @@ pub const Computer = struct {
     const State = enum {
         fetch,
         execution,
+        /// unext is looping back to slot 0 of the current instruction word
         unext,
-        next,
     };
+
+    /// address of the io register
+    pub const io_address: u9 = 0x15d;
+    /// io register bits reporting whether the node at the other end of each
+    /// port is reading (active low) or writing
+    const handshake_bits: u18 = 0x1fe00;
+
     /// control and status for communication ports and I/O logic.
     io: Word,
     /// serves as a "program counter" and extended arithmetic flag
@@ -163,75 +170,159 @@ pub const Computer = struct {
     // involved in some Extended Arithmetic mode instructions
     carry: u1,
 
+    /// right, down, left and up comm ports; unconnected ports are null
+    ports: [4]port.Link,
+
     state: State = .fetch,
     // keeps track of current slot to help address decoding
     slot: Slot,
+    /// waiting in mid-instruction on a comm port. The pending operation is
+    /// retried by the next call to `step`.
+    suspended: bool,
 
     execution_time: f32,
 
+    /// Executes the rest of the current instruction word, fetching a new one
+    /// first if needed. Returns early with `suspended` set when an opcode
+    /// must wait on a comm port.
     pub fn step(self: *Computer) void {
-        var instruction: Instruction = undefined;
-
-        current_state: switch (State.fetch) {
-            .fetch => {
-                self.i = self.fetch(self.p.address);
-                instruction = .decode(self.i);
-
-                self.p.increment();
-                continue :current_state .execution;
-            },
-            .execution => {
-                self.slot = .slot(0);
-                self.state = .execution;
-                current_slot: switch (@backingInt(self.slot)) {
-                    0...2 => {
-                        self.execute(instruction.getSlot(self.slot));
-                        if (self.state != .execution) continue :current_state self.state;
-                        continue :current_slot @backingInt(self.slot);
-                    },
-                    3 => {
-                        self.execute(instruction.getSlot(self.slot));
-                        if (self.state != .execution) continue :current_state self.state;
-                        break :current_state;
-                    },
-                }
-            },
-            // unext with R nonzero loops back to slot 0 without re-fetching
-            .unext => continue :current_state .execution,
-            .next => return,
+        self.suspended = false;
+        if (self.state == .fetch) {
+            // instructions may be fetched from a port
+            self.i = self.read(self.p.address) orelse return;
+            self.p.increment();
+            self.slot = .slot(0);
+            self.state = .execution;
+        }
+        while (self.state != .fetch) {
+            self.execute(Instruction.decode(self.i).getSlot(self.slot));
+            if (self.suspended) return;
         }
     }
 
     pub fn execute(self: *Computer, opcode: Opcode) void {
         const code: u5 = @intCast(@backingInt(opcode));
+        opcodes.opcodes[code](self);
+        if (self.suspended) return;
+
         self.execution_time += time: switch (code) {
             0x00...0x03, 0x05...0x07 => {
-                self.state = .next;
-                opcodes.opcodes[code](self);
-
+                // transfer of program control ends the instruction word
+                self.state = .fetch;
                 break :time 5.1;
             },
             0x04 => {
-                self.state = .unext;
-                opcodes.opcodes[code](self);
-                // loop is complete, continue with the following slot
-                if (self.state == .execution) {
-                    self.slot = @fromBackingInt(@intCast(@backingInt(self.slot) +% 1));
-                }
-
+                if (self.state == .unext) {
+                    self.state = .execution;
+                    self.slot = .slot(0);
+                } else self.advance();
                 break :time 2.0;
             },
             else => {
-                self.state = .execution;
-                self.slot = @fromBackingInt(@intCast(@backingInt(self.slot) +% 1));
-                opcodes.opcodes[code](self);
-
+                self.advance();
                 // memory read and write (x08-x0F) are slower than ALU and register operations
                 break :time if (code <= 0x0f) 5.1 else 1.5;
             },
         };
     }
 
+    /// moves on to the next slot, or the next instruction word after slot 3
+    fn advance(self: *Computer) void {
+        if (@backingInt(self.slot) == 3) {
+            self.state = .fetch;
+        } else {
+            self.slot = @fromBackingInt(@intCast(@backingInt(self.slot) + 1));
+        }
+    }
+
+    /// Reads from memory or I/O space. Returns null, suspending the computer,
+    /// while waiting on a comm port. Undefined I/O addresses hang forever.
+    pub fn read(self: *Computer, address: Address) ?Word {
+        if (!address.io) return self.fetch(address);
+
+        const raw: u9 = @bitCast(address);
+        if (raw == io_address) return self.readIo();
+        if (port.select(raw)) |ports| {
+            if (self.readPorts(ports)) |word| return word;
+        }
+        self.suspended = true;
+        return null;
+    }
+
+    /// Writes to memory or I/O space. Returns false, suspending the computer,
+    /// while waiting on a comm port. Undefined I/O addresses hang forever.
+    pub fn write(self: *Computer, address: Address, value: Word) bool {
+        if (!address.io) {
+            self.store(address, value);
+            return true;
+        }
+
+        const raw: u9 = @bitCast(address);
+        if (raw == io_address) {
+            self.io = value;
+            return true;
+        }
+        if (port.select(raw)) |ports| {
+            if (self.writePorts(ports, value)) return true;
+        }
+        self.suspended = true;
+        return false;
+    }
+
+    /// A multiport read completes with the first port that is written
+    fn readPorts(self: *Computer, ports: port.Select) ?Word {
+        var it = ports.iterator();
+        while (it.next()) |direction| {
+            const link = self.ports[@backingInt(direction)];
+            const p = link.port orelse continue;
+            if (p.read(link.side)) |word| {
+                var others = ports.iterator();
+                while (others.next()) |other| {
+                    const other_link = self.ports[@backingInt(other)];
+                    if (other_link.port) |o| o.cancelRead(other_link.side);
+                }
+                return word;
+            }
+        }
+        return null;
+    }
+
+    /// A multiport write is delivered to every port that is already being
+    /// read, or completes with the first port to read it
+    fn writePorts(self: *Computer, ports: port.Select, value: Word) bool {
+        var written = false;
+        var it = ports.iterator();
+        while (it.next()) |direction| {
+            const link = self.ports[@backingInt(direction)];
+            const p = link.port orelse continue;
+            if (p.write(link.side, value)) written = true;
+        }
+        if (written) {
+            it = ports.iterator();
+            while (it.next()) |direction| {
+                const link = self.ports[@backingInt(direction)];
+                if (link.port) |p| p.cancelWrite(link.side);
+            }
+        }
+        return written;
+    }
+
+    /// Bits without I/O facilities read as the inverse of what was last
+    /// written. Handshake bits report the state of the far end of each port.
+    fn readIo(self: Computer) Word {
+        var value: u18 = ~@as(u18, @bitCast(self.io)) & ~handshake_bits;
+        for (self.ports, 0..) |link, i| {
+            // Rr- is bit 16, Rw is bit 15, Dr- is bit 14 and so on
+            const shift: u5 = @intCast(16 - 2 * i);
+            const reading = if (link.port) |p| p.otherReading(link.side) else false;
+            const writing = if (link.port) |p| p.otherWriting(link.side) else false;
+            if (!reading) value |= @as(u18, 1) << shift;
+            if (writing) value |= @as(u18, 1) << (shift - 1);
+        }
+        return @bitCast(value);
+    }
+
+    /// Reads RAM or ROM
     pub fn fetch(self: Computer, address: Address) Word {
         var local = address.local;
         if (local >= 0x40) {
@@ -266,9 +357,11 @@ pub const Computer = struct {
         .carry = 0,
 
         .mem = @splat(0),
+        .ports = @splat(.{}),
 
         .state = .fetch,
         .slot = .slot(0),
+        .suspended = false,
         .execution_time = 0.0,
     };
 };
@@ -660,6 +753,162 @@ test "instruction encoding" {
     try expectEqual(.call, Instruction.decode(word).slot_1);
 }
 
+/// connects the right port of `left` to the left port of `right`
+fn connect(left: *Computer, right: *Computer, p: *port.Port) void {
+    left.ports[@backingInt(port.Direction.right)] = .{ .port = p, .side = .a };
+    right.ports[@backingInt(port.Direction.left)] = .{ .port = p, .side = .b };
+}
+
+test "computers communicate through a port" {
+    var sender: Computer = .reset;
+    var receiver: Computer = .reset;
+    var p: port.Port = .{};
+    connect(&sender, &receiver, &p);
+
+    const ram: Address = .{ .io = false, .rom = false, .local = 0 };
+    sender.p.address = ram;
+    sender.b = 0x1d5;
+    // @p !b @p !b, then two literals
+    sender.mem[0] = Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@"!b", .slot_2 = .@"@p", .slot_3 = 7 });
+    sender.mem[1] = 42;
+    sender.mem[2] = 43;
+    sender.mem[3] = Instruction.encode(.{ .slot_0 = .@"!b", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
+
+    receiver.p.address = ram;
+    receiver.b = 0x175;
+    receiver.mem[0] = Instruction.encode(.{ .slot_0 = .@"@b", .slot_1 = .@"@b", .slot_2 = .@"+", .slot_3 = 7 });
+
+    // the sender arrives first and waits for the receiver
+    sender.step();
+    try expect(sender.suspended);
+    try expectEqual(42, sender.data_stack.t);
+
+    // the receiver takes the first word and waits for the second
+    receiver.step();
+    try expect(receiver.suspended);
+    try expectEqual(42, receiver.data_stack.t);
+
+    // the sender completes the first write and finishes its instruction word
+    sender.step();
+    try expect(!sender.suspended);
+    try expectEqual(Address.fromWord(3), sender.p.address);
+
+    // the receiver is not reading again until it resumes, so the sender waits
+    sender.step();
+    try expect(sender.suspended);
+
+    receiver.step();
+    try expect(!receiver.suspended);
+    try expectEqual(85, receiver.data_stack.t);
+
+    sender.step();
+    try expect(!sender.suspended);
+    try expectEqual(port.Port.State.idle, p.state);
+}
+
+test "computer executes instructions from a port" {
+    var node: Computer = .reset;
+    var feeder: Computer = .reset;
+    var p: port.Port = .{};
+    connect(&feeder, &node, &p);
+
+    // jump to the left port
+    node.p.address = Address.fromWord(0x175);
+
+    // the node waits for an instruction word
+    node.step();
+    try expect(node.suspended);
+
+    // @p and dup, with the literal also read from the port
+    try expect(p.write(.a, Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .dup, .slot_2 = .@".", .slot_3 = 7 })));
+    node.step();
+    try expect(node.suspended);
+    try expect(p.write(.a, 7));
+    node.step();
+    try expect(!node.suspended);
+    try expectEqual(7, node.data_stack.t);
+    try expectEqual(7, node.data_stack.s);
+    // P is not incremented in I/O space
+    try expectEqual(Address.fromWord(0x175), node.p.address);
+}
+
+test "multiport read takes the first written port" {
+    var node: Computer = .reset;
+    var right: port.Port = .{};
+    var up: port.Port = .{};
+    node.ports[@backingInt(port.Direction.right)] = .{ .port = &right, .side = .a };
+    node.ports[@backingInt(port.Direction.up)] = .{ .port = &up, .side = .a };
+
+    // rdlu
+    const rdlu = Address.fromWord(0x1a5);
+    try expectEqual(null, node.read(rdlu));
+    try expect(node.suspended);
+    try expect(right.otherReading(.b));
+    try expect(up.otherReading(.b));
+
+    try expect(up.write(.b, 9));
+    try expectEqual(9, node.read(rdlu));
+    // the pending read on the other port is withdrawn
+    try expectEqual(port.Port.State.idle, right.state);
+}
+
+test "multiport read discards values written to the other ports" {
+    var node: Computer = .reset;
+    var right: port.Port = .{};
+    var up: port.Port = .{};
+    node.ports[@backingInt(port.Direction.right)] = .{ .port = &right, .side = .a };
+    node.ports[@backingInt(port.Direction.up)] = .{ .port = &up, .side = .a };
+
+    const rdlu = Address.fromWord(0x1a5);
+    try expectEqual(null, node.read(rdlu));
+
+    // both neighbors write before the node resumes
+    try expect(right.write(.b, 1));
+    try expect(up.write(.b, 2));
+    try expectEqual(1, node.read(rdlu));
+    try expectEqual(port.Port.State.idle, right.state);
+    try expectEqual(port.Port.State.idle, up.state);
+
+    // the up port is free for a new transfer
+    try expect(!node.write(Address.fromWord(0x145), 3));
+    try expectEqual(3, up.read(.b));
+}
+
+test "io register reports port handshakes" {
+    var node: Computer = .reset;
+    var right: port.Port = .{};
+    node.ports[@backingInt(port.Direction.right)] = .{ .port = &right, .side = .a };
+
+    const io = Address.fromWord(Computer.io_address);
+    const rr_: u18 = 1 << 16;
+    const rw: u18 = 1 << 15;
+
+    var value: u18 = @bitCast(node.read(io).?);
+    try expectEqual(rr_, value & (rr_ | rw));
+
+    _ = right.read(.b);
+    value = @bitCast(node.read(io).?);
+    try expectEqual(0, value & (rr_ | rw));
+
+    right = .{};
+    _ = right.write(.b, 1);
+    value = @bitCast(node.read(io).?);
+    try expectEqual(rr_ | rw, value & (rr_ | rw));
+
+    // other bits read as the inverse of what was written
+    try expect(node.write(io, 0));
+    value = @bitCast(node.read(io).?);
+    try expectEqual(0x201ff, value & 0x201ff);
+}
+
+test "undefined I/O addresses hang" {
+    var node: Computer = .reset;
+    try expectEqual(null, node.read(Address.fromWord(0x100)));
+    try expect(node.suspended);
+    // an unconnected port never completes
+    try expect(!node.write(Address.fromWord(0x1d5), 1));
+}
+
 test "unext with R zero falls through without looping" {
     var computer: Computer = .reset;
     computer.p.address = .{ .io = false, .rom = false, .local = 0 };
@@ -677,8 +926,10 @@ test "unext with R zero falls through without looping" {
 
 const opcodes = @import("opcodes.zig");
 const Opcode = opcodes.Opcode;
+const port = @import("port.zig");
 const stack = @import("stack.zig");
 
 const std = @import("std");
+const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectApproxEqAbs = std.testing.expectApproxEqAbs;
