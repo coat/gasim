@@ -42,8 +42,7 @@ pub const Opcode = enum(u5) {
     // zig fmt: on
 
     pub fn fromInt(value: u3) Opcode {
-        const full_code = @as(u5, @intCast(value)) << 2;
-        return @fromBackingInt(@intCast(full_code));
+        return @fromBackingInt(@as(u5, value) << 2);
     }
 };
 
@@ -149,7 +148,7 @@ test "slot 0 jump" {
 
 test "slot 1 jump" {
     var computer: Computer = .reset;
-    computer.slot = .slot(1);
+    computer.slot = 1;
     const expected_dest: u7 = 0b1111101;
     computer.i = @bitCast(f18.Jump{ .destination = expected_dest });
 
@@ -159,7 +158,7 @@ test "slot 1 jump" {
 
 test "slot 2 jump" {
     var computer: Computer = .reset;
-    computer.slot = .slot(2);
+    computer.slot = 2;
     const expected_dest: u3 = 0b101;
     computer.i = @bitCast(f18.ShortJump{ .destination = expected_dest });
 
@@ -179,7 +178,7 @@ pub fn call(c: *Computer) void {
 test "call and return preserve extended arithmetic mode" {
     var computer: Computer = .reset;
     computer.p.extended_arithmetic = true;
-    computer.slot = .slot(1);
+    computer.slot = 1;
     computer.i = @bitCast(f18.Jump{ .destination = 0x10 });
 
     call(&computer);
@@ -262,7 +261,7 @@ pub fn next(c: *Computer) void {
 test next {
     var computer: Computer = .reset;
     computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
-    computer.slot = .slot(1);
+    computer.slot = 1;
     computer.return_stack.push(0x123);
 
     next(&computer);
@@ -289,7 +288,7 @@ pub fn _if(c: *Computer) void {
 test _if {
     var computer: Computer = .reset;
     computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
-    computer.slot = .slot(1);
+    computer.slot = 1;
     computer.data_stack.t = 0;
 
     _if(&computer);
@@ -314,7 +313,7 @@ pub fn minus_if(c: *Computer) void {
 test minus_if {
     var computer: Computer = .reset;
     computer.i = @bitCast(f18.Jump{ .destination = 0x44 });
-    computer.slot = .slot(1);
+    computer.slot = 1;
     computer.data_stack.t = 1;
 
     minus_if(&computer);

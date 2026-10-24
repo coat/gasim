@@ -2,13 +2,8 @@
 
 pub const Word = i18;
 
-pub const Slot = enum(u2) {
-    _,
-
-    pub fn slot(num: u2) Slot {
-        return @fromBackingInt(@intCast(num));
-    }
-};
+/// position of an opcode within an instruction word
+pub const Slot = u2;
 
 /// type used by the P register
 const ProgramCounter = packed struct(u10) {
@@ -30,16 +25,16 @@ const ProgramCounter = packed struct(u10) {
     pub fn jump(self: *ProgramCounter, slot: Slot, instruction: Word) void {
         const p: u10 = @bitCast(self.*);
         self.* = @bitCast(switch (slot) {
-            .slot(0) => @as(LongJump, @bitCast(instruction)).destination,
-            .slot(1) => (p & 0x200) | @as(Jump, @bitCast(instruction)).destination,
-            .slot(2) => (p & 0x2f8) | @as(ShortJump, @bitCast(instruction)).destination,
+            0 => @as(LongJump, @bitCast(instruction)).destination,
+            1 => (p & 0x200) | @as(Jump, @bitCast(instruction)).destination,
+            2 => (p & 0x2f8) | @as(ShortJump, @bitCast(instruction)).destination,
             else => return,
         });
     }
 
     /// R holds all 10 bits of P, so Extended Arithmetic Mode survives call/return.
     pub fn toWord(self: ProgramCounter) Word {
-        return @intCast(@as(u10, @bitCast(self)));
+        return @as(u10, @bitCast(self));
     }
 
     pub fn fromWord(word: Word) ProgramCounter {
@@ -61,7 +56,7 @@ pub const Address = packed struct(u9) {
 
     pub fn toWord(self: Address) Word {
         const word: u9 = @bitCast(self);
-        return @intCast(word);
+        return word;
     }
 
     pub fn fromWord(word: Word) Address {
@@ -118,20 +113,19 @@ pub const Instruction = packed struct(Word) {
     /// Mask of the destination field of a jump in `slot`
     pub fn destinationMask(slot: Slot) Word {
         return switch (slot) {
-            .slot(0) => 0x3ff,
-            .slot(1) => 0xff,
-            .slot(2) => 0x7,
+            0 => 0x3ff,
+            1 => 0xff,
+            2 => 0x7,
             else => 0,
         };
     }
 
     pub fn getSlot(self: Instruction, slot: Slot) Opcode {
         return switch (slot) {
-            .slot(0) => self.slot_0,
-            .slot(1) => self.slot_1,
-            .slot(2) => self.slot_2,
-            .slot(3) => Opcode.fromInt(self.slot_3),
-            else => unreachable,
+            0 => self.slot_0,
+            1 => self.slot_1,
+            2 => self.slot_2,
+            3 => Opcode.fromInt(self.slot_3),
         };
     }
 };
@@ -191,7 +185,7 @@ pub const Computer = struct {
             // instructions may be fetched from a port
             self.i = self.read(self.p.address) orelse return;
             self.p.increment();
-            self.slot = .slot(0);
+            self.slot = 0;
             self.state = .execution;
         }
         while (self.state != .fetch) {
@@ -201,7 +195,7 @@ pub const Computer = struct {
     }
 
     pub fn execute(self: *Computer, opcode: Opcode) void {
-        const code: u5 = @intCast(@backingInt(opcode));
+        const code = @backingInt(opcode);
         opcodes.opcodes[code](self);
         if (self.suspended) return;
 
@@ -214,7 +208,7 @@ pub const Computer = struct {
             0x04 => {
                 if (self.state == .unext) {
                     self.state = .execution;
-                    self.slot = .slot(0);
+                    self.slot = 0;
                 } else self.advance();
                 break :time 2.0;
             },
@@ -228,10 +222,10 @@ pub const Computer = struct {
 
     /// moves on to the next slot, or the next instruction word after slot 3
     fn advance(self: *Computer) void {
-        if (@backingInt(self.slot) == 3) {
+        if (self.slot == 3) {
             self.state = .fetch;
         } else {
-            self.slot = @fromBackingInt(@intCast(@backingInt(self.slot) + 1));
+            self.slot += 1;
         }
     }
 
@@ -360,7 +354,7 @@ pub const Computer = struct {
         .ports = @splat(.{}),
 
         .state = .fetch,
-        .slot = .slot(0),
+        .slot = 0,
         .suspended = false,
         .execution_time = 0.0,
     };
@@ -409,7 +403,7 @@ test "long jump" {
     var p: ProgramCounter = .reset;
 
     const instruction: Word = @bitCast(LongJump{ .destination = 0b1100000010 });
-    p.jump(.slot(0), instruction);
+    p.jump(0, instruction);
 
     try expectEqual(true, p.extended_arithmetic);
     try expectEqual(true, p.address.io);
@@ -421,7 +415,7 @@ test "jump" {
     var p: ProgramCounter = .reset;
 
     const instruction: Word = @bitCast(Jump{ .destination = 0b0101010 });
-    p.jump(.slot(1), instruction);
+    p.jump(1, instruction);
 
     try expectEqual(false, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
@@ -429,7 +423,7 @@ test "jump" {
     try expectEqual(0b0101010, p.address.local);
 
     // slot 1 jumps replace P7 so they can move between RAM and ROM
-    p.jump(.slot(1), @bitCast(Jump{ .destination = 0b10101010 }));
+    p.jump(1, @bitCast(Jump{ .destination = 0b10101010 }));
     try expectEqual(true, p.address.rom);
     try expectEqual(0b0101010, p.address.local);
 }
@@ -437,14 +431,14 @@ test "jump" {
 test "slot 1 and 2 jumps force P8 to zero and preserve P9" {
     const io_address: Address = .{ .io = true, .rom = true, .local = 0x55 };
     var p: ProgramCounter = .{ .address = io_address, .extended_arithmetic = true };
-    p.jump(.slot(1), @bitCast(Jump{ .destination = 0x12 }));
+    p.jump(1, @bitCast(Jump{ .destination = 0x12 }));
     try expectEqual(true, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
     try expectEqual(false, p.address.rom);
     try expectEqual(0x12, p.address.local);
 
     p = .{ .address = io_address, .extended_arithmetic = true };
-    p.jump(.slot(2), @bitCast(ShortJump{ .destination = 0b010 }));
+    p.jump(2, @bitCast(ShortJump{ .destination = 0b010 }));
     try expectEqual(true, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
     try expectEqual(true, p.address.rom);
@@ -463,7 +457,7 @@ test "short jump" {
     var p: ProgramCounter = .reset;
 
     const instruction: Word = @bitCast(ShortJump{ .destination = 0b101 });
-    p.jump(.slot(2), instruction);
+    p.jump(2, instruction);
 
     try expectEqual(false, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
@@ -527,10 +521,10 @@ test Instruction {
     };
 
     try expectEqual(0b010000000000000001, @as(Word, @bitCast(instruction)));
-    try expectEqual(instruction.getSlot(.slot(0)), instruction.slot_0);
-    try expectEqual(instruction.getSlot(.slot(1)), instruction.slot_1);
-    try expectEqual(instruction.getSlot(.slot(2)), instruction.slot_2);
-    try expectEqual(instruction.getSlot(.slot(3)), .unext);
+    try expectEqual(instruction.getSlot(0), instruction.slot_0);
+    try expectEqual(instruction.getSlot(1), instruction.slot_1);
+    try expectEqual(instruction.getSlot(2), instruction.slot_2);
+    try expectEqual(instruction.getSlot(3), .unext);
 }
 
 test "computer is initialized" {
@@ -638,7 +632,7 @@ test "computer steps correctly" {
         .slot_2 = .@".",
         .slot_3 = 7,
     };
-    computer.mem[64 + 0x2a] = inst_1.encodeJump(.slot(0), 0);
+    computer.mem[64 + 0x2a] = inst_1.encodeJump(0, 0);
     computer.mem[0] = inst_2.encode();
     computer.mem[1] = inst_3.encode();
     computer.mem[2] = 100;
@@ -646,7 +640,7 @@ test "computer steps correctly" {
     computer.mem[4] = inst_5.encode();
     computer.mem[5] = 2;
     computer.mem[6] = nops.encode();
-    computer.mem[7] = inst_6.encodeJump(.slot(0), 6);
+    computer.mem[7] = inst_6.encodeJump(0, 6);
     computer.mem[8] = nops.encode();
 
     try expectEqual(0x2a, computer.p.address.local);
@@ -722,7 +716,7 @@ test "unext loops R+1 times then continues with the next slot" {
 
 test "execution time depends on the opcode class" {
     var computer: Computer = .reset;
-    computer.slot = .slot(1);
+    computer.slot = 1;
 
     computer.execute(.@".");
     try expectApproxEqAbs(1.5, computer.execution_time, 0.001);
@@ -747,7 +741,7 @@ test "instruction encoding" {
 
     // destination fields are not encoded
     const call: Instruction = .{ .slot_0 = .@"@p", .slot_1 = .call, .slot_2 = .@";", .slot_3 = 0 };
-    const word = call.encodeJump(.slot(1), 0x12);
+    const word = call.encodeJump(1, 0x12);
     try expectEqual(0x12, word & 0xff);
     try expectEqual(.@"@p", Instruction.decode(word).slot_0);
     try expectEqual(.call, Instruction.decode(word).slot_1);

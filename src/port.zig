@@ -11,7 +11,10 @@ pub const Side = enum(u1) {
     b,
 
     pub fn other(self: Side) Side {
-        return @fromBackingInt(@intCast(~@backingInt(self)));
+        return switch (self) {
+            .a => .b,
+            .b => .a,
+        };
     }
 };
 

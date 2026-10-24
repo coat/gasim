@@ -203,7 +203,7 @@ const Assembler = struct {
         } else if (eql(token, ";")) {
             if (call) |location| {
                 // tail call: jump instead of call and return
-                self.ram[location.address] ^= switch (@backingInt(location.slot)) {
+                self.ram[location.address] ^= switch (location.slot) {
                     0 => 1 << 13,
                     1 => 1 << 8,
                     else => 1 << 3,
@@ -331,7 +331,7 @@ const Assembler = struct {
             try self.startWord();
         }
         self.setSlot(opcode);
-        const location: Location = .{ .address = self.word.?, .slot = .slot(self.slot) };
+        const location: Location = .{ .address = self.word.?, .slot = self.slot };
         self.ram[location.address] = self.instruction.encodeJump(location.slot, destination orelse 0);
         self.word = null;
         return location;
@@ -547,8 +547,8 @@ test "labels, calls and tail calls" {
         \\   main ;
     ;
     try expectAssembles(program, &.{
-        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .call, .slot_2 = .@".", .slot_3 = 7 }, .slot(1), 1),
-        Instruction.encodeJump(.{ .slot_0 = .drop, .slot_1 = .jump, .slot_2 = .@".", .slot_3 = 7 }, .slot(1), 0),
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .call, .slot_2 = .@".", .slot_3 = 7 }, 1, 1),
+        Instruction.encodeJump(.{ .slot_0 = .drop, .slot_1 = .jump, .slot_2 = .@".", .slot_3 = 7 }, 1, 0),
     });
 
     var diagnostic: Diagnostic = .{};
@@ -565,7 +565,7 @@ test "label addresses" {
 
 test "control structures" {
     try expectAssembles("begin dup again", &.{
-        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .jump, .slot_2 = .@".", .slot_3 = 7 }, .slot(1), 0),
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .jump, .slot_2 = .@".", .slot_3 = 7 }, 1, 0),
     });
     try expectAssembles("3 for dup unext", &.{
         Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@">r", .slot_2 = .@".", .slot_3 = 7 }),
@@ -574,10 +574,10 @@ test "control structures" {
     });
     try expectAssembles("dup for drop next", &.{
         Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@">r", .slot_2 = .@".", .slot_3 = 7 }),
-        Instruction.encodeJump(.{ .slot_0 = .drop, .slot_1 = .next, .slot_2 = .@".", .slot_3 = 7 }, .slot(1), 1),
+        Instruction.encodeJump(.{ .slot_0 = .drop, .slot_1 = .next, .slot_2 = .@".", .slot_3 = 7 }, 1, 1),
     });
     try expectAssembles("if dup then drop", &.{
-        Instruction.encodeJump(.{ .slot_0 = .@"if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, .slot(0), 2),
+        Instruction.encodeJump(.{ .slot_0 = .@"if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
         Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
         Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
     });
@@ -587,16 +587,16 @@ test "jumps move to a new word when the destination is out of reach" {
     // a forward reference needs at least slot 1
     try expectAssembles("dup dup -if then", &.{
         Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .dup, .slot_2 = .@".", .slot_3 = 7 }),
-        Instruction.encodeJump(.{ .slot_0 = .@"-if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, .slot(0), 2),
+        Instruction.encodeJump(.{ .slot_0 = .@"-if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
     });
     // slot 2 can reach its own word
     try expectAssembles("begin dup dup again", &.{
-        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .dup, .slot_2 = .jump, .slot_3 = 0 }, .slot(2), 0),
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .dup, .slot_2 = .jump, .slot_3 = 0 }, 2, 0),
     });
     // but not an address outside the 8 word block P is in
     try expectAssembles("7 org begin dup dup again", &.{
-        0,                                                                                     0,                                                                                                        0, 0, 0, 0, 0,
-        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .dup, .slot_2 = .@".", .slot_3 = 7 }), Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, .slot(0), 7),
+        0,                                                                                     0,                                                                                                 0, 0, 0, 0, 0,
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .dup, .slot_2 = .@".", .slot_3 = 7 }), Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 7),
     });
 }
 
@@ -657,7 +657,7 @@ test "labels and then at the end of RAM" {
 
     const branch = try assemble("63 org if then", &diagnostic);
     try expectEqual(
-        Instruction.encodeJump(.{ .slot_0 = .@"if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, .slot(0), 64),
+        Instruction.encodeJump(.{ .slot_0 = .@"if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 64),
         branch.ram[63],
     );
 }
