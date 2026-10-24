@@ -24,22 +24,17 @@ const ProgramCounter = packed struct(u10) {
         if (!self.address.io) self.address.local +%= 1;
     }
 
+    /// The destination field replaces the low order bits of P. Slot 0 jumps can
+    /// reach any address and set P9. Slot 1 and 2 jumps leave P9 unchanged and
+    /// force P8 to zero, so they can never land in I/O space.
     pub fn jump(self: *ProgramCounter, slot: Slot, instruction: Word) void {
-        return switch (slot) {
-            .slot(0) => {
-                const long_jump: LongJump = @bitCast(instruction);
-                self.* = @bitCast(@as(u10, @intCast(long_jump.destination)));
-            },
-            .slot(1) => {
-                const med_jump: Jump = @bitCast(instruction);
-                self.address.local = (self.address.local & ~@as(u7, 0b1111111)) | (med_jump.destination & 0b1111111);
-            },
-            .slot(2) => {
-                const short_jump: ShortJump = @bitCast(instruction);
-                self.address.local = (self.address.local & ~@as(u3, 0b111)) | (short_jump.destination & 0b111);
-            },
-            else => {},
-        };
+        const p: u10 = @bitCast(self.*);
+        self.* = @bitCast(switch (slot) {
+            .slot(0) => @as(LongJump, @bitCast(instruction)).destination,
+            .slot(1) => (p & 0x200) | @as(Jump, @bitCast(instruction)).destination,
+            .slot(2) => (p & 0x2f8) | @as(ShortJump, @bitCast(instruction)).destination,
+            else => return,
+        });
     }
 
     pub const reset: ProgramCounter = .{
@@ -78,8 +73,7 @@ pub const LongJump = packed struct(Word) {
 };
 
 pub const Jump = packed struct(Word) {
-    destination: u7,
-    p8: u1 = 0,
+    destination: u8,
     _: u10 = 0,
 };
 
@@ -300,8 +294,30 @@ test "jump" {
 
     try expectEqual(false, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
+    try expectEqual(false, p.address.rom);
+    try expectEqual(0b0101010, p.address.local);
+
+    // slot 1 jumps replace P7 so they can move between RAM and ROM
+    p.jump(.slot(1), @bitCast(Jump{ .destination = 0b10101010 }));
     try expectEqual(true, p.address.rom);
     try expectEqual(0b0101010, p.address.local);
+}
+
+test "slot 1 and 2 jumps force P8 to zero and preserve P9" {
+    const io_address: Address = .{ .io = true, .rom = true, .local = 0x55 };
+    var p: ProgramCounter = .{ .address = io_address, .extended_arithmetic = true };
+    p.jump(.slot(1), @bitCast(Jump{ .destination = 0x12 }));
+    try expectEqual(true, p.extended_arithmetic);
+    try expectEqual(false, p.address.io);
+    try expectEqual(false, p.address.rom);
+    try expectEqual(0x12, p.address.local);
+
+    p = .{ .address = io_address, .extended_arithmetic = true };
+    p.jump(.slot(2), @bitCast(ShortJump{ .destination = 0b010 }));
+    try expectEqual(true, p.extended_arithmetic);
+    try expectEqual(false, p.address.io);
+    try expectEqual(true, p.address.rom);
+    try expectEqual(0x52, p.address.local);
 }
 
 test "short jump" {
@@ -313,7 +329,8 @@ test "short jump" {
     try expectEqual(false, p.extended_arithmetic);
     try expectEqual(false, p.address.io);
     try expectEqual(true, p.address.rom);
-    try expectEqual(0b101, p.address.local);
+    // only the low 3 bits are replaced: x42 -> x45
+    try expectEqual(0x45, p.address.local);
 }
 
 test "address is set on reset" {
