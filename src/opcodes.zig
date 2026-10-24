@@ -79,7 +79,7 @@ pub const opcodes = [_]OpCodeFn{
     storePlus,
     storeB,
     store,
-    nop,
+    multiplyStep,
     shl,
     shr,
     inv,
@@ -478,6 +478,160 @@ test store {
     store(&computer);
     try expectEqual(0x456, computer.mem[63]);
     try expectEqual(0, computer.data_stack.t);
+}
+
+/// +*
+///
+/// **Multiply step**.
+/// Signed Multiplicand is in S, unsigned multiplier in A, T=0 at start of a
+/// step sequence. Uses T:A as a 36-bit shift register with multiplier in A.
+/// Does the following:
+/// 1. If bit A0 is zero, shifts the 36-bit register T:A right one bit
+///    arithmetically (T17 is not changed and is copied into T16. T0 is copied
+///    to A17 and A0 is discarded.)
+/// 2. If bit A0 is one, S and T are added as though they had both been
+///    extended to be 19 bit signed numbers, and the 37-bit concatenation of
+///    this sum and A is shifted right one bit to replace T:A. Overflow may
+///    occur if S and T are both nonzero and their signs differ; this can only
+///    occur through improper initialization of T.
+///
+/// This instruction is affected in Extended Arithmetic Mode by including the
+/// latched carry in the sum in case (2) above, and by latching the carry out
+/// from bit 17 of the sum.
+pub fn multiplyStep(c: *Computer) void {
+    const multiplier: u18 = @bitCast(c.a);
+    // the 19-bit signed value that becomes the high part of T:A after the
+    // shift: T alone in case (1), or the sum of S and T in case (2)
+    const high: i19 = if (multiplier & 1 == 0) c.data_stack.t else sum: {
+        const s = c.data_stack.s;
+        const t = c.data_stack.t;
+        if (c.p.extended_arithmetic) {
+            const carry_in = c.carry;
+            const unsigned = @as(u19, @as(u18, @bitCast(s))) + @as(u18, @bitCast(t)) + carry_in;
+            c.carry = @truncate(unsigned >> 18);
+            break :sum @as(i19, s) + t + carry_in;
+        }
+        break :sum @as(i19, s) + t;
+    };
+    const low_bit: u1 = @truncate(@as(u19, @bitCast(high)));
+    c.data_stack.t = @truncate(high >> 1);
+    c.a = @bitCast(@as(u18, low_bit) << 17 | multiplier >> 1);
+}
+
+test "multiplyStep with A0 clear shifts T:A right" {
+    var computer: Computer = .reset;
+    computer.data_stack.push(0x123);
+    computer.data_stack.push(@bitCast(@as(u18, 0x20001)));
+    computer.a = 0b10;
+
+    multiplyStep(&computer);
+    // T17 is copied into T16, T0 into A17
+    try expectEqual(@as(u18, 0x30000), @as(u18, @bitCast(computer.data_stack.t)));
+    try expectEqual(@as(u18, 0x20001), @as(u18, @bitCast(computer.a)));
+    try expectEqual(0x123, computer.data_stack.s);
+}
+
+test "multiplyStep with A0 set adds S to T before shifting" {
+    var computer: Computer = .reset;
+    computer.data_stack.push(5);
+    computer.data_stack.push(2);
+    computer.a = 0b11;
+
+    // (5 + 2) = 0b111 shifted right, low bit goes to A17
+    multiplyStep(&computer);
+    try expectEqual(0b11, computer.data_stack.t);
+    try expectEqual(@as(u18, 0x20001), @as(u18, @bitCast(computer.a)));
+    try expectEqual(5, computer.data_stack.s);
+
+    // sum is computed as 19 bits, so 0x1ffff + 0x1fffe does not overflow
+    computer.data_stack.t = 0x1fffe;
+    computer.data_stack.s = 0x1ffff;
+    computer.a = 1;
+    multiplyStep(&computer);
+    try expectEqual(0x1fffe, computer.data_stack.t);
+    try expectEqual(@as(u18, 0x20000), @as(u18, @bitCast(computer.a)));
+}
+
+test "18 multiply steps multiply signed S by unsigned A into T:A" {
+    // a nonzero T at the start is added to the product
+    const cases = [_]struct { s: Word, a: u18, t: Word = 0 }{
+        .{ .s = 3, .a = 5 },
+        .{ .s = -3, .a = 5 },
+        .{ .s = 0x1ffff, .a = 0x3ffff },
+        .{ .s = -0x20000, .a = 0x3ffff },
+        .{ .s = -1, .a = 1 },
+        .{ .s = 0x1234, .a = 0x2abcd },
+        .{ .s = 0, .a = 0x3ffff },
+        .{ .s = 3, .a = 5, .t = 7 },
+        .{ .s = -3, .a = 0x3ffff, .t = -100 },
+        .{ .s = 0x1ffff, .a = 0x3ffff, .t = 0x1ffff },
+    };
+
+    for (cases) |case| {
+        var computer: Computer = .reset;
+        computer.data_stack.push(case.s);
+        computer.data_stack.push(case.t);
+        computer.a = @bitCast(case.a);
+
+        for (0..18) |_| multiplyStep(&computer);
+
+        const product = @as(i36, case.s) * @as(i36, case.a) + case.t;
+        try expectEqual(@as(Word, @truncate(product >> 18)), computer.data_stack.t);
+        try expectEqual(@as(u18, @truncate(@as(u36, @bitCast(product)))), @as(u18, @bitCast(computer.a)));
+        try expectEqual(case.s, computer.data_stack.s);
+    }
+}
+
+test "multiplyStep in extended_arithmetic mode" {
+    var computer: Computer = .reset;
+    computer.p.extended_arithmetic = true;
+
+    // latched carry is included in the sum: 2 + 4 + 1 = 0b111
+    computer.carry = 1;
+    computer.data_stack.push(2);
+    computer.data_stack.push(4);
+    computer.a = 1;
+    multiplyStep(&computer);
+    try expectEqual(0b11, computer.data_stack.t);
+    try expectEqual(@as(u18, 0x20000), @as(u18, @bitCast(computer.a)));
+    try expectEqual(0, computer.carry);
+
+    // carry out of bit 17 is latched: -1 + 1 = 0 with carry
+    computer.data_stack.t = 1;
+    computer.data_stack.s = -1;
+    computer.a = 1;
+    multiplyStep(&computer);
+    try expectEqual(0, computer.data_stack.t);
+    try expectEqual(0, computer.a);
+    try expectEqual(1, computer.carry);
+
+    // carry is left alone when A0 is clear
+    computer.data_stack.t = 0b10;
+    computer.a = 0;
+    multiplyStep(&computer);
+    try expectEqual(1, computer.data_stack.t);
+    try expectEqual(1, computer.carry);
+}
+
+test "multiplyStep in extended_arithmetic mode carries between steps" {
+    var computer: Computer = .reset;
+    computer.p.extended_arithmetic = true;
+    computer.carry = 0;
+    computer.data_stack.push(1);
+    computer.data_stack.push(-1);
+    computer.a = 0b11;
+
+    // 1 + -1 = 0, latching a carry out of bit 17
+    multiplyStep(&computer);
+    try expectEqual(0, computer.data_stack.t);
+    try expectEqual(1, computer.a);
+    try expectEqual(1, computer.carry);
+
+    // the latched carry feeds the next step: 1 + 0 + 1 = 0b10
+    multiplyStep(&computer);
+    try expectEqual(1, computer.data_stack.t);
+    try expectEqual(0, computer.a);
+    try expectEqual(0, computer.carry);
 }
 
 /// 2*
