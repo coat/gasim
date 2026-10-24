@@ -6,16 +6,6 @@ pub fn build(b: *std.Build) void {
 
     const coverage = b.option(bool, "coverage", "Generate a coverage report with kcov") orelse false;
 
-    // const zul_mod = b.dependency("zul", .{
-    //     .target = target,
-    //     .optimize = optimize,
-    // }).module("zul");
-    //
-    // const vaxis_mod = b.dependency("vaxis", .{
-    //     .target = target,
-    //     .optimize = optimize,
-    // }).module("vaxis");
-
     const mod = b.addModule("gasim", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -39,9 +29,7 @@ pub fn build(b: *std.Build) void {
 
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run gasim");
     run_step.dependOn(&run_cmd.step);
@@ -69,7 +57,7 @@ pub fn build(b: *std.Build) void {
         run_test_steps.append(b.allocator, run_mod_tests) catch @panic("OOM");
         run_test_steps.append(b.allocator, run_exe_tests) catch @panic("OOM");
 
-        const kcov_bin = b.findProgram(&.{"kcov"}, &.{}) catch "kcov";
+        const kcov_bin = b.findProgram(.{ .names = &.{"kcov"} }) orelse "kcov";
 
         const merge_step = std.Build.Step.Run.create(b, "merge coverage");
         merge_step.addArgs(&.{ kcov_bin, "--merge" });

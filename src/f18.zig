@@ -6,7 +6,7 @@ const Slot = enum(u2) {
     _,
 
     pub fn slot(num: u2) Slot {
-        return @enumFromInt(num);
+        return @fromBackingInt(@intCast(num));
     }
 };
 
@@ -152,11 +152,11 @@ pub const Computer = struct {
             .execution => {
                 self.slot = .slot(0);
                 self.state = .execution;
-                current_slot: switch (@intFromEnum(self.slot)) {
+                current_slot: switch (@backingInt(self.slot)) {
                     0...2 => {
                         self.execute(instruction.getSlot(self.slot));
                         if (self.state != .execution) continue :current_state self.state;
-                        continue :current_slot @intFromEnum(self.slot);
+                        continue :current_slot @backingInt(self.slot);
                     },
                     3 => {
                         self.execute(instruction.getSlot(self.slot));
@@ -177,7 +177,7 @@ pub const Computer = struct {
     }
 
     pub fn execute(self: *Computer, opcode: Opcode) void {
-        const code: u5 = @intCast(@intFromEnum(opcode));
+        const code: u5 = @intCast(@backingInt(opcode));
         self.execution_time += time: switch (code) {
             0x00...0x03, 0x05...0x07 => {
                 self.state = .next;
@@ -193,7 +193,7 @@ pub const Computer = struct {
             },
             else => {
                 self.state = .execution;
-                self.slot = @enumFromInt(@intFromEnum(self.slot) +% 1);
+                self.slot = @fromBackingInt(@intCast(@backingInt(self.slot) +% 1));
                 opcodes.opcodes[code](self);
 
                 break :time 1.5;
@@ -390,7 +390,7 @@ test "computer is initialized" {
     try expectEqual(stack.DataStack.empty, computer.data_stack);
     try expectEqual(0, computer.carry);
     try expectEqual(.fetch, computer.state);
-    try expectEqual([_]Word{0} ** 128, computer.mem);
+    try expectEqual(@as([128]Word, @splat(0)), computer.mem);
 }
 
 test "fetch" {

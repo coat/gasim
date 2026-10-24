@@ -43,12 +43,12 @@ pub const Opcode = enum(u5) {
 
     pub fn fromInt(value: u3) Opcode {
         const full_code = @as(u5, @intCast(value)) << 2;
-        return @enumFromInt(full_code);
+        return @fromBackingInt(@intCast(full_code));
     }
 };
 
 test {
-    try std.testing.expectEqual(32, @typeInfo(Opcode).@"enum".fields.len);
+    try std.testing.expectEqual(32, @typeInfo(Opcode).@"enum".field_names.len);
 
     try expectEqual(.@";", Opcode.fromInt(0));
     try expectEqual(.unext, Opcode.fromInt(1));
