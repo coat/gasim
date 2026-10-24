@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    try stdout_writer.print("Total simulated time: {d}us\n", .{node.execution_time});
+    try stdout_writer.print("Total simulated time: {d}ns\n", .{node.execution_time});
 
     try stdout_writer.flush(); // Don't forget to flush!
 }
