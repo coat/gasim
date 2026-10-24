@@ -165,13 +165,8 @@ pub const Computer = struct {
                     },
                 }
             },
-            .unext => {
-                if (self.return_stack.t == 0) {
-                    _ = self.return_stack.pop();
-                    return;
-                }
-                continue :current_state .execution;
-            },
+            // unext with R nonzero loops back to slot 0 without re-fetching
+            .unext => continue :current_state .execution,
             .next => return,
         }
     }
@@ -188,6 +183,10 @@ pub const Computer = struct {
             0x04 => {
                 self.state = .unext;
                 opcodes.opcodes[code](self);
+                // loop is complete, continue with the following slot
+                if (self.state == .execution) {
+                    self.slot = @fromBackingInt(@intCast(@backingInt(self.slot) +% 1));
+                }
 
                 break :time 2.0;
             },
@@ -548,6 +547,36 @@ test "step fetches through the memory map" {
     computer.mem[64 + 5] = @bitCast(Instruction{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
     computer.step();
     try expectEqual(0, computer.data_stack.s);
+}
+
+test "unext loops R+1 times then continues with the next slot" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.return_stack.push(2);
+    computer.data_stack.push(1);
+    computer.mem[0] = @bitCast(Instruction{ .slot_0 = .dup, .slot_1 = .@"2*", .slot_2 = .unext, .slot_3 = 6 });
+
+    computer.step();
+    // dup 2* runs 3 times, then slot 3 dup runs once
+    try expectEqual(8, computer.data_stack.t);
+    try expectEqual(8, computer.data_stack.s);
+    try expectEqual(0, computer.return_stack.t);
+    try expectEqual(1, computer.p.address.local);
+}
+
+test "unext with R zero falls through without looping" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.return_stack.push(0x99);
+    computer.return_stack.push(0);
+    computer.data_stack.push(5);
+    computer.mem[0] = @bitCast(Instruction{ .slot_0 = .@".", .slot_1 = .unext, .slot_2 = .dup, .slot_3 = 7 });
+
+    computer.step();
+    try expectEqual(5, computer.data_stack.t);
+    try expectEqual(5, computer.data_stack.s);
+    try expectEqual(0x99, computer.return_stack.t);
+    try expectEqual(1, computer.p.address.local);
 }
 
 const opcodes = @import("opcodes.zig");

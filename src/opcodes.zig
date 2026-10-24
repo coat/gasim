@@ -191,15 +191,27 @@ test call {
 /// opcode. If R is nonzero, decrements R by 1 and causes execution to continue
 /// with slot 0 of the current instruction word without re-fetching the word.
 pub fn unext(c: *Computer) void {
-    c.return_stack.t -= 1;
+    if (c.return_stack.t == 0) {
+        _ = c.return_stack.pop();
+        c.state = .execution;
+    } else {
+        c.return_stack.t -%= 1;
+    }
 }
 
 test unext {
     var computer: Computer = .reset;
-    computer.return_stack.push(0x123);
+    computer.return_stack.push(0x55);
+    computer.return_stack.push(1);
+
+    computer.state = .unext;
+    unext(&computer);
+    try expectEqual(0, computer.return_stack.t);
+    try expectEqual(.unext, computer.state);
 
     unext(&computer);
-    try expectEqual(0x122, computer.return_stack.t);
+    try expectEqual(0x55, computer.return_stack.t);
+    try expectEqual(.execution, computer.state);
 }
 
 /// next
@@ -211,7 +223,7 @@ pub fn next(c: *Computer) void {
     if (c.return_stack.t == 0) {
         _ = c.return_stack.pop();
     } else {
-        c.return_stack.t -= 1;
+        c.return_stack.t -%= 1;
         c.p.jump(c.slot, c.i);
     }
 }
