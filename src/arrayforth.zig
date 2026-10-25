@@ -861,12 +861,19 @@ const Interpreter = struct {
             .rom_word = bin.rom_word,
         };
 
+        // a bin saved again no longer needs the labels it was saved with
+        const again = for (self.saved[0..self.saved_count], 0..) |*saved, i| {
+            if (saved.number == bin.number) break i;
+        } else null;
+        if (again) |i| self.saved[i].labels = &.{};
+
         // keeps the bin's own labels, sharing them with a bin that has the
         // same, such as the ROMs of nodes of a kind, and refers to the ROM's
         const own = bin.labels[bin.rom_labels.len..bin.label_count];
         const labels = for (self.saved[0..self.saved_count]) |saved| {
             if (sameLabels(saved.labels, own)) break saved.labels;
         } else copy: {
+            if (self.pool_len + own.len > self.label_pool.len) self.compactPool();
             if (self.pool_len + own.len > self.label_pool.len) return error.TooManyLabels;
             const copy = self.label_pool[self.pool_len..][0..own.len];
             @memcpy(copy, own);
@@ -876,12 +883,10 @@ const Interpreter = struct {
         const saved_bin: SavedBin = .{ .number = bin.number, .rom_labels = bin.rom_labels, .labels = labels };
 
         bin.changed = false;
-        for (self.saved[0..self.saved_count], 0..) |*saved, i| {
-            if (saved.number == bin.number) {
-                self.programs[i] = program;
-                saved.* = saved_bin;
-                return;
-            }
+        if (again) |i| {
+            self.programs[i] = program;
+            self.saved[i] = saved_bin;
+            return;
         }
         if (self.count == self.programs.len) return error.TooManyNodes;
         if (self.saved_count == self.saved.len) return error.TooManyNodes;
@@ -889,6 +894,33 @@ const Interpreter = struct {
         self.count += 1;
         self.saved[self.saved_count] = saved_bin;
         self.saved_count += 1;
+    }
+
+    /// Moves the labels saved bins still use to the start of the pool, so
+    /// the labels of bins saved again since can be used again
+    fn compactPool(self: *Interpreter) void {
+        const start = @intFromPtr(&self.label_pool);
+        var len: usize = 0;
+        // labels before this place in the pool have been moved
+        var moved: usize = 0;
+        while (true) {
+            // the labels next in the pool, which may be shared by bins
+            var lowest: ?[]const Label = null;
+            for (self.saved[0..self.saved_count]) |saved| {
+                if (saved.labels.len == 0) continue;
+                const at = (@intFromPtr(saved.labels.ptr) - start) / @sizeOf(Label);
+                if (at >= moved and (lowest == null or @intFromPtr(saved.labels.ptr) < @intFromPtr(lowest.?.ptr))) lowest = saved.labels;
+            }
+            const labels = lowest orelse break;
+            const to = self.label_pool[len..][0..labels.len];
+            std.mem.copyForwards(Label, to, labels);
+            moved = (@intFromPtr(labels.ptr) - start) / @sizeOf(Label) + labels.len;
+            for (self.saved[0..self.saved_count]) |*saved| {
+                if (saved.labels.len > 0 and saved.labels.ptr == labels.ptr) saved.labels = to;
+            }
+            len += labels.len;
+        }
+        self.pool_len = @intCast(len);
     }
 
     /// the value of a label in a saved bin, or in the ROM of the bin's node
@@ -1910,6 +1942,20 @@ test "bins call each other with its" {
     try std.testing.expectEqual(opcodes(.drop, .@";", .@";", .@";"), saved_twice[0].ram[0]);
     try std.testing.expectError(error.UndefinedLabel, assembleNodes("ASM[ # 1 NODE  # 2 its nothing", &programs, &.{}, &diagnostic));
     try std.testing.expectEqualStrings("nothing", diagnostic.token);
+}
+
+test "saving a bin again frees the labels it was saved with" {
+    // more labels than the pool holds, in all, as each saving differs
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll("ASM[ # 2 NODE : kept ; >BIN ]ASM\n");
+    for (0..300) |i| try source.writer.print("ASM[ # 1 NODE  # {d} org : a ; : b ; : c ; : d ; : e ; >BIN ]ASM\n", .{i % 50});
+    try source.writer.writeAll("ASM[ # 3 NODE  # 2 its kept >BIN");
+    var programs: [3]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleNodes(source.written(), &programs, &.{}, &diagnostic);
+    // and the labels of other bins are kept
+    try std.testing.expectEqual(jumpWord(.call, .@";", .@";", 0, 0), assembled.programs[2].ram[0]);
 }
 
 test "control structures" {
