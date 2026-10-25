@@ -2260,6 +2260,10 @@ test "assembling into ROM" {
     try std.testing.expectEqual(opcodes(.dup, .@";", .@";", .@";"), rom.words[0x29]);
     try std.testing.expectEqual(opcodes(.drop, .drop, .drop, .@"."), rom.words[0x3f]);
     try std.testing.expectEqual(opcodes(.a, .@";", .@";", .@";"), program.ram[0x10]);
+    // as does code at xff, which runs on to x80
+    const end = try assemble("ASM[ # 0 NODE -ROM  # xFF org  drop drop drop drop over >BIN", &diagnostic);
+    try std.testing.expectEqual(opcodes(.drop, .over, .@";", .@";"), end.rom.?.words[0]);
+
     // a program with no ROM code has none
     try std.testing.expectEqual(null, (try assemble("ASM[ # 0 NODE dup >BIN", &diagnostic)).rom);
 }

@@ -270,7 +270,7 @@ fn alloc(self: *Builder) Error!u7 {
     const result = try self.address();
     self.lines[result] = @intCast(@min(self.line, std.math.maxInt(u32)));
     // P increments its low 7 bits
-    self.here = if (self.wrap) (self.here & 0x80) | ((self.here + 1) & 0x7f) else self.here + 1;
+    self.here = if (self.wrap) (self.here & 0x80) | ((self.here +% 1) & 0x7f) else self.here + 1;
     if (result < 64) {
         self.len = @max(self.len, result + 1);
     } else self.rom_len = @max(self.rom_len, result - 64 + 1);
