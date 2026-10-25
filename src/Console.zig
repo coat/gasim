@@ -21,7 +21,9 @@ pub fn attach(self: *Console, node: *Computer, direction: Direction) void {
 
 /// Completes a transfer the node is waiting on. Returns false if the node is
 /// not waiting on the console, or wants input after the end of the input.
-pub fn service(self: *Console) !bool {
+/// Unless `wait` is set, it also returns false rather than block when no
+/// input is buffered.
+pub fn service(self: *Console, wait: bool) !bool {
     switch (self.port.state) {
         .writing => |w| if (w.side != side) {
             const word: u18 = @bitCast(self.port.read(side).?);
@@ -30,6 +32,7 @@ pub fn service(self: *Console) !bool {
         },
         .reading => |r| if (r != side) {
             if (self.input.bufferedLen() == 0) {
+                if (!wait) return false;
                 // show any prompt before waiting on input
                 try self.output.flush();
                 self.waiting.store(true, .release);
@@ -52,7 +55,7 @@ pub fn service(self: *Console) !bool {
 pub fn run(self: *Console, node: *Computer) !void {
     while (!self.interrupted.load(.monotonic)) {
         node.step();
-        if (node.suspended and !try self.service()) break;
+        if (node.suspended and !try self.service(true)) break;
     }
     try self.output.flush();
 }
@@ -103,11 +106,48 @@ test "stops when interrupted" {
     // run the program up to its endless loop
     for (0..4) |_| {
         node.step();
-        if (node.suspended) _ = try console.service();
+        if (node.suspended) _ = try console.service(true);
     }
     console.interrupted.store(true, .monotonic);
     try console.run(&node);
     try std.testing.expectEqualStrings("\x01", writer.buffered());
+}
+
+test service {
+    var reader: Io.Reader = .fixed("a");
+    var buffer: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var console: Console = .{ .input = &reader, .output = &writer };
+
+    // nothing to do
+    try std.testing.expect(!try console.service(true));
+
+    // output
+    try std.testing.expect(!console.port.write(.a, 'x'));
+    try std.testing.expect(try console.service(false));
+    try std.testing.expect(console.port.write(.a, 'x'));
+    try std.testing.expectEqualStrings("x", writer.buffered());
+
+    // input
+    try std.testing.expectEqual(null, console.port.read(.a));
+    try std.testing.expect(try console.service(false));
+    try std.testing.expectEqual('a', console.port.read(.a));
+
+    // end of input
+    try std.testing.expectEqual(null, console.port.read(.a));
+    try std.testing.expect(!try console.service(true));
+}
+
+test "service does not wait for input unless asked" {
+    var reader: Io.Reader = .fixed("");
+    var buffer: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var console: Console = .{ .input = &reader, .output = &writer };
+
+    try std.testing.expectEqual(null, console.port.read(.a));
+    try std.testing.expect(!try console.service(false));
+    // the node is still waiting
+    try std.testing.expect(console.port.otherReading(.b));
 }
 
 const assembler = @import("assembler.zig");
