@@ -9,6 +9,8 @@ output: *Io.Writer,
 interrupted: std.atomic.Value(bool) = .init(false),
 /// true while blocked waiting for input, when all output has been flushed
 waiting: std.atomic.Value(bool) = .init(false),
+/// true once the node has read or written the console
+used: bool = false,
 
 const Console = @This();
 
@@ -26,11 +28,13 @@ pub fn attach(self: *Console, node: *Computer, direction: Direction) void {
 pub fn service(self: *Console, wait: bool) !bool {
     switch (self.port.state) {
         .writing => |w| if (w.side != side) {
+            self.used = true;
             const word: u18 = @bitCast(self.port.read(side).?);
             try self.output.writeByte(@truncate(word));
             return true;
         },
         .reading => |r| if (r != side) {
+            self.used = true;
             if (self.input.bufferedLen() == 0) {
                 if (!wait) return false;
                 // show any prompt before waiting on input
@@ -58,12 +62,14 @@ test service {
 
     // nothing to do
     try std.testing.expect(!try console.service(true));
+    try std.testing.expect(!console.used);
 
     // output
     try std.testing.expect(!console.port.write(.a, 'x'));
     try std.testing.expect(try console.service(false));
     try std.testing.expect(console.port.write(.a, 'x'));
     try std.testing.expectEqualStrings("x", writer.buffered());
+    try std.testing.expect(console.used);
 
     // input
     try std.testing.expectEqual(null, console.port.read(.a));
