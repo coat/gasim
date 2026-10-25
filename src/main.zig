@@ -2,6 +2,7 @@
 
 const usage =
     \\usage: gasim [run] [options] <program.ga | program.af | program.blk>
+    \\       gasim repl [options] [program.ga | program.af | program.blk]
     \\
     \\Opens the program in a terminal user interface, reading .af files as
     \\arrayForth 3 source and .blk files as blocks of it. With run, or when stdin
@@ -9,6 +10,10 @@ const usage =
     \\and stdout, until every node is waiting, or one reaches a breakpoint or
     \\makes a watched transfer. With --listing, writes the assembled program
     \\instead.
+    \\
+    \\With repl, reads lines of arrayForth 3 from stdin and interprets them,
+    \\to assemble code and act on the chip with the words of arrayForth 3's
+    \\IDE, such as 708 NODE UPD, after loading the program if there is one.
     \\
     \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
@@ -46,7 +51,7 @@ const max_blocks_len = 64 * 1024 * 1024;
 /// the console stopped by ctrl+c
 var interruptible: ?*Console = null;
 
-const Command = enum { run, tui };
+const Command = enum { run, tui, repl };
 
 /// restores the terminal from the user interface before reporting a panic
 pub const panic = std.debug.FullPanic(struct {
@@ -63,8 +68,11 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 2) fatal(usage, .{});
     const run_command = std.mem.eql(u8, args[1], "run");
+    const repl_command = std.mem.eql(u8, args[1], "repl");
     // a pipe or file wants plain output rather than a user interface
-    const command: Command = if (run_command or !try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) .run else .tui;
+    const command: Command = if (repl_command)
+        .repl
+    else if (run_command or !try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) .run else .tui;
 
     var layout: Chip.Layout = .ga144;
     var console_node: u16 = 0;
@@ -81,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     var breakpoints_len: usize = 0;
     var watches: [Chip.max_watches]struct { node: u16, direction: Direction, read: bool, write: bool } = undefined;
     var watches_len: usize = 0;
-    var i: usize = if (run_command) 2 else 1;
+    var i: usize = if (run_command or repl_command) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load")) {
@@ -145,7 +153,8 @@ pub fn main(init: std.process.Init) !void {
             path = arg;
         } else fatal(usage, .{});
     }
-    const source_path = path orelse fatal(usage, .{});
+    if (path == null and command != .repl) fatal(usage, .{});
+    const source_path = path orelse "";
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
 
@@ -157,7 +166,9 @@ pub fn main(init: std.process.Init) !void {
     }
     // one spare byte tells a full buffer apart from a longer file
     var source_buffer: [max_source_len + 1]u8 = undefined;
-    const file = if (blocks)
+    const file = if (path == null)
+        ""
+    else if (blocks)
         Io.Dir.cwd().readFileAlloc(io, source_path, arena, .limited(max_blocks_len)) catch |err|
             fatal("{s}: {t}", .{ source_path, err })
     else
@@ -180,7 +191,24 @@ pub fn main(init: std.process.Init) !void {
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     const descriptor_buffer = try arena.alloc(gasim.boot.Descriptor, layout.count());
     var diagnostic: assembler.Diagnostic = .{};
-    const assembled = (if (blocks)
+    // the prompt, and the console with it, write here
+    var repl_buffer: [4096]u8 = undefined;
+    var repl_writer: Io.File.Writer = .init(.stdout(), io, &repl_buffer);
+    // arrayForth 3 at the prompt keeps the bins and labels of an arrayForth
+    // 3 program
+    const session: ?*gasim.arrayforth.Session = if (command == .repl) session: {
+        const session = try arena.create(gasim.arrayforth.Session);
+        session.* = .init(program_buffer, descriptor_buffer, &diagnostic, .{
+            .out = &repl_writer.interface,
+            .chip = &chip,
+            .blocks = if (blocks) file else null,
+        });
+        break :session session;
+    } else null;
+    const ga = path != null and !blocks and !std.mem.endsWith(u8, source_path, ".af");
+    const assembled = (if (session != null and !ga)
+        loadSession(arena, session.?, &diagnostic, file, blocks, loads[0..loads_len], path != null)
+    else if (blocks)
         gasim.arrayforth.assembleBlocks(file, loads[0..loads_len], program_buffer, descriptor_buffer, &diagnostic)
     else
         assemble(source_path, file, program_buffer, descriptor_buffer, &diagnostic)) catch |err| {
@@ -280,12 +308,15 @@ pub fn main(init: std.process.Init) !void {
         .output = switch (command) {
             .run => &stdout_file_writer.interface,
             .tui => &screen,
+            .repl => &repl_writer.interface,
         },
     };
     chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
         error.NoSuchNode => fatal("console node {d:0>3} is not in a {d}x{d} layout", .{ console_node, layout.rows, layout.columns }),
         error.PortConnected => fatal("console port {t} of node {d:0>3} is connected to another node", .{ console_port, console_node }),
     };
+
+    if (command == .repl) return repl.run(io, arena, &chip, session.?, &diagnostic, &repl_writer.interface);
 
     if (command == .tui) return tui.run(io, init.gpa, init.environ_map, &chip, .{
         .source_path = source_path,
@@ -400,6 +431,29 @@ fn handleInterrupt(_: posix.SIG) callconv(.c) void {
     }
 }
 
+/// Interprets a program in a session: a .af file, or for blocks each block
+/// to load in turn
+fn loadSession(
+    arena: Allocator,
+    session: *gasim.arrayforth.Session,
+    diagnostic: *assembler.Diagnostic,
+    file: []const u8,
+    blocks: bool,
+    loads: []const u32,
+    has_program: bool,
+) gasim.arrayforth.Error!gasim.arrayforth.Assembled {
+    if (blocks) {
+        for (loads) |block| {
+            if (block >= gasim.arrayforth.blockCount(file)) {
+                diagnostic.* = .{};
+                return error.NoSuchBlock;
+            }
+            try session.interpret(std.fmt.allocPrint(arena, "{d} LOAD", .{block}) catch fatal("out of memory", .{}));
+        }
+    } else if (has_program) try session.interpret(file);
+    return session.assembled();
+}
+
 /// where a line of source is, such as `hello.ga:3`, or for blocks
 /// `app.blk: block 2 line 5` with lines numbered from 0 as polyFORTH lists
 /// them
@@ -434,6 +488,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 const posix = std.posix;
+const Allocator = std.mem.Allocator;
 
 const gasim = @import("gasim");
 const assembler = gasim.assembler;
@@ -442,9 +497,11 @@ const Console = gasim.Console;
 const Direction = gasim.Direction;
 const ga144 = gasim.ga144;
 const ioName = gasim.disassembler.ioName;
+const repl = @import("repl.zig");
 const tui = @import("tui.zig");
 const vaxis = @import("vaxis");
 
 test {
+    _ = repl;
     _ = tui;
 }

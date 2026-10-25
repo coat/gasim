@@ -128,6 +128,30 @@ load block:
 $ gasim --load 2331 --load 2332 sF/pFDISK.blk
 ```
 
+### arrayForth 3 prompt
+
+`gasim repl` reads lines of arrayForth 3 and interprets them, answering
+`ok`. Code can be assembled into bins, and the words of arrayForth 3's IDE act
+on the simulated chip: `NODE` picks a node, `UPD` shows its stacks, `LIT`
+pushes onto them, `BOOT` loads a bin into its RAM, `CALL` runs code there,
+and `?RAM`, `-ASM`, `R@` and `R!` look at and change it. A program given
+after `repl` is loaded first, and the bins and labels of an arrayForth 3
+program stay available.
+
+```
+$ gasim repl
+707 NODE  x15. LIT  RDUP R+  UPD
+      0      0      0      0
+      0      0      0      0      0     42
+R      0      0      0      0      0      0      0      0      0
+ ok
+ASM[ # 707 NODE  : 2x 2* ; >BIN ]ASM  0 1 707 BOOT  0 CALL  UPD
+      0      0      0      0
+      0      0      0      0      0     84
+R      0      0      0      0      0      0      0      0      0
+ ok
+```
+
 ### Terminal user interface
 
 The map shows every node: running nodes are green, nodes waiting on a port
