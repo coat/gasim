@@ -14,7 +14,7 @@ pub const disassembler = @import("disassembler.zig");
 pub const ga144 = @import("ga144.zig");
 
 const f18 = @import("f18.zig");
-const port = @import("port.zig");
+pub const port = @import("port.zig");
 
 test {
     _ = @import("assembler.zig");
