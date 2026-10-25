@@ -1,21 +1,41 @@
 //! Packs opcodes, literals and data into the instruction words of one node's
 //! RAM, and resolves references to labels once they are all defined. Front
-//! ends such as assembler.zig turn source into calls to it.
+//! ends such as assembler.zig and arrayforth.zig turn source into calls to it.
 
 const Builder = @This();
 
 ram: [64]Word = @splat(0),
 /// the source line each word was assembled from, or 0 for an unused word
 lines: [64]u16 = @splat(0),
-/// next free address, up to 64
+/// next free address, up to 64, or up to x7f when wrapping
 here: u7 = 0,
 len: u7 = 0,
 /// the source line being assembled
 line: usize = 1,
+/// P9 of the location counter, so that code assembled while it is set runs
+/// in Extended Arithmetic Mode when jumped to
+extended: bool = false,
+
+/// Leave the unused slots of a word that ends with a return, ex or jump, or
+/// at the end of the code, as returns rather than nops, as arrayForth 3 does
+returns: bool = false,
+/// Let the location counter run on past the end of RAM as P does, through
+/// x40 to x7f, which address RAM from 0 again, and then around to 0
+wrap: bool = false,
+/// Let forward jumps go in slot 2, whose 3 bit destination only reaches
+/// within the same 8 words, failing at `then` if it is too far
+short_forward: bool = false,
+/// Build a single instruction word, which may not need a second word for a
+/// literal or a jump that does not fit
+single_word: bool = false,
+/// P when a single instruction word runs, such as the address of the port
+/// it is executed from, or null if it is not known
+p: ?u10 = null,
 
 /// address of the instruction word being packed
 word: ?u6 = null,
-slot: u2 = 0,
+/// the next slot to fill, 4 once all are filled
+slot: u3 = 0,
 instruction: Instruction = nops,
 /// the call that a following return turns into a jump
 last_call: ?Location = null,
@@ -33,12 +53,22 @@ pub const Error = error{
     UndefinedLabel,
     /// the body of a for unext loop must fit in one instruction word
     UnextBodyTooLong,
+    /// a then too far for its forward jump's destination field to reach
+    UnreachableThen,
+    /// a single instruction word with too many opcodes, or a literal
+    InlineTooLong,
 };
 
 /// where a jump is, to patch its destination
-pub const Location = struct { address: u6, slot: Slot };
+pub const Location = struct {
+    address: u6,
+    slot: Slot,
+    /// P when the jump runs, past its word and any literals before it
+    p: u10 = 0,
+};
 
 const nops: Instruction = .{ .slot_0 = .@".", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 };
+const all_returns: Instruction = .{ .slot_0 = .@";", .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 };
 
 const Label = struct {
     name: []const u8,
@@ -63,19 +93,21 @@ pub fn emit(self: *Builder, opcode: Opcode) Error!void {
     if (self.word == null) try self.startWord();
     // only opcodes with their two low bits clear fit in slot 3
     if (self.slot == 3 and @backingInt(opcode) & 3 != 0) {
-        self.finishWord();
+        self.finishWord(.nops);
         try self.startWord();
     }
     self.setSlot(opcode);
-    if (self.slot == 3) self.finishWord() else self.slot += 1;
-    if (opcode == .@";" or opcode == .ex) self.finishWord();
+    self.slot += 1;
+    if (opcode == .@";" or opcode == .ex) {
+        self.finishWord(.blank);
+    } else if (self.slot == 4) self.finishWord(.nops);
 }
 
 /// Compiles a return, or turns a call just before it into a jump
 pub fn ret(self: *Builder) Error!void {
-    const location = self.last_call orelse return self.emit(.@";");
+    const jump = self.last_call orelse return self.emit(.@";");
     self.last_call = null;
-    self.ram[location.address] ^= switch (location.slot) {
+    self.ram[jump.address] ^= switch (jump.slot) {
         0 => 1 << 13,
         1 => 1 << 8,
         else => 1 << 3,
@@ -84,19 +116,19 @@ pub fn ret(self: *Builder) Error!void {
 
 /// Compiles a call to an address, such as a ROM word
 pub fn call(self: *Builder, destination: u10) Error!void {
-    const location = try self.emitJump(.call, destination);
-    self.last_call = location;
+    const jump = try self.emitJump(.call, destination);
+    self.last_call = jump;
 }
 
 /// Compiles a call to a label, which may be defined later
 pub fn callLabel(self: *Builder, name: []const u8) Error!void {
     const label = try self.reference(name);
     const known = self.labels[label].address;
-    const location = try self.emitJump(.call, if (known) |a| a else null);
+    const jump = try self.emitJump(.call, if (known) |a| a else null);
     if (self.labels[label].address == null) {
-        try self.addFixup(.{ .slot = location.slot, .address = location.address, .label = label, .line = self.line });
+        try self.addFixup(.{ .slot = jump.slot, .address = jump.address, .label = label, .line = self.line });
     }
-    self.last_call = location;
+    self.last_call = jump;
 }
 
 /// Compiles @p followed by the value
@@ -118,22 +150,27 @@ pub fn literalLabel(self: *Builder, name: []const u8) Error!void {
 /// Compiles a word of data after the instruction word being packed
 pub fn data(self: *Builder, value: Word) Error!void {
     self.last_call = null;
-    self.finishWord();
+    self.finishWord(.nops);
     self.ram[try self.alloc()] = value;
 }
 
 /// Continues assembling at an address
 pub fn org(self: *Builder, destination: Word) Error!void {
     self.last_call = null;
-    self.finishWord();
-    if (destination < 0 or destination >= 64) return error.NumberOutOfRange;
+    self.finishWord(.nops);
+    if (destination < 0 or destination >= @as(Word, if (self.wrap) 0x80 else 64)) return error.NumberOutOfRange;
     self.here = @intCast(destination);
 }
 
 /// Ends the instruction word being packed, leaving its unused slots as nops
 pub fn alignWord(self: *Builder) void {
     self.last_call = null;
-    self.finishWord();
+    self.finishWord(.nops);
+}
+
+/// the address of the next word, with P9 when extended
+pub fn location(self: Builder) u10 {
+    return @as(u10, self.here) | @as(u10, @intFromBool(self.extended)) << 9;
 }
 
 /// Makes sure the next opcode goes in a slot before `slot`, ending the
@@ -146,7 +183,7 @@ pub fn limitSlot(self: *Builder, slot: Word) Error!void {
 /// Defines a label at the next instruction word
 pub fn define(self: *Builder, name: []const u8) Error!void {
     self.last_call = null;
-    self.finishWord();
+    self.finishWord(.nops);
     const label = &self.labels[try self.reference(name)];
     if (label.address != null) return error.DuplicateLabel;
     label.address = self.here;
@@ -160,19 +197,19 @@ pub fn labelAddress(self: Builder, name: []const u8) ?u7 {
 /// Starts a new instruction word to jump back to, returning its address
 pub fn begin(self: *Builder) Error!u6 {
     self.last_call = null;
-    self.finishWord();
+    self.finishWord(.nops);
     return self.address();
 }
 
 /// Compiles a jump, next, if or other opcode that goes back to an address
-pub fn back(self: *Builder, opcode: Opcode, destination: u6) Error!void {
+pub fn back(self: *Builder, opcode: Opcode, destination: u10) Error!void {
     self.last_call = null;
     _ = try self.emitJump(opcode, destination);
 }
 
 /// Compiles unext, which goes back to the start of its own instruction word
 pub fn unext(self: *Builder, destination: u6) Error!void {
-    if ((self.word orelse self.here) != destination) return error.UnextBodyTooLong;
+    if ((self.word orelse @as(u6, @truncate(self.here))) != destination) return error.UnextBodyTooLong;
     try self.emit(.unext);
 }
 
@@ -184,16 +221,18 @@ pub fn forward(self: *Builder, opcode: Opcode) Error!Location {
 }
 
 /// Makes a forward jump go to the next instruction word
-pub fn then(self: *Builder, location: Location) void {
+pub fn then(self: *Builder, jump: Location) Error!void {
     self.last_call = null;
-    self.finishWord();
-    self.patch(location, self.here);
+    self.finishWord(.nops);
+    const destination = self.location();
+    if (!lands(jump.slot, jump.p, destination)) return error.UnreachableThen;
+    self.patch(jump, destination);
 }
 
 /// Resolves references once all of the words are assembled. An undefined
 /// label is reported with the line it was used on.
 pub fn finish(self: *Builder, diagnostic: *Diagnostic) Error!void {
-    self.finishWord();
+    self.finishWord(.blank);
     for (self.fixups[0..self.fixup_count]) |fixup| {
         const label = self.labels[fixup.label];
         const destination = label.address orelse {
@@ -208,29 +247,39 @@ pub fn finish(self: *Builder, diagnostic: *Diagnostic) Error!void {
     }
 }
 
-/// address of the next word, which must exist
+/// where in RAM the next word is, which must exist
 fn address(self: *Builder) Error!u6 {
-    if (self.here >= 64) return error.ProgramTooLarge;
-    return @intCast(self.here);
+    if (!self.wrap and self.here >= 64) return error.ProgramTooLarge;
+    return @truncate(self.here);
 }
 
 fn alloc(self: *Builder) Error!u6 {
+    if (self.single_word and self.len > 0) return error.InlineTooLong;
     const result = try self.address();
     self.lines[result] = @intCast(@min(self.line, std.math.maxInt(u16)));
-    self.here += 1;
-    self.len = @max(self.len, self.here);
+    self.here = if (self.wrap) self.here +% 1 else self.here + 1;
+    self.len = @max(self.len, @as(u7, result) + 1);
     return result;
 }
 
 fn startWord(self: *Builder) Error!void {
     self.word = try self.alloc();
     self.slot = 0;
-    self.instruction = nops;
+    self.instruction = if (self.returns) all_returns else nops;
 }
 
-/// stores the instruction word being packed, leaving unused slots as nops
-fn finishWord(self: *Builder) void {
+/// what to leave in the unused slots of a finished word
+const Fill = enum {
+    /// for execution that continues into the next word
+    nops,
+    /// nops, or returns as arrayForth 3 leaves them
+    blank,
+};
+
+/// stores the instruction word being packed
+fn finishWord(self: *Builder, fill: Fill) void {
     const word = self.word orelse return;
+    if (fill == .nops) while (self.slot < 4) : (self.slot += 1) self.setSlot(.@".");
     self.ram[word] = self.instruction.encode();
     self.word = null;
 }
@@ -241,6 +290,7 @@ fn setSlot(self: *Builder, opcode: Opcode) void {
         1 => self.instruction.slot_1 = opcode,
         2 => self.instruction.slot_2 = opcode,
         3 => self.instruction.slot_3 = @intCast(@backingInt(opcode) >> 2),
+        else => unreachable,
     }
 }
 
@@ -250,33 +300,48 @@ fn setSlot(self: *Builder, opcode: Opcode) void {
 fn emitJump(self: *Builder, opcode: Opcode, destination: ?u10) Error!Location {
     if (self.word == null) try self.startWord();
     if (!self.reachable(destination)) {
-        self.finishWord();
+        self.finishWord(.nops);
         try self.startWord();
     }
     self.setSlot(opcode);
-    const location: Location = .{ .address = self.word.?, .slot = self.slot };
-    self.ram[location.address] = self.instruction.encodeJump(location.slot, destination orelse 0);
+    const jump: Location = .{ .address = self.word.?, .slot = @intCast(self.slot), .p = self.pc() };
+    const field = (destination orelse 0) & Instruction.destinationMask(jump.slot);
+    self.ram[jump.address] = self.instruction.encodeJump(jump.slot, @intCast(field));
     self.word = null;
-    return location;
+    return jump;
 }
 
-/// Unknown destinations are labels, which are in RAM
+/// P when the word being packed runs, which has been incremented past the
+/// word and its literals
+fn pc(self: Builder) u10 {
+    return self.p orelse self.location();
+}
+
+/// Whether a jump from the current slot reaches the destination, or for an
+/// unknown destination, whether it may go there to be patched later.
+/// Unknown destinations are forward in RAM.
 fn reachable(self: Builder, destination: ?u10) bool {
     return switch (self.slot) {
         0 => true,
-        // slot 1 replaces the low 8 bits of P, reaching RAM and ROM but
-        // not Extended Arithmetic Mode
-        1 => if (destination) |d| d < 0x100 else true,
-        // slot 2 replaces the low 3 bits of P, which has been incremented
-        // past this word and its literals
-        2 => if (destination) |d| d < 0x100 and d >> 3 == self.here >> 3 else false,
-        3 => false,
+        1, 2 => if (destination) |d|
+            (!self.single_word or self.p != null) and lands(@intCast(self.slot), self.pc(), d)
+        else
+            self.slot == 1 or self.short_forward,
+        else => false,
     };
 }
 
-fn patch(self: *Builder, location: Location, destination: u7) void {
-    const word = &self.ram[location.address];
-    word.* = (word.* & ~Instruction.destinationMask(location.slot)) | destination;
+/// whether a jump in `slot` taken with P at `p` can go to the destination
+fn lands(slot: Slot, p: u10, destination: u10) bool {
+    var counter: ProgramCounter = @bitCast(p);
+    counter.jump(slot, destination & Instruction.destinationMask(slot));
+    return @as(u10, @bitCast(counter)) == destination;
+}
+
+fn patch(self: *Builder, jump: Location, destination: u10) void {
+    const mask = Instruction.destinationMask(jump.slot);
+    const word = &self.ram[jump.address];
+    word.* = (word.* & ~mask) | (destination & mask);
 }
 
 fn find(self: Builder, name: []const u8) ?u8 {
@@ -304,6 +369,7 @@ fn addFixup(self: *Builder, fixup: Fixup) Error!void {
 const Diagnostic = @import("assembler.zig").Diagnostic;
 const f18 = @import("f18.zig");
 const Instruction = f18.Instruction;
+const ProgramCounter = f18.ProgramCounter;
 const Slot = f18.Slot;
 const Word = f18.Word;
 const Opcode = @import("opcodes.zig").Opcode;

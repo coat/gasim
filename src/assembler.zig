@@ -252,11 +252,11 @@ const Assembler = struct {
         } else if (forwards.get(token)) |opcode| {
             try self.pushControl(.{ .forward = try b.forward(opcode) });
         } else if (eql(token, "then")) {
-            b.then(try self.popForward());
+            try b.then(try self.popForward());
         } else if (eql(token, "else")) {
             const location = try self.popForward();
             try self.pushControl(.{ .forward = try b.forward(.jump) });
-            b.then(location);
+            try b.then(location);
         } else if (eql(token, "while") or eql(token, "-while")) {
             // the forward jump goes under the begin it leaves
             const destination = try self.popBegin();
@@ -266,7 +266,7 @@ const Assembler = struct {
             try b.back(if (eql(token, "until")) .@"if" else .@"-if", try self.popBegin());
         } else if (eql(token, "repeat")) {
             try b.back(.jump, try self.popBegin());
-            b.then(try self.popForward());
+            try b.then(try self.popForward());
         } else if (eql(token, "*next")) {
             // a next back past a forward jump, which stays unresolved
             const location = try self.popForward();
