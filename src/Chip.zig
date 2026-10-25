@@ -454,13 +454,18 @@ pub fn execute(self: *Chip, i: u16, word: Word) error{NotWaitingForCode}!void {
     const n = &self.nodes[i];
     if (n.status() != .code) return error.NotWaitingForCode;
     const ports = port.select(@bitCast(n.p.address)) orelse return error.NotWaitingForCode;
+    // a word already delivered to the node is code it will run first, so
+    // check every port before withdrawing the node's reads from any
     var it = ports.iterator();
     while (it.next()) |direction| {
         const link = n.ports[@backingInt(direction)];
         const p = link.port orelse continue;
-        // a word already on its way is code the node will run first
-        if (p.state == .delivered) return error.NotWaitingForCode;
-        p.cancelRead(link.side);
+        if (p.state == .delivered and p.state.delivered.side == link.side) return error.NotWaitingForCode;
+    }
+    it = ports.iterator();
+    while (it.next()) |direction| {
+        const link = n.ports[@backingInt(direction)];
+        if (link.port) |p| p.cancelRead(link.side);
     }
     n.return_stack.push(n.p.toWord());
     n.i = word;
@@ -1111,6 +1116,30 @@ test "executes words from a port, as the IDE does" {
     try chip.execute(i, Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }, 0, 2));
     try std.testing.expect(!try chip.runUntilWaiting(i, 100));
     try std.testing.expectError(error.NotWaitingForCode, chip.execute(i, 0));
+}
+
+test "words are only refused for code delivered to the node" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    // node 101 waits for code on all four of its ports
+    try chip.setUp(.{ .node = 101, .p = 0x1a5 }, &.{});
+    const i = chip.layout.index(101).?;
+    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    const n = &chip.nodes[i];
+    const right = n.ports[@backingInt(Direction.right)];
+    const left = n.ports[@backingInt(Direction.left)];
+
+    // a word delivered to the node's neighbour is not code for it
+    right.port.?.state = .{ .delivered = .{ .side = right.side.other(), .value = 1 } };
+    try chip.execute(i, 0x15555);
+    try std.testing.expectEqual(right.side.other(), right.port.?.state.delivered.side);
+
+    // but one delivered to it is, and its other reads are left as they were
+    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    right.port.?.state = .{ .delivered = .{ .side = right.side, .value = 1 } };
+    try std.testing.expectEqual(Port.State{ .reading = left.side }, left.port.?.state);
+    try std.testing.expectError(error.NotWaitingForCode, chip.execute(i, 0x15555));
+    try std.testing.expectEqual(Port.State{ .reading = left.side }, left.port.?.state);
 }
 
 test "stops when interrupted" {
