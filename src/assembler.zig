@@ -10,11 +10,26 @@
 //!     123 ,           compile a number into memory as data
 //!     "text"          compile each byte of text into memory as data
 //!     0x10 org        continue assembling at an address
+//!     ..              fill the rest of the instruction word with nops
+//!     2 <sl           make the next opcode go in slot 0 or 1, starting a new
+//!                     instruction word if needed
 //!     begin again     loop forever
+//!     begin until     loop until T is nonzero
+//!     begin -until    loop until T is negative
+//!     begin while repeat
+//!                     loop while T is nonzero, or with -while while T is
+//!                     negative
 //!     for next        loop R+1 times
 //!     for unext       loop R+1 times within a single instruction word
+//!     for -if *next then
+//!                     loop R+1 times, leaving the loop when T is positive
 //!     if then         skip ahead when T is zero
 //!     -if then        skip ahead when T is positive
+//!     zif then        skip ahead when R is nonzero, decrementing it, or
+//!                     otherwise drop R
+//!     ahead then      skip ahead
+//!     leap then       call ahead
+//!     if else then    skip ahead to after else, which skips ahead to then
 //!     io right rdlu   push the address of the io register, a port or multiport
 //!     \ comment       comment to the end of the line
 //!     ( comment )     comment
@@ -234,15 +249,31 @@ const Assembler = struct {
             try b.back(.next, try self.popBegin());
         } else if (eql(token, "unext")) {
             try b.unext(try self.popBegin());
-        } else if (eql(token, "if") or eql(token, "-if")) {
-            const location = try b.forward(if (eql(token, "if")) .@"if" else .@"-if");
-            try self.pushControl(.{ .forward = location });
+        } else if (forwards.get(token)) |opcode| {
+            try self.pushControl(.{ .forward = try b.forward(opcode) });
         } else if (eql(token, "then")) {
-            if (self.control_count == 0 or self.control[self.control_count - 1] != .forward) {
-                return error.UnmatchedControl;
-            }
-            self.control_count -= 1;
-            b.then(self.control[self.control_count].forward);
+            b.then(try self.popForward());
+        } else if (eql(token, "else")) {
+            const location = try self.popForward();
+            try self.pushControl(.{ .forward = try b.forward(.jump) });
+            b.then(location);
+        } else if (eql(token, "while") or eql(token, "-while")) {
+            // the forward jump goes under the begin it leaves
+            const destination = try self.popBegin();
+            try self.pushControl(.{ .forward = try b.forward(if (eql(token, "while")) .@"if" else .@"-if") });
+            try self.pushControl(.{ .begin = destination });
+        } else if (eql(token, "until") or eql(token, "-until")) {
+            try b.back(if (eql(token, "until")) .@"if" else .@"-if", try self.popBegin());
+        } else if (eql(token, "repeat")) {
+            try b.back(.jump, try self.popBegin());
+            b.then(try self.popForward());
+        } else if (eql(token, "*next")) {
+            // a next back past a forward jump, which stays unresolved
+            const location = try self.popForward();
+            try b.back(.next, try self.popBegin());
+            try self.pushControl(.{ .forward = location });
+        } else if (eql(token, "..")) {
+            b.alignWord();
         } else if (token[0] == '"') {
             for (token[1 .. token.len - 1]) |byte| try b.data(byte);
         } else if (token[0] == '\'' and token.len > 1) {
@@ -262,6 +293,9 @@ const Assembler = struct {
             } else if (following != null and eql(following.?, "org")) {
                 _ = try self.next();
                 try b.org(value);
+            } else if (following != null and eql(following.?, "<sl")) {
+                _ = try self.next();
+                try b.limitSlot(value);
             } else try b.literal(value);
         } else if (self.romWord(token)) |destination| {
             try b.call(destination);
@@ -282,6 +316,14 @@ const Assembler = struct {
         return self.control[self.control_count].begin;
     }
 
+    fn popForward(self: *Assembler) Error!Builder.Location {
+        if (self.control_count == 0 or self.control[self.control_count - 1] != .forward) {
+            return error.UnmatchedControl;
+        }
+        self.control_count -= 1;
+        return self.control[self.control_count].forward;
+    }
+
     /// the address of a ROM word of the node, noting the first one used
     fn romWord(self: *Assembler, name: []const u8) ?u10 {
         const destination = ga144.romWord(self.node, name) orelse return null;
@@ -295,8 +337,20 @@ fn constant(token: []const u8) ?Word {
     return null;
 }
 
+/// words that jump forward to a then, with the opcode they compile
+const forwards: std.StaticStringMap(Opcode) = .initComptime(.{
+    .{ "if", .@"if" },
+    .{ "-if", .@"-if" },
+    .{ "zif", .next },
+    .{ "ahead", .jump },
+    .{ "leap", .call },
+});
+
 /// words other than opcodes and constants that compile takes before labels
-const keywords = [_][]const u8{ ":", ",", "org", "begin", "again", "for", "then", "node" };
+const keywords = [_][]const u8{
+    ":",     ",",      "org",   "<sl",    "..",     "begin", "again", "for",   "then", "else",
+    "while", "-while", "until", "-until", "repeat", "*next", "zif",   "ahead", "leap", "node",
+};
 
 /// True for names that would compile as something other than a label
 fn reserved(name: []const u8) bool {
@@ -484,6 +538,67 @@ test "control structures" {
     });
 }
 
+test "loops that end on a condition" {
+    try expectAssembles("begin dup until", &.{
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .@"if", .slot_2 = .@".", .slot_3 = 7 }, 1, 0),
+    });
+    try expectAssembles("begin dup -until", &.{
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .@"-if", .slot_2 = .@".", .slot_3 = 7 }, 1, 0),
+    });
+    try expectAssembles("begin dup while drop repeat dup", &.{
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .@"if", .slot_2 = .@".", .slot_3 = 7 }, 1, 2),
+        Instruction.encodeJump(.{ .slot_0 = .drop, .slot_1 = .jump, .slot_2 = .@".", .slot_3 = 7 }, 1, 0),
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    try expectAssembles("begin -while again then", &.{
+        Instruction.encodeJump(.{ .slot_0 = .@"-if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
+        Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 0),
+    });
+    // a next back to the start of the loop, past a -if out of it
+    try expectAssembles("for dup -if *next then drop", &.{
+        Instruction.encode(.{ .slot_0 = .@">r", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .@"-if", .slot_2 = .@".", .slot_3 = 7 }, 1, 3),
+        Instruction.encodeJump(.{ .slot_0 = .next, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 1),
+        Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+}
+
+test "jumps ahead" {
+    try expectAssembles("ahead dup then", &.{
+        Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    // zif is next going forward
+    try expectAssembles("zif then", &.{
+        Instruction.encodeJump(.{ .slot_0 = .next, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 1),
+    });
+    // leap calls ahead, so a return after it is not a tail call
+    try expectAssembles("leap ; then dup ;", &.{
+        Instruction.encodeJump(.{ .slot_0 = .call, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
+        Instruction.encode(.{ .slot_0 = .@";", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@";", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    try expectAssembles("if dup else drop then", &.{
+        Instruction.encodeJump(.{ .slot_0 = .@"if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .jump, .slot_2 = .@".", .slot_3 = 7 }, 1, 3),
+        Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+}
+
+test "slot alignment" {
+    try expectAssembles("dup .. dup", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    try expectAssembles("dup dup 2 <sl drop", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .dup, .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    try expectAssembles("dup 2 <sl drop", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .drop, .slot_2 = .@".", .slot_3 = 7 }),
+    });
+}
+
 test "jumps move to a new word when the destination is out of reach" {
     // a forward reference needs at least slot 1
     try expectAssembles("dup dup -if then", &.{
@@ -521,7 +636,16 @@ test "errors" {
     try expectError(error.ProgramTooLarge, "63 org 1 ,  2 ,");
     try expectError(error.UnmatchedControl, "then");
     try expectError(error.UnmatchedControl, "if next");
+    try expectError(error.UnmatchedControl, "else");
+    try expectError(error.UnmatchedControl, "if while");
+    try expectError(error.UnmatchedControl, "begin repeat");
+    try expectError(error.UnmatchedControl, "begin *next");
     try expectError(error.UnclosedControl, "begin");
+    try expectError(error.UnclosedControl, "begin while again");
+    try expectError(error.NumberOutOfRange, "0 <sl");
+    try expectError(error.NumberOutOfRange, "5 <sl");
+    try expectError(error.ReservedLabel, ": while");
+    try expectError(error.ReservedLabel, ": ..");
     try expectError(error.UnextBodyTooLong, "for dup dup dup dup unext");
     try expectError(error.ControlTooDeep, repeat("begin ", 17));
     try expectError(error.ReservedLabel, ": up");

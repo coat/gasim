@@ -130,6 +130,19 @@ pub fn org(self: *Builder, destination: Word) Error!void {
     self.here = @intCast(destination);
 }
 
+/// Ends the instruction word being packed, leaving its unused slots as nops
+pub fn alignWord(self: *Builder) void {
+    self.last_call = null;
+    self.finishWord();
+}
+
+/// Makes sure the next opcode goes in a slot before `slot`, ending the
+/// instruction word being packed if it would not
+pub fn limitSlot(self: *Builder, slot: Word) Error!void {
+    if (slot < 1 or slot > 4) return error.NumberOutOfRange;
+    if (self.word != null and self.slot >= slot) self.alignWord();
+}
+
 /// Defines a label at the next instruction word
 pub fn define(self: *Builder, name: []const u8) Error!void {
     self.last_call = null;
@@ -151,7 +164,7 @@ pub fn begin(self: *Builder) Error!u6 {
     return self.address();
 }
 
-/// Compiles a jump, next or other opcode that goes back to an address
+/// Compiles a jump, next, if or other opcode that goes back to an address
 pub fn back(self: *Builder, opcode: Opcode, destination: u6) Error!void {
     self.last_call = null;
     _ = try self.emitJump(opcode, destination);
@@ -163,7 +176,8 @@ pub fn unext(self: *Builder, destination: u6) Error!void {
     try self.emit(.unext);
 }
 
-/// Compiles an if or other jump forward, to be patched by `then`
+/// Compiles an if, jump, call or other opcode that goes forward, to be
+/// patched by `then`
 pub fn forward(self: *Builder, opcode: Opcode) Error!Location {
     self.last_call = null;
     return self.emitJump(opcode, null);
