@@ -1,8 +1,13 @@
 //! gasim
 
 const usage =
-    \\usage: gasim [options] <program.ga>
+    \\usage: gasim [run] [options] <program.ga>
     \\
+    \\Opens the program in a terminal user interface. With run, or when stdin
+    \\or stdout is not a terminal, runs it instead with the console on stdin
+    \\and stdout, until every node is waiting.
+    \\
+    \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
     \\  --console <node>:<port>    where the console is attached (default 000:up)
     \\  --rom <file>               ROM dump to load into the nodes
@@ -18,11 +23,25 @@ const max_source_len = 64 * 1024;
 /// the console stopped by ctrl+c
 var interruptible: ?*Console = null;
 
+const Command = enum { run, tui };
+
+/// restores the terminal from the user interface before reporting a panic
+pub const panic = std.debug.FullPanic(struct {
+    fn call(msg: []const u8, first_trace_addr: ?usize) noreturn {
+        vaxis.recover();
+        std.debug.defaultPanic(msg, first_trace_addr);
+    }
+}.call);
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len < 2) fatal(usage, .{});
+    const run_command = std.mem.eql(u8, args[1], "run");
+    // a pipe or file wants plain output rather than a user interface
+    const command: Command = if (run_command or !try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) .run else .tui;
 
     var layout: Chip.Layout = .ga144;
     var console_node: u16 = 0;
@@ -30,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
     var path: ?[]const u8 = null;
     var rom_path: ?[]const u8 = null;
     var boot = false;
-    var i: usize = 1;
+    var i: usize = if (run_command) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom")) {
@@ -98,18 +117,31 @@ pub fn main(init: std.process.Init) !void {
     var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    // the terminal user interface shows console output from here
+    var screen_buffer: [tui.console_capacity]u8 = undefined;
+    var screen: Io.Writer = .fixed(&screen_buffer);
 
     var input_buffer: [1024]u8 = undefined;
     var input: Io.Queue(u8) = .init(&input_buffer);
     var console: Console = .{
         .io = io,
         .input = &input,
-        .output = &stdout_file_writer.interface,
+        .output = switch (command) {
+            .run => &stdout_file_writer.interface,
+            .tui => &screen,
+        },
     };
     chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
         error.NoSuchNode => fatal("console node {d:0>3} is not in a {d}x{d} layout", .{ console_node, layout.rows, layout.columns }),
         error.PortConnected => fatal("console port {t} of node {d:0>3} is connected to another node", .{ console_port, console_node }),
     };
+
+    if (command == .tui) return tui.run(io, init.gpa, init.environ_map, &chip, .{
+        .source_path = source_path,
+        .console = &console,
+        .console_node = console_node,
+        .console_port = console_port,
+    });
 
     interruptible = &console;
     if (have_sigint) posix.sigaction(.INT, &.{
@@ -176,3 +208,9 @@ const Chip = gasim.Chip;
 const Console = gasim.Console;
 const Direction = gasim.Direction;
 const ga144 = gasim.ga144;
+const tui = @import("tui.zig");
+const vaxis = @import("vaxis");
+
+test {
+    _ = tui;
+}

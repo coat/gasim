@@ -10,15 +10,20 @@ chip](https://www.greenarraychips.com/home/documents/index.php#GA144).
 gasim examples/hello.ga
 ```
 
-This assembles the program and runs it on a simulated 8x18 array of F18A
-nodes, like the GA144, until every node is waiting on something that cannot
-happen. Nodes without a program wait for code on all of their ports.
+This assembles the program onto a simulated 8x18 array of F18A nodes, like
+the GA144, and opens it in a terminal user interface. Nodes without a
+program wait for code on all of their ports.
 
 A console is attached to the `up` port of node 000, which faces off the
 south edge of the chip. Each word written to it is printed as a byte, and
-each read from it takes a byte from stdin:
+each read from it takes a byte of input.
+
+With `run`, or when stdin or stdout is not a terminal, gasim runs the program
+until every node is waiting on something that cannot happen, with the
+console on stdin and stdout instead:
 
 ```bash
+gasim run examples/hello.ga
 echo "hello" | gasim examples/echo.ga
 ```
 
@@ -43,6 +48,34 @@ Options:
   This needs ROM.
 
 See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
+
+### Terminal user interface
+
+The map shows every node: running nodes are green, nodes waiting on a port
+yellow, and nodes waiting for code dim. The node panel shows the selected
+node's registers, stacks, and RAM and ROM around the word it is executing.
+
+| Key | |
+| --- | --- |
+| `space` | run or pause |
+| `s` | step the next node to run, and select it |
+| `S` | step every node once |
+| `n` | step the selected node |
+| arrows, `hjkl` | select a node on the map, or scroll the node panel |
+| `tab`, `shift+tab` | move to the next or previous panel |
+| `1` `2` `3` | show or hide the map, console and node panels |
+| `f`, `esc` | fill the screen with the panel, and go back |
+| `<` `>` `-` `+` | resize the panels, as can dragging their borders |
+| `pgup` `pgdn` | scroll the node panel or the console |
+| `g` | follow the word the node is executing again |
+| `q`, `ctrl+c` | quit |
+
+Clicking a panel selects it, and clicking a node on the map selects it.
+Borders between panels can be dragged, or on touch screens, which turn drags
+into scrolling, tapped and then tapped again where they should go. In
+the console, typed text is sent as input with `enter`, `ctrl+d` ends the
+input as the end of a pipe would, and `esc` goes back to the map. Long lines
+of output wrap.
 
 ### ROM
 

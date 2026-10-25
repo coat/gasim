@@ -23,6 +23,8 @@ queue: []u16,
 queue_head: usize = 0,
 queue_len: usize = 0,
 queued: []bool,
+/// how many times a node has been stepped
+steps: u64 = 0,
 
 /// the console, and the index of the node it is attached to
 console: ?struct { device: *Console, index: u16 } = null,
@@ -252,14 +254,18 @@ fn feed(self: *Chip) bool {
 pub fn step(self: *Chip) bool {
     if (self.queue_len == 0) return false;
     // nodes woken during this round run in the next one
-    for (0..self.queue_len) |_| {
-        const i = self.queue[self.queue_head];
-        self.queue_head = (self.queue_head + 1) % self.queue.len;
-        self.queue_len -= 1;
-        self.queued[i] = false;
-        self.stepNode(i);
-    }
+    for (0..self.queue_len) |_| self.stepNode(self.dequeue().?);
     return true;
+}
+
+/// takes the next node to step from the queue
+fn dequeue(self: *Chip) ?u16 {
+    if (self.queue_len == 0) return null;
+    const i = self.queue[self.queue_head];
+    self.queue_head = (self.queue_head + 1) % self.queue.len;
+    self.queue_len -= 1;
+    self.queued[i] = false;
+    return i;
 }
 
 /// Steps a node and wakes the neighbours on any port it changed, since a
@@ -270,6 +276,7 @@ pub fn stepNode(self: *Chip, i: u16) void {
     for (n.ports, &before) |link, *state| state.* = if (link.port) |p| p.state else .idle;
 
     n.step();
+    self.steps += 1;
     if (!n.suspended) self.wake(i);
 
     for (n.ports, before, 0..) |link, state, d| {
@@ -304,17 +311,14 @@ pub fn advance(self: *Chip) !bool {
 /// null when every node is waiting.
 pub fn stepNext(self: *Chip) !?u16 {
     _ = try self.service();
-    if (self.queue_len == 0) return null;
-    const i = self.queue[self.queue_head];
-    self.queue_head = (self.queue_head + 1) % self.queue.len;
-    self.queue_len -= 1;
-    self.queued[i] = false;
+    const i = self.dequeue() orelse return null;
     self.stepNode(i);
     return i;
 }
 
-/// gives the devices anything they have for their nodes, without waiting
-fn service(self: *Chip) !bool {
+/// Gives the devices anything they have for their nodes, without waiting
+/// for input. Returns false when they had nothing.
+pub fn service(self: *Chip) !bool {
     var serviced = false;
     if (self.console) |console| if (try console.device.service(false)) {
         self.wake(console.index);
@@ -613,6 +617,7 @@ test stepNext {
     try expectEqual(0, try chip.stepNext());
     try expectEqual(1, try chip.stepNext());
     try expectEqual(null, try chip.stepNext());
+    try expectEqual(2, chip.steps);
 }
 
 test "stops when interrupted" {
