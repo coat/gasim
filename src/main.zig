@@ -10,22 +10,30 @@ var interruptible: ?*Console = null;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const arena = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(arena);
+
     if (args.len != 2) fatal(usage, .{});
-    const path = args[1];
+    const source_path = args[1];
+    const layout: Chip.Layout = .ga144;
 
     // one spare byte tells a full buffer apart from a longer file
     var source_buffer: [max_source_len + 1]u8 = undefined;
-    const source = Io.Dir.cwd().readFile(io, path, &source_buffer) catch |err|
-        fatal("{s}: {t}", .{ path, err });
-    if (source.len > max_source_len) fatal("{s}: file is too large", .{path});
+    const source = Io.Dir.cwd().readFile(io, source_path, &source_buffer) catch |err|
+        fatal("{s}: {t}", .{ source_path, err });
+    if (source.len > max_source_len) fatal("{s}: file is too large", .{source_path});
 
+    var chip: Chip = try .init(init.gpa, layout);
+    defer chip.deinit(init.gpa);
+
+    const program_buffer = try arena.alloc(assembler.Program, layout.count());
     var diagnostic: assembler.Diagnostic = .{};
-    const program = assembler.assemble(source, &diagnostic) catch |err|
-        fatal("{s}:{d}: {t} at '{s}'", .{ path, diagnostic.line, err, diagnostic.token });
-
-    var node: Computer = .reset;
-    program.load(&node);
+    const programs = assembler.assembleNodes(source, program_buffer, &diagnostic) catch |err| switch (err) {
+        error.TooManyNodes => fatal("{s}:{d}: more nodes than a {d}x{d} layout has at '{s}'", .{ source_path, diagnostic.line, layout.rows, layout.columns, diagnostic.token }),
+        else => fatal("{s}:{d}: {t} at '{s}'", .{ source_path, diagnostic.line, err, diagnostic.token }),
+    };
+    for (programs) |program| chip.load(program) catch
+        fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, program.node, layout.rows, layout.columns });
 
     var stdin_buffer: [1024]u8 = undefined;
     var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -36,7 +44,8 @@ pub fn main(init: std.process.Init) !void {
         .input = &stdin_file_reader.interface,
         .output = &stdout_file_writer.interface,
     };
-    console.attach(&node, .up);
+    // node 000's up port faces off the south edge, so it is free
+    chip.attachConsole(&console, 0, .up) catch unreachable;
 
     interruptible = &console;
     if (have_sigint) posix.sigaction(.INT, &.{
@@ -45,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
         .flags = 0,
     }, null);
 
-    try console.run(&node);
+    try chip.run();
     // the conventional status for a program stopped by SIGINT
     if (console.interrupted.load(.monotonic)) std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
 }
@@ -76,5 +85,5 @@ const posix = std.posix;
 
 const gasim = @import("gasim");
 const assembler = gasim.assembler;
-const Computer = gasim.Computer;
+const Chip = gasim.Chip;
 const Console = gasim.Console;

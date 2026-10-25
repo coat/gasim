@@ -5,7 +5,7 @@
 port: Port = .{},
 input: *Io.Reader,
 output: *Io.Writer,
-/// set, for example from a signal handler, to stop `run`
+/// set, for example from a signal handler, to stop `Chip.run`
 interrupted: std.atomic.Value(bool) = .init(false),
 /// true while blocked waiting for input, when all output has been flushed
 waiting: std.atomic.Value(bool) = .init(false),
@@ -50,69 +50,6 @@ pub fn service(self: *Console, wait: bool) !bool {
     return false;
 }
 
-/// Runs `node` until it suspends on something the console cannot complete,
-/// or the console is interrupted.
-pub fn run(self: *Console, node: *Computer) !void {
-    while (!self.interrupted.load(.monotonic)) {
-        node.step();
-        if (node.suspended and !try self.service(true)) break;
-    }
-    try self.output.flush();
-}
-
-/// Assembles `source` into a node with a console on its up port, and checks
-/// what it outputs given `input`
-pub fn expectOutput(source: []const u8, input: []const u8, expected: []const u8) !void {
-    var diagnostic: assembler.Diagnostic = .{};
-    const program = try assembler.assemble(source, &diagnostic);
-
-    var node: Computer = .reset;
-    program.load(&node);
-
-    var reader: Io.Reader = .fixed(input);
-    var buffer: [256]u8 = undefined;
-    var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .input = &reader, .output = &writer };
-    console.attach(&node, .up);
-
-    try console.run(&node);
-    try std.testing.expectEqualStrings(expected, writer.buffered());
-}
-
-test "output" {
-    try expectOutput("up b! 72 !b 105 !b", "", "Hi");
-}
-
-test "input" {
-    try expectOutput("up b! @b @b + !b", "\x20\x21", "A");
-}
-
-test "stops at the end of input" {
-    try expectOutput("up b! begin @b !b again", "echo", "echo");
-}
-
-test "stops when interrupted" {
-    var diagnostic: assembler.Diagnostic = .{};
-    const program = try assembler.assemble("up b! 1 !b begin again", &diagnostic);
-    var node: Computer = .reset;
-    program.load(&node);
-
-    var reader: Io.Reader = .fixed("");
-    var buffer: [8]u8 = undefined;
-    var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .input = &reader, .output = &writer };
-    console.attach(&node, .up);
-
-    // run the program up to its endless loop
-    for (0..4) |_| {
-        node.step();
-        if (node.suspended) _ = try console.service(true);
-    }
-    console.interrupted.store(true, .monotonic);
-    try console.run(&node);
-    try std.testing.expectEqualStrings("\x01", writer.buffered());
-}
-
 test service {
     var reader: Io.Reader = .fixed("a");
     var buffer: [8]u8 = undefined;
@@ -150,7 +87,6 @@ test "service does not wait for input unless asked" {
     try std.testing.expect(console.port.otherReading(.b));
 }
 
-const assembler = @import("assembler.zig");
 const Computer = @import("f18.zig").Computer;
 const ports = @import("port.zig");
 const Direction = ports.Direction;

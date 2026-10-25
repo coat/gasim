@@ -8,4 +8,4 @@ test "echo" {
     try expectOutput(@embedFile("echo.ga"), "echo me\n", "echo me\n");
 }
 
-const expectOutput = @import("gasim").Console.expectOutput;
+const expectOutput = @import("gasim").Chip.expectOutput;
