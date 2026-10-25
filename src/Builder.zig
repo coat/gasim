@@ -36,6 +36,8 @@ single_word: bool = false,
 /// P when a single instruction word runs, such as the address of the port
 /// it is executed from, or null if it is not known
 p: ?u10 = null,
+/// where in memory the single instruction word is, once it is started
+single_index: ?u7 = null,
 
 /// where in memory the instruction word being packed is
 word: ?u7 = null,
@@ -227,11 +229,12 @@ pub fn forward(self: *Builder, opcode: Opcode) Error!Location {
     return self.emitJump(opcode, null);
 }
 
-/// Makes a forward jump go to the next instruction word
+/// Makes a forward jump go to the next instruction word, which after a
+/// single instruction word is wherever P is, if that is known
 pub fn then(self: *Builder, jump: Location) Error!void {
     self.last_call = null;
     self.finishWord(.nops);
-    const destination = self.location();
+    const destination = if (self.single_word) self.p orelse return error.UnreachableThen else self.location();
     if (!lands(jump.slot, jump.p, destination)) return error.UnreachableThen;
     self.patch(jump, destination);
 }
@@ -266,8 +269,9 @@ fn index(at: u8) u7 {
 }
 
 fn alloc(self: *Builder) Error!u7 {
-    if (self.single_word and self.len > 0) return error.InlineTooLong;
+    if (self.single_word and self.single_index != null) return error.InlineTooLong;
     const result = try self.address();
+    if (self.single_word) self.single_index = result;
     self.lines[result] = @intCast(@min(self.line, std.math.maxInt(u32)));
     // P increments its low 7 bits
     self.here = if (self.wrap) (self.here & 0x80) | ((self.here +% 1) & 0x7f) else self.here + 1;

@@ -726,7 +726,7 @@ const Interpreter = struct {
             .@"]]" => {
                 var b = self.inline_word orelse return error.NotInline;
                 b.alignWord();
-                const value: Word = if (b.len == 0) @bitCast(@as(u18, 0x15555)) else b.mem[0];
+                const value: Word = if (b.single_index) |i| b.mem[i] else @bitCast(@as(u18, 0x15555));
                 self.inline_word = null;
                 self.assembling = self.outer.assembling;
                 self.asm_context = self.outer.asm_context;
@@ -1977,6 +1977,15 @@ test "inline instruction words" {
         opcodes(.@";", .@";", .@";", .@";"),
         jumpWord(.@"@p", .@"!", .call, 2, 0),
     });
+    // the word is wherever org puts it
+    try expectAssembles("ASM[ # 0 NODE  A[ # 5 org dup ]] , >BIN", &.{opcodes(.dup, .@".", .@".", .@".")});
+    // then goes to where P is when the word runs, which must be known
+    try expectAssembles("ASM[ # 0 NODE  A[ # x115 =P if then ]] ,  A[ # x10 =P dup if then ]] , >BIN", &.{
+        jumpWord(.@"if", .@";", .@";", 0, 0x115),
+        jumpWord(.dup, .@"if", .@";", 1, 0x10),
+    });
+    try expectError(error.UnreachableThen, "ASM[ # 0 NODE  A[ if then ]]");
+
     // without =P, P is not known for a short jump, but a slot 1 jump only
     // keeps P9
     try expectError(error.InlineTooLong, "ASM[ # 0 NODE  A[ @p ! # x10 call ]]");
