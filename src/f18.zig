@@ -481,6 +481,12 @@ test "ProgramCounter toWord and fromWord keep P9" {
     try expectEqual(p, ProgramCounter.fromWord(@bitCast(@as(u18, 0x3feaa))));
 }
 
+test "jumps from slot 3 have no destination" {
+    var p: ProgramCounter = .reset;
+    p.jump(3, @bitCast(LongJump{ .destination = 0x155 }));
+    try expectEqual(ProgramCounter.reset, p);
+}
+
 test "short jump" {
     var p: ProgramCounter = .reset;
 

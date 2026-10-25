@@ -656,6 +656,18 @@ test "label addresses" {
         Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
         2,
     });
+    // a label already defined
+    try expectAssembles(": data 'data", &.{
+        Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        0,
+    });
+}
+
+test "ex ends its instruction word" {
+    try expectAssembles("dup ex drop", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .ex, .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
 }
 
 test "control structures" {
@@ -710,6 +722,7 @@ test "errors" {
     try expectError(error.UnterminatedComment, "( dup");
     try expectError(error.UnterminatedString, "\"dup");
     try expectError(error.NumberOutOfRange, "0x40000");
+    try expectError(error.NumberOutOfRange, "0x100000000");
     try expectError(error.NumberOutOfRange, "64 org");
     try expectError(error.ProgramTooLarge, "63 org 1 ,  2 ,");
     try expectError(error.UnmatchedControl, "then");

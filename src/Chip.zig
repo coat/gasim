@@ -504,6 +504,50 @@ test attachConsole {
     try chip.attachConsole(&console, 1, .left);
 }
 
+test "init frees what it allocated when it runs out of memory" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn initChip(gpa: Allocator) !void {
+            var chip: Chip = try .init(gpa, .ga144);
+            chip.deinit(gpa);
+        }
+    }.initChip, .{});
+}
+
+test "output is flushed once it has been quiet for a while" {
+    // node 000 outputs, then stays busy for longer than the console waits
+    try expectOutput(
+        \\ up b! 1 !b 1999 for . next left b! @b
+    , "", "\x01");
+}
+
+test "waits for input that has not arrived" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble("up b! @b !b", &diagnostic));
+
+    var input_buffer: [1]u8 = undefined;
+    var input: Io.Queue(u8) = .init(&input_buffer);
+    var buffer: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    try chip.attachConsole(&console, 0, .up);
+
+    // input arrives once the chip is waiting for it
+    var typing = try std.testing.io.concurrent(struct {
+        fn typeKey(io: Io, queue: *Io.Queue(u8), c: *Console) !void {
+            while (!c.waiting.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
+            try queue.putOne(io, 'k');
+            queue.close(io);
+        }
+    }.typeKey, .{ std.testing.io, &input, &console });
+    defer typing.cancel(std.testing.io) catch {};
+
+    try chip.run();
+    try typing.await(std.testing.io);
+    try std.testing.expectEqualStrings("k", writer.buffered());
+}
+
 test "stops when interrupted" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
     defer chip.deinit(std.testing.allocator);
