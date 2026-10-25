@@ -132,6 +132,17 @@ pub fn parseRom(text: []const u8, roms: []NodeRom) error{ InvalidRom, TooManyNod
     return roms[0..count];
 }
 
+/// Reads the GA144 ROM dump in rom/, which is not part of the repository,
+/// skipping the test if it is missing
+pub fn testRom(roms: *[144]NodeRom) ![]NodeRom {
+    const text = std.Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/ga144.txt", std.testing.allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer std.testing.allocator.free(text);
+    return parseRom(text, roms);
+}
+
 test romWord {
     try std.testing.expectEqual(0xa9, romWord(404, "warm"));
     try std.testing.expectEqual(0xcc, romWord(300, "*.17"));

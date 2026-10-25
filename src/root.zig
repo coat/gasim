@@ -7,6 +7,7 @@ pub const Direction = port.Direction;
 pub const Port = port.Port;
 
 pub const assembler = @import("assembler.zig");
+pub const boot = @import("boot.zig");
 pub const Chip = @import("Chip.zig");
 pub const Console = @import("Console.zig");
 pub const disassembler = @import("disassembler.zig");
@@ -17,6 +18,7 @@ const port = @import("port.zig");
 
 test {
     _ = @import("assembler.zig");
+    _ = @import("boot.zig");
     _ = @import("Chip.zig");
     _ = @import("Console.zig");
     _ = @import("disassembler.zig");
