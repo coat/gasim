@@ -147,6 +147,42 @@ fn SmallSet(comptime T: type, comptime capacity: usize) type {
     };
 }
 
+/// The nodes, the ports between them and which nodes run next, to go back
+/// to with `restore`. Devices keep their input and output, but their ports
+/// go back too.
+pub const Snapshot = struct {
+    nodes: []Computer,
+    ports: []Port,
+    queue: []u16,
+    queued: []bool,
+    queue_head: usize = 0,
+    queue_len: usize = 0,
+    steps: u64 = 0,
+    started: bool = false,
+    console_port: Port = .{},
+    feeder_port: Port = .{},
+    feeder_next: usize = 0,
+
+    /// Allocates a snapshot of a chip with `layout`
+    pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Snapshot {
+        const nodes = try gpa.alloc(Computer, layout.count());
+        errdefer gpa.free(nodes);
+        const ports = try gpa.alloc(Port, layout.portCount());
+        errdefer gpa.free(ports);
+        const queue = try gpa.alloc(u16, layout.count());
+        errdefer gpa.free(queue);
+        return .{ .nodes = nodes, .ports = ports, .queue = queue, .queued = try gpa.alloc(bool, layout.count()) };
+    }
+
+    pub fn deinit(self: *Snapshot, gpa: Allocator) void {
+        gpa.free(self.nodes);
+        gpa.free(self.ports);
+        gpa.free(self.queue);
+        gpa.free(self.queued);
+        self.* = undefined;
+    }
+};
+
 /// Writes words to a node through a port, such as a boot stream
 pub const Feeder = struct {
     port: Port = .{},
@@ -183,6 +219,13 @@ pub const Layout = struct {
 
     pub fn count(self: Layout) usize {
         return @as(usize, self.rows) * self.columns;
+    }
+
+    /// the number of ports between neighbours
+    pub fn portCount(self: Layout) usize {
+        const rows: usize = self.rows;
+        const columns: usize = self.columns;
+        return rows * (columns - 1) + (rows - 1) * columns;
     }
 
     /// index into `Chip.nodes` of a node number, if the node exists
@@ -249,7 +292,7 @@ pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Chip {
     errdefer gpa.free(nodes);
     const rows: usize = layout.rows;
     const columns: usize = layout.columns;
-    const ports = try gpa.alloc(Port, rows * (columns - 1) + (rows - 1) * columns);
+    const ports = try gpa.alloc(Port, layout.portCount());
     errdefer gpa.free(ports);
     const queue = try gpa.alloc(u16, count);
     errdefer gpa.free(queue);
@@ -292,6 +335,57 @@ pub fn deinit(self: *Chip, gpa: Allocator) void {
     gpa.free(self.queue);
     gpa.free(self.queued);
     self.* = undefined;
+}
+
+/// Saves the chip into a snapshot allocated for its layout
+pub fn save(self: Chip, snapshot: *Snapshot) void {
+    @memcpy(snapshot.nodes, self.nodes);
+    @memcpy(snapshot.ports, self.ports);
+    @memcpy(snapshot.queue, self.queue);
+    @memcpy(snapshot.queued, self.queued);
+    snapshot.queue_head = self.queue_head;
+    snapshot.queue_len = self.queue_len;
+    snapshot.steps = self.steps;
+    snapshot.started = self.started;
+    if (self.console) |console| snapshot.console_port = console.device.port;
+    if (self.feeder) |feeder| {
+        snapshot.feeder_port = feeder.device.port;
+        snapshot.feeder_next = feeder.device.next;
+    }
+}
+
+/// Goes back to a snapshot saved from this chip
+pub fn restore(self: *Chip, snapshot: *const Snapshot) void {
+    @memcpy(self.nodes, snapshot.nodes);
+    @memcpy(self.ports, snapshot.ports);
+    @memcpy(self.queue, snapshot.queue);
+    @memcpy(self.queued, snapshot.queued);
+    self.queue_head = snapshot.queue_head;
+    self.queue_len = snapshot.queue_len;
+    self.steps = snapshot.steps;
+    self.started = snapshot.started;
+    self.hit = null;
+    if (self.console) |console| console.device.port = snapshot.console_port;
+    if (self.feeder) |feeder| {
+        feeder.device.port = snapshot.feeder_port;
+        feeder.device.next = snapshot.feeder_next;
+    }
+}
+
+/// Whether the chip is as it was when saved into a snapshot, not counting
+/// steps that changed nothing
+pub fn matches(self: *const Chip, snapshot: *const Snapshot) bool {
+    const eql = std.mem.eql;
+    const bytes = std.mem.sliceAsBytes;
+    if (!eql(u8, bytes(self.nodes), bytes(snapshot.nodes)) or
+        !eql(u8, bytes(self.ports), bytes(snapshot.ports)) or
+        !eql(u8, bytes(self.queue), bytes(snapshot.queue)) or
+        !eql(bool, self.queued, snapshot.queued) or
+        self.queue_head != snapshot.queue_head or
+        self.queue_len != snapshot.queue_len) return false;
+    if (self.console) |console| if (!std.meta.eql(console.device.port, snapshot.console_port)) return false;
+    if (self.feeder) |feeder| if (!std.meta.eql(feeder.device.port, snapshot.feeder_port) or feeder.device.next != snapshot.feeder_next) return false;
+    return true;
 }
 
 /// connects two neighbours, which use the same name for their common port
@@ -847,6 +941,38 @@ test "stops at watched transfers" {
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("node 000 wrote 00003 to right", try std.fmt.bufPrint(&buffer, "{f}", .{chip.hit.?.describe(chip.layout)}));
     try std.testing.expectEqualStrings("node 000 reached 03f", try std.fmt.bufPrint(&buffer, "{f}", .{(Stop{ .breakpoint = .init(0, 0x3f) }).describe(chip.layout)}));
+}
+
+test "goes back to a snapshot" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 2 });
+    defer chip.deinit(std.testing.allocator);
+    var snapshot: Snapshot = try .init(std.testing.allocator, chip.layout);
+    defer snapshot.deinit(std.testing.allocator);
+    var programs: [2]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    for (try assembler.assembleNodes(
+        \\node 000 right b! 1 !b 2 !b 3 !b
+        \\node 001 right b! @b @b + @b +
+    , &programs, &diagnostic)) |program| try chip.load(program);
+    _ = try chip.watches.toggle(.{ .index = 1, .direction = .right, .write = false });
+
+    try chip.run();
+    chip.save(&snapshot);
+    const steps = chip.steps;
+    try chip.run();
+    try chip.run();
+    try expectEqual(3, chip.hit.?.watch.value);
+
+    try std.testing.expect(!chip.matches(&snapshot));
+    // the same transfers happen again
+    chip.restore(&snapshot);
+    try std.testing.expect(chip.matches(&snapshot));
+    try expectEqual(steps, chip.steps);
+    try expectEqual(1, chip.nodes[1].data_stack.t);
+    try chip.run();
+    try expectEqual(2, chip.hit.?.watch.value);
+    try chip.run();
+    try expectEqual(3, chip.hit.?.watch.value);
 }
 
 test "traces each step" {

@@ -27,6 +27,9 @@ const frame_budget: Io.Duration = .fromMilliseconds(15);
 /// most a byte a round, so the console has room for this many.
 const rounds_per_check = 256;
 
+/// how many times the user can go back, before steps and runs
+const history_capacity = 64;
+
 /// width of a node in the map
 const cell_width = 4;
 /// rows of the node panel above its memory listing
@@ -55,6 +58,8 @@ const Hint = struct { []const u8, []const u8 };
 
 const Tui = struct {
     io: Io,
+    /// for snapshots of the chip, as they are needed
+    gpa: Allocator,
     chip: *Chip,
     options: Options,
     /// whether the user wants the chip to run
@@ -94,6 +99,16 @@ const Tui = struct {
     message_buffer: [64]u8 = undefined,
     /// the next key chooses a port of the selected node to watch
     choosing_watch: bool = false,
+    /// the chip before each step or run, to go back to, allocated the first
+    /// time each is needed. The `history_len` kept start from the oldest at
+    /// `history_start`, and the oldest is dropped to make room. The one after
+    /// them is saved before each step or run, and kept once the chip changes.
+    history: []?Chip.Snapshot = &.{},
+    history_start: usize = 0,
+    history_len: usize = 0,
+    /// whether the snapshot after those kept was saved before the last step
+    /// or run
+    pending: bool = false,
 
     /// where panels were last drawn, for the mouse
     windows: std.EnumArray(Panel, ?vaxis.Window) = .initFill(null),
@@ -107,8 +122,12 @@ const Tui = struct {
     frame_buffer: [64 * 1024]u8 = undefined,
     frame: std.heap.FixedBufferAllocator = undefined,
 
-    fn init(io: Io, chip: *Chip, options: Options) Tui {
-        return .{ .io = io, .chip = chip, .options = options, .selected = chip.layout.index(options.console_node) orelse 0 };
+    fn init(io: Io, gpa: Allocator, chip: *Chip, options: Options) Tui {
+        return .{ .io = io, .gpa = gpa, .chip = chip, .options = options, .selected = chip.layout.index(options.console_node) orelse 0 };
+    }
+
+    fn deinit(self: *Tui) void {
+        for (self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(self.gpa);
     }
 
     /// formats text that lasts until the next frame
@@ -205,13 +224,18 @@ const Tui = struct {
 
         // running and stepping
         if (k.matches(' ', .{})) {
+            if (!self.running) self.remember();
             self.running = !self.running;
             // a breakpoint reached while stepping is left behind
             self.chip.hit = null;
         }
         const stepping = k.matches('s', .{}) or k.matches('S', .{}) or k.matches('n', .{});
         if (stepping and self.running) self.message = "pause with space to step";
+        if (k.matches('z', .{})) {
+            if (self.running) self.message = "pause with space to go back" else self.back();
+        }
         if (!self.running) {
+            if (stepping) self.remember();
             if (k.matches('s', .{})) {
                 // the next node to run, which the view follows
                 self.trimOutput();
@@ -428,6 +452,50 @@ const Tui = struct {
         if (row >= first + page) self.memory_scroll = @intCast(row + 1 - page);
         // so the RAM heading shows at the top
         if (row == 1 and first <= 1) self.memory_scroll = 0;
+    }
+
+    /// saves the chip before the user steps or runs it, to go back to if it
+    /// changes
+    fn remember(self: *Tui) void {
+        // one is saved before it is kept
+        if (self.history.len < 2) return;
+        self.keepPending();
+        const snapshot = &self.history[self.historyIndex(self.history_len)];
+        if (snapshot.* == null) snapshot.* = Chip.Snapshot.init(self.gpa, self.chip.layout) catch {
+            self.message = "there is no memory left to go back with";
+            return;
+        };
+        self.chip.save(&snapshot.*.?);
+        self.pending = true;
+    }
+
+    /// keeps the snapshot saved before the last step or run, unless nothing
+    /// has changed since
+    fn keepPending(self: *Tui) void {
+        if (!self.pending) return;
+        self.pending = false;
+        if (self.chip.matches(&self.history[self.historyIndex(self.history_len)].?)) return;
+        if (self.history_len == self.history.len - 1) {
+            self.history_start = self.historyIndex(1);
+        } else self.history_len += 1;
+    }
+
+    /// goes back to before the last step or run
+    fn back(self: *Tui) void {
+        self.keepPending();
+        if (self.history_len == 0) {
+            self.message = "nothing to go back to";
+            return;
+        }
+        self.history_len -= 1;
+        self.chip.restore(&self.history[self.historyIndex(self.history_len)].?);
+        self.memory_scroll = null;
+        self.message = self.printLasting("back to {d} steps", .{self.chip.steps});
+    }
+
+    /// the index in `history` of the snapshot `i` from the oldest
+    fn historyIndex(self: Tui, i: usize) usize {
+        return (self.history_start + i) % self.history.len;
     }
 
     /// sets or clears a watch on the port of the selected node a key names
@@ -764,11 +832,11 @@ const Tui = struct {
         else
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
         const hints: []const Hint = switch (self.focus) {
-            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "arrows", "select" }, .{ "1-3", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
+            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "1-3", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
             .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "tab", "next" }, .{ "esc", "map" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
         };
-        var segments: [4 + 2 * 9]vaxis.Segment = undefined;
+        var segments: [4 + 2 * 10]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = state;
         len += 1;
@@ -864,7 +932,11 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
     vx.caps.sgr_pixels = false;
     try vx.setMouseMode(tty.writer(), true);
 
-    var tui: Tui = .init(io, chip, options);
+    // and one more, saved before each step or run
+    var history: [history_capacity + 1]?Chip.Snapshot = @splat(null);
+    var tui: Tui = .init(io, gpa, chip, options);
+    defer tui.deinit();
+    tui.history = &history;
     while (true) {
         // wait for the user unless the chip has something to do
         const busy = tui.running and !tui.settled;
@@ -889,6 +961,8 @@ const TestTui = struct {
     output: Io.Writer = undefined,
     console: Console = undefined,
     screen: vaxis.Screen = undefined,
+    /// keeping two
+    history: [3]?Chip.Snapshot = @splat(null),
     tui: Tui = undefined,
 
     fn init(self: *TestTui, source: []const u8) !void {
@@ -904,10 +978,12 @@ const TestTui = struct {
         self.console = .{ .io = std.testing.io, .input = &self.input, .output = &self.output };
         try self.chip.attachConsole(&self.console, 0, .up);
         self.screen = try .init(gpa, .{ .rows = 30, .cols = 120, .x_pixel = 0, .y_pixel = 0 });
-        self.tui = .init(std.testing.io, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up });
+        self.tui = .init(std.testing.io, gpa, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up });
+        self.tui.history = &self.history;
     }
 
     fn deinit(self: *TestTui) void {
+        self.tui.deinit();
         self.screen.deinit(std.testing.allocator);
         self.chip.deinit(std.testing.allocator);
     }
@@ -1181,6 +1257,50 @@ test memoryRow {
     try std.testing.expectEqual(66, memoryRow(Address.fromWord(0x80)));
     try std.testing.expectEqual(76, memoryRow(Address.fromWord(0xca)));
     try std.testing.expectEqual(null, memoryRow(Address.fromWord(0x1d5)));
+}
+
+test "goes back before steps" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("begin 1 + again");
+    defer t.deinit();
+    try t.press('z');
+    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+
+    for (0..3) |_| try t.press('n');
+    try std.testing.expectEqual(3, t.tui.chip.steps);
+    try t.press('z');
+    try std.testing.expectEqual(2, t.tui.chip.steps);
+    try std.testing.expectEqualStrings("back to 2 steps", t.tui.message.?);
+    // the test history only keeps the last two
+    try t.press('z');
+    try std.testing.expectEqual(1, t.tui.chip.steps);
+    try t.press('z');
+    try std.testing.expectEqual(1, t.tui.chip.steps);
+    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+
+    // and before running
+    try t.press(' ');
+    try t.tui.run();
+    try t.press('z');
+    try std.testing.expectEqualStrings("pause with space to go back", t.tui.message.?);
+    try t.press(' ');
+    try t.press('z');
+    try std.testing.expectEqual(1, t.tui.chip.steps);
+}
+
+test "steps that change nothing are not gone back to" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("left b! @b");
+    defer t.deinit();
+    while (try t.tui.chip.advance()) {}
+
+    // every node is waiting
+    try t.press('S');
+    try t.press('s');
+    try t.press('z');
+    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+    // each saved over the one before, so only one was allocated
+    try std.testing.expect(t.tui.history[0] != null and t.tui.history[1] == null);
 }
 
 const gasim = @import("gasim");

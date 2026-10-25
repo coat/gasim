@@ -105,6 +105,7 @@ node's registers, stacks, and RAM and ROM around the word it is executing.
 | `s` | step the next node to run, and select it |
 | `S` | step every node once |
 | `n` | step the selected node |
+| `z` | go back to before the last step or run, up to 64 times |
 | arrows, `hjkl` | select a node on the map, or move through memory in the node panel |
 | `tab`, `shift+tab` | move to the next or previous panel |
 | `1` `2` `3` | show or hide the map, console and node panels |
@@ -120,7 +121,8 @@ Clicking a panel selects it, and clicking a node on the map selects it.
 Clicking a word in memory moves the cursor to it, and clicking to its left
 sets or clears a breakpoint, shown as a red dot. Running pauses when a node
 is about to fetch a word with a breakpoint, or makes a watched transfer,
-and selects that node.
+and selects that node. Going back leaves the console as it is: its output
+stays, and input that nodes have read is not read again.
 Borders between panels can be dragged, or on touch screens, which turn drags
 into scrolling, tapped and then tapped again where they should go. In
 the console, typed text is sent as input with `enter`, `ctrl+d` ends the
