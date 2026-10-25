@@ -12,4 +12,19 @@ test "upcase" {
     try expectOutput(@embedFile("upcase.ga"), "Hello, World! az{`@[\n", "HELLO, WORLD! AZ{`@[\n");
 }
 
+// and the same in arrayForth 3
+
+test "hello.af" {
+    try expectArrayForthOutput(@embedFile("hello.af"), "", "Hello, world!\n");
+}
+
+test "echo.af" {
+    try expectArrayForthOutput(@embedFile("echo.af"), "echo me\n", "echo me\n");
+}
+
+test "upcase.af" {
+    try expectArrayForthOutput(@embedFile("upcase.af"), "Hello, World! az{`@[\n", "HELLO, WORLD! AZ{`@[\n");
+}
+
 const expectOutput = @import("gasim").Chip.expectOutput;
+const expectArrayForthOutput = @import("gasim").Chip.expectArrayForthOutput;

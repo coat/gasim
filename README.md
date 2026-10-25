@@ -97,8 +97,8 @@ Files ending in `.af` are read as arrayForth 3 source, the F18 assembler
 syntax of GreenArrays' current tools, described in section 4.2 of DB013,
 the arrayForth 3 User's Manual. Code is assembled into bins between `ASM[`
 and `]ASM`, packed into the same object code arrayForth 3 makes. See
-[`src/arrayforth.zig`](src/arrayforth.zig) for what is supported. This is
-`examples/echo.ga` in arrayForth 3:
+[`src/arrayforth.zig`](src/arrayforth.zig) for what is supported. Each
+example has an arrayForth 3 version, such as `examples/echo.af`:
 
 ```
 ASM[ # 0 NODE ERS  # 0 org

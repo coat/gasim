@@ -1,0 +1,21 @@
+\ upcase.af - convert console input to upper case using two nodes, as
+\ upcase.ga does in arrayForth 3
+\
+\ Node 000 passes each byte of input to node 001, which converts lower case
+\ letters to upper case and sends the result back to be output. Both nodes
+\ reach each other through right, as port names alternate across the chip.
+
+ASM[ # 0 NODE ERS  # 0 org
+: main  right a!  up b!                  \ A addresses node 001, B the console
+   begin @b ! @ !b again
+>BIN
+
+# 1 NODE ERS  # 0 org
+\ -if jumps to then unless T is negative, without dropping T
+: upcase ( c - C)
+   dup -97. + -if drop ; then            \ below a
+   \ in slot 2, -if could only reach a then in the same 8 words
+   -26. + # 2 <sl -if drop -32. + ; then \ a to z
+   drop ;
+: main  right b!  begin @b upcase !b again
+>BIN ]ASM

@@ -692,7 +692,28 @@ pub fn expectOutput(source: []const u8, input: []const u8, expected: []const u8)
     var programs: [8]assembler.Program = undefined;
     var diagnostic: assembler.Diagnostic = .{};
     for (try assembler.assembleNodes(source, &programs, &diagnostic)) |program| try chip.load(program);
+    try expectRun(&chip, input, expected);
+}
 
+/// As `expectOutput`, for arrayForth 3 source, with each bin loaded into its
+/// own node unless boot descriptors say otherwise
+pub fn expectArrayForthOutput(source: []const u8, input: []const u8, expected: []const u8) !void {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+
+    var programs: [8]assembler.Program = undefined;
+    var descriptors: [8]boot.Descriptor = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try arrayforth.assembleNodes(source, &programs, &descriptors, &diagnostic);
+    if (assembled.descriptors.len > 0) {
+        for (assembled.descriptors) |descriptor| try chip.setUp(descriptor, assembled.programs);
+    } else for (assembled.programs) |program| if (program.bin == null) try chip.setUp(.ofProgram(program), assembled.programs);
+    try expectRun(&chip, input, expected);
+}
+
+/// runs a chip with the console on node 000's up port, with `input`, and
+/// checks its output
+fn expectRun(chip: *Chip, input: []const u8, expected: []const u8) !void {
     var input_buffer: [256]u8 = undefined;
     var input_queue = try Console.testInput(&input_buffer, input);
     var buffer: [256]u8 = undefined;
@@ -1165,6 +1186,7 @@ test "stops when interrupted" {
     try std.testing.expectEqualStrings("\x01", writer.buffered());
 }
 
+const arrayforth = @import("arrayforth.zig");
 const assembler = @import("assembler.zig");
 const boot = @import("boot.zig");
 const disassembler = @import("disassembler.zig");
