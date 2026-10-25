@@ -193,8 +193,6 @@ pub fn main(init: std.process.Init) !void {
         fatal("{f}: {t} at '{s}'", .{ where, err, diagnostic.token });
     };
     const programs = assembled.programs;
-    for (programs) |program| if (layout.index(program.node) == null)
-        fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, program.node, layout.rows, layout.columns });
     if (listing) {
         var buffer: [4096]u8 = undefined;
         var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
