@@ -633,9 +633,8 @@ const Interpreter = struct {
             .@"#" => self.hash = true,
             .@".." => (try self.builder()).alignWord(),
             .@"<sl" => {
-                const slot = try self.pop();
-                if (slot < 1 or slot > 4) return error.NumberOutOfRange;
-                try (try self.builder()).limitSlot(@intCast(slot));
+                const slot = std.math.cast(Word, try self.pop()) orelse return error.NumberOutOfRange;
+                try (try self.builder()).limitSlot(slot);
             },
             .here => {
                 const b = try self.builder();
@@ -778,14 +777,7 @@ const Interpreter = struct {
             },
             .east, .west, .north, .south => {
                 const node_number = (try self.currentBin()).node;
-                const odd = if (word == .east or word == .west) node_number % 2 == 1 else node_number / 100 % 2 == 1;
-                const value: u18 = switch (word) {
-                    .east => if (odd) 0x175 else 0x1d5,
-                    .west => if (odd) 0x1d5 else 0x175,
-                    .north => if (odd) 0x145 else 0x115,
-                    else => if (odd) 0x115 else 0x145,
-                };
-                try self.namedLiteral(value);
+                try self.namedLiteral(cardinal(node_number, std.meta.stringToEnum(Cardinal, @tagName(word)).?));
             },
         }
     }
@@ -1197,13 +1189,13 @@ const Interpreter = struct {
             .LDATA => try self.pushDouble(0x171),
             .NORTH, .SOUTH, .EAST, .WEST => {
                 const node_number = (try self.bootDescriptor()).node;
-                const odd = if (word == .EAST or word == .WEST) node_number % 2 == 1 else node_number / 100 % 2 == 1;
-                try self.pushDouble(switch (word) {
-                    .EAST => if (odd) 0x175 else 0x1d5,
-                    .WEST => if (odd) 0x1d5 else 0x175,
-                    .NORTH => if (odd) 0x145 else 0x115,
-                    else => if (odd) 0x115 else 0x145,
-                });
+                const direction: Cardinal = switch (word) {
+                    .EAST => .east,
+                    .WEST => .west,
+                    .NORTH => .north,
+                    else => .south,
+                };
+                try self.pushDouble(cardinal(node_number, direction));
             },
             .@"IF{" => if (try self.pop() == 0) self.tokens().skipPast('}'),
             .@"{ELSE}" => self.tokens().skipPast('}'),
@@ -1399,6 +1391,21 @@ const Interpreter = struct {
         return @bitCast(@as(u64, high) << 32 | low);
     }
 };
+
+const Cardinal = enum { east, west, north, south };
+
+/// The address of the port of a node facing a cardinal direction. Port names
+/// swap between odd and even columns, and between odd and even rows.
+fn cardinal(node: u16, direction: Cardinal) u18 {
+    const odd_column = node % 2 == 1;
+    const odd_row = node / 100 % 2 == 1;
+    return switch (direction) {
+        .east => if (odd_column) 0x175 else 0x1d5,
+        .west => if (odd_column) 0x1d5 else 0x175,
+        .north => if (odd_row) 0x145 else 0x115,
+        .south => if (odd_row) 0x115 else 0x145,
+    };
+}
 
 /// whether `len` words from `address` are all in RAM, for values from the
 /// stack, which may be anything
