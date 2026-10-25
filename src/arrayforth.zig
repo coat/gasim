@@ -34,14 +34,20 @@
 //!                       words as compiled host code: numbers go on the
 //!                       stack, names mean what they meant when it was
 //!                       defined, and EXIT returns from it
+//!     IF ELSE THEN  BEGIN UNTIL AGAIN WHILE REPEAT  n FOR NEXT
+//!     limit start DO LOOP +LOOP  I J
+//!                       control flow within a host word, FOR running n+1
+//!                       times with I counting down to 0, and DO with I
+//!                       counting up to before the limit
 //!     io right down left up data ldata warp center top side corner
 //!     east south west north
 //!                       named literals, the cardinal ones by node position
 //!     ---u --l- ... rdlu await
 //!                       named calls of multiports and the default one
 //!     ASM FORTH ]ASM EXIT
-//!     DUP DROP SWAP OVER ROT 2DUP 2DROP 2SWAP 2OVER AND OR XOR + - NEGATE
-//!     D+ DNEGATE S>D . HEX DECIMAL
+//!     DUP DROP SWAP OVER ROT 2DUP 2DROP 2SWAP 2OVER AND OR XOR + - * / MOD
+//!     /MOD MIN MAX ABS NEGATE 1+ 1- 2* 2/ = < > 0= 0< NOT D+ DNEGATE S>D
+//!     . U. D. .S CR SPACE HEX DECIMAL
 //!
 //! Source may also be polyFORTH blocks of 1024 characters, 16 lines of 64,
 //! numbered from 0, which these load:
@@ -108,6 +114,10 @@ pub const Error = assembler.Error || error{
     LoadTooDeep,
     /// a definition without its ;
     UnclosedDefinition,
+    /// a control word such as IF outside a definition
+    CompileOnly,
+    /// I or J outside a loop
+    NoLoop,
     /// definitions with more words, in all, than there is space for
     DefinitionsTooLong,
     /// a boot descriptor that loads a bin that has not been saved
@@ -191,6 +201,7 @@ pub const Session = struct {
             it.hash = false;
             it.inline_word = null;
             it.compiling = null;
+            it.loop_len = 0;
             return err;
         };
     }
@@ -303,8 +314,9 @@ pub fn blockText(blocks: []const u8, text: []u8) []u8 {
 /// a block being loaded, or the whole source when it is text
 const Frame = struct {
     tokens: Tokenizer,
-    /// the words of a definition being run, instead of tokens
-    definition: ?struct { at: u16, end: u16 } = null,
+    /// the words of a definition being run, instead of tokens, and the loops
+    /// running when it started, which its own end with it
+    definition: ?struct { at: u16, end: u16, loops: u8 } = null,
     /// the block being interpreted, and the last of the blocks THRU loads
     block: ?u32 = null,
     last: u32 = 0,
@@ -407,12 +419,42 @@ const Name = struct {
 };
 
 /// a word of a definition, the line it was written on, and the name it
-/// meant when it was defined, as Forth binds names as it compiles them
+/// meant when it was defined, as Forth binds names as it compiles them. A
+/// control word is compiled into a branch instead.
 const DefinedWord = struct {
     text: []const u8,
     line: usize,
     name: ?u8 = null,
+    /// whether the ASM vocabulary was searched before FORTH when it was
+    /// compiled, which decides what a word such as 2* is
+    asm_context: bool = false,
+    branch: ?Branch = null,
+
+    /// where branches go are the indices of words in `defined`
+    const Branch = union(enum) {
+        jump: u16,
+        /// pops T, and goes where it says if T is zero
+        jump_if_zero: u16,
+        /// pops a count, looping that many times and one more
+        @"for",
+        /// counts down, going back to the start of the loop until the
+        /// count is zero
+        next: u16,
+        /// pops a start and a limit, looping from the start up to the limit
+        do,
+        /// adds 1, or for +LOOP pops what to add, going back to the start of
+        /// the loop until the limit is reached
+        loop: u16,
+        plus_loop: u16,
+    };
 };
+
+/// control words of host definitions, which compile into branches
+const ControlWord = enum { IF, ELSE, THEN, BEGIN, UNTIL, AGAIN, WHILE, REPEAT, FOR, NEXT, DO, LOOP, @"+LOOP" };
+
+/// a loop running in a host definition, counting down for FOR, or up to the
+/// limit for DO
+const Loop = struct { index: i32, limit: i32 };
 
 const Number = union(enum) { single: i32, double: i64 };
 
@@ -465,6 +507,13 @@ const Interpreter = struct {
     defined_len: u16 = 0,
     /// the definition being defined, from its : until its ;
     compiling: ?struct { name: []const u8, start: u16, directive: Diagnostic } = null,
+    /// branches being compiled, waiting for where they go, and where loops
+    /// start
+    control: [16]struct { word: ControlWord, at: u16 } = undefined,
+    control_len: u8 = 0,
+    /// the loops running in definitions, the innermost last
+    loops: [16]Loop = undefined,
+    loop_len: u8 = 0,
     saved: [576]SavedBin = undefined,
     saved_count: u16 = 0,
     label_pool: [1024]Label = undefined,
@@ -487,7 +536,7 @@ const Interpreter = struct {
             // or a word that is not a name
             if (self.frames[self.frame_count - 1].definition) |definition| {
                 const word = self.defined[definition.at - 1];
-                if (word.name) |i| try self.runName(self.names[i]) else try self.interpretBuiltIn(token);
+                if (word.name) |i| try self.runName(self.names[i]) else try self.interpretBuiltIn(token, word.asm_context);
                 continue;
             }
             try self.interpret(token);
@@ -523,7 +572,9 @@ const Interpreter = struct {
                     const word = self.defined[definition.at];
                     definition.at += 1;
                     self.diagnostic.* = .{ .line = word.line, .token = word.text };
-                    return word.text;
+                    const branch = word.branch orelse return word.text;
+                    if (try self.take(branch)) |to| definition.at = to;
+                    continue;
                 }
                 if (!try self.endBlock()) return null;
                 continue;
@@ -554,8 +605,54 @@ const Interpreter = struct {
         };
         if (self.frame_count == 1) return false;
         self.assembling = frame.assembling;
+        if (frame.definition) |definition| self.loop_len = definition.loops;
         self.frame_count -= 1;
         return true;
+    }
+
+    /// Takes a branch of a running definition, returning where it goes, if
+    /// anywhere
+    fn take(self: *Interpreter, branch: DefinedWord.Branch) Error!?u16 {
+        switch (branch) {
+            .jump => |to| return to,
+            .jump_if_zero => |to| return if (try self.pop() == 0) to else null,
+            .@"for" => try self.startLoop(.{ .index = try self.pop(), .limit = 0 }),
+            .next => |to| {
+                const loop = &self.loops[self.loop_len - 1];
+                if (loop.index == 0) {
+                    self.loop_len -= 1;
+                    return null;
+                }
+                loop.index -= 1;
+                return to;
+            },
+            .do => {
+                const start = try self.pop();
+                try self.startLoop(.{ .index = start, .limit = try self.pop() });
+            },
+            .loop, .plus_loop => |to| {
+                const step = if (branch == .loop) 1 else try self.pop();
+                const loop = &self.loops[self.loop_len - 1];
+                loop.index +%= step;
+                // until the index passes the limit, going up or down
+                if (if (step >= 0) loop.index < loop.limit else loop.index >= loop.limit) return to;
+                self.loop_len -= 1;
+            },
+        }
+        return null;
+    }
+
+    fn startLoop(self: *Interpreter, loop: Loop) Error!void {
+        if (self.loop_len == self.loops.len) return error.LoadTooDeep;
+        self.loops[self.loop_len] = loop;
+        self.loop_len += 1;
+    }
+
+    /// the index of a loop running, 0 for the innermost
+    fn loopIndex(self: *Interpreter, depth: u8) Error!i32 {
+        const frame = self.frames[self.frame_count - 1].definition orelse return error.NoLoop;
+        if (self.loop_len < frame.loops + depth + 1) return error.NoLoop;
+        return self.loops[self.loop_len - 1 - depth].index;
     }
 
     /// Interprets blocks `first` to `last`, then goes back to this one
@@ -584,12 +681,13 @@ const Interpreter = struct {
             if (self.bin.?.find(token)) |value| return self.callOrPush(value, true);
         }
         if (self.findName(token)) |i| return self.runName(self.names[i]);
-        return self.interpretBuiltIn(token);
+        return self.interpretBuiltIn(token, self.asm_context);
     }
 
-    /// interprets a word that is not a label or defined name
-    fn interpretBuiltIn(self: *Interpreter, token: []const u8) Error!void {
-        if (self.asm_context) {
+    /// interprets a word that is not a label or defined name, searching ASM
+    /// before FORTH if `asm_context`
+    fn interpretBuiltIn(self: *Interpreter, token: []const u8, asm_context: bool) Error!void {
+        if (asm_context) {
             if (std.meta.stringToEnum(AsmWord, token)) |word| return self.runAsm(word);
             if (std.meta.stringToEnum(Opcode, token)) |opcode| switch (opcode) {
                 .jump, .call, .next, .@"if", .@"-if", .unext => {},
@@ -600,6 +698,7 @@ const Interpreter = struct {
             if (named_calls.get(token)) |value| return self.callOrPush(value, false);
         }
         if (std.meta.stringToEnum(ForthWord, token)) |word| return self.runForth(word);
+        if (std.meta.stringToEnum(ControlWord, token) != null) return error.CompileOnly;
         if (try parseNumber(token, self.base)) |value| return self.number(value);
         return error.UnknownWord;
     }
@@ -674,6 +773,7 @@ const Interpreter = struct {
     fn compile(self: *Interpreter, token: []const u8) Error!void {
         const compiling = self.compiling.?;
         if (eql(token, ";")) {
+            if (self.control_len > 0) return error.UnclosedControl;
             const count = self.defined_len - compiling.start;
             try self.addName(compiling.name, .definition, @as(i64, compiling.start) | @as(i64, count) << 16);
             // forgetting it forgets its words
@@ -684,9 +784,75 @@ const Interpreter = struct {
         for ([_][]const u8{ "{", "IF{", "{ELSE}", "}" }) |immediate| {
             if (eql(token, immediate)) return self.runForth(std.meta.stringToEnum(ForthWord, immediate).?);
         }
+        if (std.meta.stringToEnum(ControlWord, token)) |word| return self.compileControl(word);
+        _ = try self.addDefined(.{ .text = token, .line = self.diagnostic.line, .name = self.findName(token), .asm_context = self.asm_context });
+    }
+
+    /// adds a word to the definition being defined, returning where it is
+    fn addDefined(self: *Interpreter, word: DefinedWord) Error!u16 {
         if (self.defined_len == self.defined.len) return error.DefinitionsTooLong;
-        self.defined[self.defined_len] = .{ .text = token, .line = self.diagnostic.line, .name = self.findName(token) };
+        self.defined[self.defined_len] = word;
         self.defined_len += 1;
+        return self.defined_len - 1;
+    }
+
+    /// Compiles a control word into a branch, leaving where branches forward
+    /// are, and where loops start, for the words that end them
+    fn compileControl(self: *Interpreter, word: ControlWord) Error!void {
+        const here = self.defined_len;
+        switch (word) {
+            .IF => try self.pushControl(.IF, try self.addBranch(.{ .jump_if_zero = 0 })),
+            .ELSE => {
+                const jump = try self.addBranch(.{ .jump = 0 });
+                self.resolve(try self.popControl(.IF), jump + 1);
+                try self.pushControl(.IF, jump);
+            },
+            .THEN => self.resolve(try self.popControl(.IF), here),
+            .BEGIN => try self.pushControl(.BEGIN, here),
+            .UNTIL => _ = try self.addBranch(.{ .jump_if_zero = try self.popControl(.BEGIN) }),
+            .AGAIN => _ = try self.addBranch(.{ .jump = try self.popControl(.BEGIN) }),
+            .WHILE => {
+                // under the BEGIN it leaves, for REPEAT
+                const loop_start = try self.popControl(.BEGIN);
+                try self.pushControl(.IF, try self.addBranch(.{ .jump_if_zero = 0 }));
+                try self.pushControl(.BEGIN, loop_start);
+            },
+            .REPEAT => {
+                _ = try self.addBranch(.{ .jump = try self.popControl(.BEGIN) });
+                self.resolve(try self.popControl(.IF), self.defined_len);
+            },
+            .FOR => try self.pushControl(.FOR, try self.addBranch(.@"for") + 1),
+            .NEXT => _ = try self.addBranch(.{ .next = try self.popControl(.FOR) }),
+            .DO => try self.pushControl(.DO, try self.addBranch(.do) + 1),
+            .LOOP => _ = try self.addBranch(.{ .loop = try self.popControl(.DO) }),
+            .@"+LOOP" => _ = try self.addBranch(.{ .plus_loop = try self.popControl(.DO) }),
+        }
+    }
+
+    fn addBranch(self: *Interpreter, branch: DefinedWord.Branch) Error!u16 {
+        return self.addDefined(.{ .text = self.diagnostic.token, .line = self.diagnostic.line, .branch = branch });
+    }
+
+    fn pushControl(self: *Interpreter, word: ControlWord, at: u16) Error!void {
+        if (self.control_len == self.control.len) return error.ControlTooDeep;
+        self.control[self.control_len] = .{ .word = word, .at = at };
+        self.control_len += 1;
+    }
+
+    /// the place left by the control word that the one being compiled ends
+    fn popControl(self: *Interpreter, word: ControlWord) Error!u16 {
+        if (self.control_len == 0 or self.control[self.control_len - 1].word != word) return error.UnmatchedControl;
+        self.control_len -= 1;
+        return self.control[self.control_len].at;
+    }
+
+    /// makes a branch forward go to a word
+    fn resolve(self: *Interpreter, branch: u16, to: u16) void {
+        switch (self.defined[branch].branch.?) {
+            .jump => self.defined[branch].branch = .{ .jump = to },
+            .jump_if_zero => self.defined[branch].branch = .{ .jump_if_zero = to },
+            else => unreachable,
+        }
     }
 
     /// Runs a definition by interpreting its words, as compiled host code:
@@ -697,7 +863,7 @@ const Interpreter = struct {
         const count: u16 = @intCast(value >> 16);
         self.frames[self.frame_count] = .{
             .tokens = .{ .source = "" },
-            .definition = .{ .at = start, .end = start + count },
+            .definition = .{ .at = start, .end = start + count, .loops = self.loop_len },
             .assembling = self.assembling,
         };
         self.frame_count += 1;
@@ -1106,6 +1272,40 @@ const Interpreter = struct {
                 });
             },
             .NEGATE => try self.push(0 -% try self.pop()),
+            .@"*", .MIN, .MAX, .@"=", .@"<", .@">" => {
+                const b = try self.pop();
+                const a = try self.pop();
+                try self.push(switch (word) {
+                    .@"*" => a *% b,
+                    .MIN => @min(a, b),
+                    .MAX => @max(a, b),
+                    .@"=" => flag(a == b),
+                    .@"<" => flag(a < b),
+                    else => flag(a > b),
+                });
+            },
+            .@"/", .MOD, .@"/MOD" => {
+                const divisor = try self.pop();
+                const dividend = try self.pop();
+                // floored, as polyFORTH divides
+                if (divisor == 0 or (divisor == -1 and dividend == std.math.minInt(i32))) return error.NumberOutOfRange;
+                const quotient = @divFloor(dividend, divisor);
+                const remainder = @mod(dividend, divisor);
+                if (word != .@"/") try self.push(remainder);
+                if (word != .MOD) try self.push(quotient);
+            },
+            .@"1+", .@"1-", .@"2*", .@"2/", .ABS, .@"0=", .@"0<", .NOT => {
+                const a = try self.pop();
+                try self.push(switch (word) {
+                    .@"1+" => a +% 1,
+                    .@"1-" => a -% 1,
+                    .@"2*" => a *% 2,
+                    .@"2/" => a >> 1,
+                    .ABS => if (a == std.math.minInt(i32)) a else @intCast(@abs(a)),
+                    // NOT is 0= in polyFORTH
+                    else => flag(if (word == .@"0<") a < 0 else a == 0),
+                });
+            },
             .@"D+" => {
                 const b = try self.popDouble();
                 const a = try self.popDouble();
@@ -1315,7 +1515,10 @@ const Interpreter = struct {
                 const directive = self.diagnostic.*;
                 const new_name = try self.name();
                 self.compiling = .{ .name = new_name, .start = self.defined_len, .directive = directive };
+                self.control_len = 0;
             },
+            .I => try self.push(try self.loopIndex(0)),
+            .J => try self.push(try self.loopIndex(1)),
         }
     }
 
@@ -1523,6 +1726,11 @@ fn inRam(address: i32, len: i32) bool {
     return address >= 0 and len >= 0 and address <= 64 and len <= 64 - address;
 }
 
+/// a Forth flag: -1 for true, 0 for false
+fn flag(value: bool) i32 {
+    return if (value) -1 else 0;
+}
+
 /// the low 18 bits of a value, as stored in F18 memory
 fn word18(value: i64) Word {
     return @bitCast(@as(u18, @truncate(@as(u64, @bitCast(value)))));
@@ -1625,6 +1833,25 @@ const ForthWord = enum {
     CONSTANT,
     FORGET,
     @":",
+    I,
+    J,
+    @"*",
+    @"/",
+    MOD,
+    @"/MOD",
+    MIN,
+    MAX,
+    ABS,
+    @"1+",
+    @"1-",
+    @"2*",
+    @"2/",
+    @"=",
+    @"<",
+    @">",
+    @"0=",
+    @"0<",
+    NOT,
     LOAD,
     THRU,
     FH,
@@ -2577,4 +2804,49 @@ test "host definitions run as host code, even in ASM[" {
     for (1..15) |i| try deep.writer.print(" : d{d} d{d} ;", .{ i, i - 1 });
     try deep.writer.writeAll(" d14");
     _ = try assemble(deep.written(), &diagnostic);
+}
+
+test "host control flow" {
+    var programs: [1]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+
+    try session.interpret(": sign ( n - n) DUP 0< IF DROP -1 ELSE 0= IF 0 ELSE 1 THEN THEN ;");
+    try session.interpret("-5 sign . 0 sign . 7 sign .");
+    try std.testing.expectEqualStrings("-1 0 1 ", out.buffered());
+
+    // FOR counts down to 0, and DO counts up to its limit
+    const expectOutput = struct {
+        fn expect(s: *Session, o: *Io.Writer, line: []const u8, expected: []const u8) !void {
+            o.end = 0;
+            try s.interpret(line);
+            try std.testing.expectEqualStrings(expected, o.buffered());
+        }
+    }.expect;
+    try expectOutput(&session, &out, ": down ( n) FOR I . NEXT ;  2 down", "2 1 0 ");
+    try expectOutput(&session, &out, ": up ( n) 0 DO I . LOOP ;  3 up", "0 1 2 ");
+    try expectOutput(&session, &out, ": evens 10 0 DO I . 2 +LOOP ;  evens", "0 2 4 6 8 ");
+    try expectOutput(&session, &out, ": back 0 6 DO I . -2 +LOOP ;  back", "6 4 2 0 ");
+    try expectOutput(&session, &out, ": grid 2 0 DO 2 0 DO J . I . LOOP LOOP ;  grid", "0 0 0 1 1 0 1 1 ");
+    try expectOutput(&session, &out, ": count ( n) BEGIN DUP . 1- DUP 0= UNTIL DROP ;  3 count", "3 2 1 ");
+    try expectOutput(&session, &out, ": halve ( n) BEGIN DUP WHILE DUP . 2/ REPEAT DROP ;  8 halve", "8 4 2 1 ");
+    try expectOutput(&session, &out, "7 2 /MOD . .  -7 2 / .  -7 2 MOD .  3 4 MIN .  3 4 * .", "3 1 -4 1 3 12 ");
+
+    // EXIT from a loop ends the loop with the definition
+    try expectOutput(&session, &out, ": find 10 0 DO I 3 = IF I EXIT THEN LOOP -1 ;  find .", "3 ");
+    try std.testing.expectEqual(0, session.interpreter.loop_len);
+    try std.testing.expectEqual(0, session.stack().len);
+
+    try std.testing.expectError(error.CompileOnly, session.interpret("1 IF"));
+    try std.testing.expectError(error.NoLoop, session.interpret("I"));
+    try std.testing.expectError(error.UnclosedControl, session.interpret(": open IF ;"));
+    try std.testing.expectError(error.UnmatchedControl, session.interpret(": crossed BEGIN THEN ;"));
+}
+
+test "host definitions keep the words they were compiled with" {
+    // 2* is the host's, though six runs within ASM[, where 2* is an opcode
+    try expectAssembles(": six 3 2* ;  ASM[ # 0 NODE  six S>D lit >BIN", &.{ opcodes(.@"@p", .@";", .@";", .@";"), 6 });
 }
