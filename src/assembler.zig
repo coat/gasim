@@ -53,7 +53,7 @@ pub const Program = struct {
     len: u7,
     /// the source line each word was assembled from, or 0 for an unused
     /// word. Lines past the largest number that fits get that number.
-    lines: [64]u16 = @splat(0),
+    lines: [64]u32 = @splat(0),
     entry: Address,
     /// where the program first calls a ROM word, which needs the node's ROM
     rom_word: ?Diagnostic = null,
@@ -483,7 +483,7 @@ test "source lines" {
     var diagnostic: Diagnostic = .{};
     // an instruction word is from the line it starts on
     const program = try assemble("5 dup\ndrop\n\n7 ,", &diagnostic);
-    try std.testing.expectEqualSlices(u16, &.{ 1, 1, 4, 0 }, program.lines[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1, 4, 0 }, program.lines[0..4]);
 }
 
 test "labels, calls and tail calls" {

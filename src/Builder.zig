@@ -6,7 +6,7 @@ const Builder = @This();
 
 ram: [64]Word = @splat(0),
 /// the source line each word was assembled from, or 0 for an unused word
-lines: [64]u16 = @splat(0),
+lines: [64]u32 = @splat(0),
 /// next free address, up to 64, or up to x7f when wrapping
 here: u7 = 0,
 len: u7 = 0,
@@ -256,7 +256,7 @@ fn address(self: *Builder) Error!u6 {
 fn alloc(self: *Builder) Error!u6 {
     if (self.single_word and self.len > 0) return error.InlineTooLong;
     const result = try self.address();
-    self.lines[result] = @intCast(@min(self.line, std.math.maxInt(u16)));
+    self.lines[result] = @intCast(@min(self.line, std.math.maxInt(u32)));
     self.here = if (self.wrap) self.here +% 1 else self.here + 1;
     self.len = @max(self.len, @as(u7, result) + 1);
     return result;

@@ -37,6 +37,18 @@
 //!     DUP DROP SWAP OVER ROT 2DUP 2DROP 2SWAP 2OVER AND OR XOR + - NEGATE
 //!     D+ DNEGATE S>D . HEX DECIMAL
 //!
+//! Source may also be polyFORTH blocks of 1024 characters, 16 lines of 64,
+//! numbered from 0, which these load:
+//!
+//!     n LOAD  first last THRU  n FH
+//!                       interpret a block, or a range of them, and the
+//!                       number of a block relative to the one being loaded
+//!     EXIT              stop interpreting the block, which within ASM[
+//!                       takes two
+//!     t IF{ ... {ELSE} ... }
+//!                       interpret the first part if t is nonzero, otherwise
+//!                       the second
+//!
 //! along with the opcodes ; ex @p @+ @b @ !p !+ !b ! +* 2* 2/ inv + and xor
 //! drop dup r> over a . >r b! a!, and ( ) and \ comments. Unused slots of a
 //! word that ends with a return or jump are left as returns, as arrayForth
@@ -60,14 +72,75 @@ pub const Error = assembler.Error || error{
     UnclosedInline,
     /// ]] or =P outside A[
     NotInline,
+    /// a block LOAD or THRU cannot find, or FH outside a block
+    NoSuchBlock,
+    /// blocks loading blocks too deeply
+    LoadTooDeep,
 };
 
 /// Assembles the bins in `source` into `programs`, returning the programs
 /// saved with >BIN.
 pub fn assembleNodes(source: []const u8, programs: []Program, diagnostic: *Diagnostic) Error![]Program {
-    var interpreter: Interpreter = .{ .tokens = .{ .source = source }, .diagnostic = diagnostic, .programs = programs };
+    var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs };
+    interpreter.frames[0] = .{ .tokens = .{ .source = source } };
     return interpreter.run();
 }
+
+/// Assembles the bins of polyFORTH blocks, loading each of `loads` in turn,
+/// such as a block of configuration and then the load block of an
+/// application. The line numbers of the programs and the diagnostic count
+/// 16 lines to a block, from line 1 of block 0.
+pub fn assembleBlocks(blocks: []const u8, loads: []const u32, programs: []Program, diagnostic: *Diagnostic) Error![]Program {
+    var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs, .blocks = blocks };
+    for (loads) |load| {
+        if (load >= blockCount(blocks)) {
+            diagnostic.* = .{};
+            return error.NoSuchBlock;
+        }
+        interpreter.frames[0] = .{ .tokens = blockTokens(blocks, load), .block = load, .last = load };
+        interpreter.frame_count = 1;
+        interpreter.assembling = false;
+        _ = try interpreter.run();
+    }
+    return programs[0..interpreter.count];
+}
+
+pub const block_size = 1024;
+
+/// the number of whole blocks
+pub fn blockCount(blocks: []const u8) usize {
+    return blocks.len / block_size;
+}
+
+fn blockTokens(blocks: []const u8, block: u32) Tokenizer {
+    const line = @as(usize, block) * 16 + 1;
+    return .{ .source = blocks[@as(usize, block) * block_size ..][0..block_size], .block_lines = true, .line = line, .start_line = line };
+}
+
+/// Writes blocks as text, each line of 64 characters followed by a newline,
+/// so that line numbers count 16 to a block as assembleBlocks does. Control
+/// characters, such as the zeros of blocks never written, become spaces.
+/// `text` must hold 65 bytes for each 64 of the blocks.
+pub fn blockText(blocks: []const u8, text: []u8) []u8 {
+    const len = blockCount(blocks) * block_size;
+    for (0..len / 64) |line| {
+        const out = text[line * 65 ..][0..65];
+        for (blocks[line * 64 ..][0..64], out[0..64]) |c, *o| o.* = if (c < ' ') ' ' else c;
+        out[64] = '\n';
+    }
+    return text[0 .. len / 64 * 65];
+}
+
+/// a block being loaded, or the whole source when it is text
+const Frame = struct {
+    tokens: Tokenizer,
+    /// the block being interpreted, and the last of the blocks THRU loads
+    block: ?u32 = null,
+    last: u32 = 0,
+    /// whether ASM[ was interpreting when the block was loaded, which it
+    /// goes back to once the blocks have been interpreted
+    assembling: bool = false,
+};
 
 /// Assembles the single bin in `source`
 pub fn assemble(source: []const u8, diagnostic: *Diagnostic) Error!Program {
@@ -103,6 +176,9 @@ const Bin = struct {
     label_count: u8 = 0,
     /// the first labels, up to this many, are the ROM's
     rom_count: u8 = 0,
+    /// the ROM labels arrayForth 3 gives the node, which are the first
+    /// labels until they are erased
+    rom_labels: []const Label = &.{},
     rom_word: ?Diagnostic = null,
     /// where the NODE directive is, and whether code or labels have been
     /// assembled since the bin was last saved
@@ -116,6 +192,7 @@ const Bin = struct {
             bin.label_count += 1;
         }
         bin.rom_count = bin.label_count;
+        bin.rom_labels = romLabels(node);
         return bin;
     }
 
@@ -133,9 +210,11 @@ const Bin = struct {
     }
 };
 
-/// a bin saved with >BIN, whose labels `its` can find
+/// a bin saved with >BIN, whose labels `its` can find: the ROM labels
+/// arrayForth 3 gives its node, if it kept them, followed by its own
 const SavedBin = struct {
     number: u32,
+    rom_labels: []const Label,
     labels: []const Label,
 };
 
@@ -149,7 +228,11 @@ const Name = struct {
 const Number = union(enum) { single: i32, double: i64 };
 
 const Interpreter = struct {
-    tokens: Tokenizer,
+    /// the blocks being loaded, the first being the source
+    frames: [16]Frame = undefined,
+    frame_count: u8 = 1,
+    /// all the blocks, when the source is blocks
+    blocks: ?[]const u8 = null,
     diagnostic: *Diagnostic,
     programs: []Program,
     count: usize = 0,
@@ -180,7 +263,9 @@ const Interpreter = struct {
 
     fn run(self: *Interpreter) Error![]Program {
         while (try self.next()) |token| {
-            if (eql(token, "EXIT") and !self.assembling) break;
+            if (eql(token, "EXIT") and !self.assembling) {
+                if (try self.endBlock()) continue else break;
+            }
             try self.interpret(token);
         }
         if (self.inline_word != null) return error.UnclosedInline;
@@ -197,13 +282,58 @@ const Interpreter = struct {
         }
     }
 
+    fn tokens(self: *Interpreter) *Tokenizer {
+        return &self.frames[self.frame_count - 1].tokens;
+    }
+
+    /// the next word, going on to the next block or back to the one that
+    /// loaded this one at the end of a block
     fn next(self: *Interpreter) Error!?[]const u8 {
-        const token = self.tokens.next() catch |err| {
-            self.diagnostic.* = .{ .line = self.tokens.start_line, .token = self.tokens.source[self.tokens.start..][0..1] };
-            return err;
+        while (true) {
+            const t = self.tokens();
+            const token = t.next() catch |err| {
+                self.diagnostic.* = .{ .line = t.start_line, .token = t.source[t.start..][0..1] };
+                return err;
+            };
+            if (token) |word| {
+                self.diagnostic.* = .{ .line = t.start_line, .token = word };
+                return word;
+            }
+            if (!try self.endBlock()) return null;
+        }
+    }
+
+    /// Moves on from a block that has ended, to the next one THRU loads or
+    /// back to the block that loaded it. Returns false at the end of the
+    /// source.
+    fn endBlock(self: *Interpreter) Error!bool {
+        const frame = &self.frames[self.frame_count - 1];
+        if (frame.block) |block| if (block < frame.last) {
+            frame.block = block + 1;
+            frame.tokens = blockTokens(self.blocks.?, block + 1);
+            self.assembling = false;
+            return true;
         };
-        self.diagnostic.* = .{ .line = self.tokens.start_line, .token = token orelse return null };
-        return token;
+        if (self.frame_count == 1) return false;
+        self.assembling = frame.assembling;
+        self.frame_count -= 1;
+        return true;
+    }
+
+    /// Interprets blocks `first` to `last`, then goes back to this one
+    fn load(self: *Interpreter, first: i32, last: i32) Error!void {
+        const blocks = self.blocks orelse return error.NoSuchBlock;
+        if (first < 0 or last >= blockCount(blocks)) return error.NoSuchBlock;
+        if (first > last) return;
+        if (self.frame_count == self.frames.len) return error.LoadTooDeep;
+        self.frames[self.frame_count] = .{
+            .tokens = blockTokens(blocks, @intCast(first)),
+            .block = @intCast(first),
+            .last = @intCast(last),
+            .assembling = self.assembling,
+        };
+        self.frame_count += 1;
+        self.assembling = false;
     }
 
     /// the name following a defining word such as : or equ
@@ -249,7 +379,7 @@ const Interpreter = struct {
         if (self.inline_word) |*word| return word;
         const bin = try self.currentBin();
         bin.changed = true;
-        bin.builder.line = self.tokens.start_line;
+        bin.builder.line = self.tokens().start_line;
         return &bin.builder;
     }
 
@@ -388,12 +518,14 @@ const Interpreter = struct {
                 const bin = try self.currentBin();
                 bin.builder = Bin.fresh();
                 bin.label_count = bin.rom_count;
+                if (bin.label_count < bin.rom_labels.len) bin.rom_labels = &.{};
             },
             .@"-ROM" => {
                 const bin = try self.currentBin();
                 bin.builder = Bin.fresh();
                 bin.label_count = 0;
                 bin.rom_count = 0;
+                bin.rom_labels = &.{};
             },
             .@"-SYM" => (try self.currentBin()).rom_count = 0,
             .@">ROM" => {
@@ -539,16 +671,19 @@ const Interpreter = struct {
             .rom_word = bin.rom_word,
         };
 
-        if (self.pool_len + bin.label_count > self.label_pool.len) return error.TooManyLabels;
-        const labels = self.label_pool[self.pool_len..][0..bin.label_count];
-        @memcpy(labels, bin.labels[0..bin.label_count]);
-        self.pool_len += bin.label_count;
+        // keeps the bin's own labels, and refers to the ROM's
+        const own = bin.labels[bin.rom_labels.len..bin.label_count];
+        if (self.pool_len + own.len > self.label_pool.len) return error.TooManyLabels;
+        const labels = self.label_pool[self.pool_len..][0..own.len];
+        @memcpy(labels, own);
+        self.pool_len += @intCast(own.len);
+        const saved_bin: SavedBin = .{ .number = bin.number, .rom_labels = bin.rom_labels, .labels = labels };
 
         bin.changed = false;
         for (self.saved[0..self.saved_count], 0..) |*saved, i| {
             if (saved.number == bin.number) {
                 self.programs[i] = program;
-                saved.labels = labels;
+                saved.* = saved_bin;
                 return;
             }
         }
@@ -556,20 +691,22 @@ const Interpreter = struct {
         if (self.saved_count == self.saved.len) return error.TooManyNodes;
         self.programs[self.count] = program;
         self.count += 1;
-        self.saved[self.saved_count] = .{ .number = bin.number, .labels = labels };
+        self.saved[self.saved_count] = saved_bin;
         self.saved_count += 1;
     }
 
     /// the value of a label in a saved bin, or in the ROM of the bin's node
     fn labelOf(self: *Interpreter, number_of_bin: i32, label_name: []const u8) Error!u16 {
         if (number_of_bin < 0 or number_of_bin > 999999) return error.InvalidNode;
-        const labels = for (self.saved[0..self.saved_count]) |saved| {
-            if (saved.number == number_of_bin) break saved.labels;
-        } else romLabels(@intCast(@rem(number_of_bin, 10000)));
-        var i = labels.len;
-        while (i > 0) {
-            i -= 1;
-            if (sameLabel(labels[i].name, label_name)) return labels[i].value;
+        const saved: SavedBin = for (self.saved[0..self.saved_count]) |saved| {
+            if (saved.number == number_of_bin) break saved;
+        } else .{ .number = @intCast(number_of_bin), .rom_labels = romLabels(@intCast(@rem(number_of_bin, 10000))), .labels = &.{} };
+        for ([_][]const Label{ saved.labels, saved.rom_labels }) |labels| {
+            var i = labels.len;
+            while (i > 0) {
+                i -= 1;
+                if (sameLabel(labels[i].name, label_name)) return labels[i].value;
+            }
         }
         self.diagnostic.token = label_name;
         return error.UndefinedLabel;
@@ -657,6 +794,22 @@ const Interpreter = struct {
             .HEX => self.base = 16,
             .DECIMAL => self.base = 10,
             .CONSTANT => try self.define(.constant, try self.pop()),
+            .LOAD => {
+                const block = try self.pop();
+                try self.load(block, block);
+            },
+            .THRU => {
+                const last = try self.pop();
+                try self.load(try self.pop(), last);
+            },
+            .FH => {
+                const offset = try self.pop();
+                const block = self.frames[self.frame_count - 1].block orelse return error.NoSuchBlock;
+                try self.push(@as(i32, @intCast(block)) +% offset);
+            },
+            .@"IF{" => if (try self.pop() == 0) self.tokens().skipPast('}'),
+            .@"{ELSE}" => self.tokens().skipPast('}'),
+            .@"}" => {},
             .FORGET => {
                 const forget_name = try self.name();
                 self.name_count = self.findName(forget_name) orelse return error.UnknownWord;
@@ -798,6 +951,12 @@ const ForthWord = enum {
     DECIMAL,
     CONSTANT,
     FORGET,
+    LOAD,
+    THRU,
+    FH,
+    @"IF{",
+    @"{ELSE}",
+    @"}",
 };
 
 /// port and register addresses, which assemble literals
@@ -956,6 +1115,9 @@ fn parseNumber(token: []const u8, base: u8) Error!?Number {
 /// and \ comments
 const Tokenizer = struct {
     source: []const u8,
+    /// lines are 64 characters long, as in a block, instead of ending with
+    /// a newline
+    block_lines: bool = false,
     index: usize = 0,
     line: usize = 1,
     /// where the last token, or the malformed one, starts
@@ -964,15 +1126,16 @@ const Tokenizer = struct {
 
     fn next(self: *Tokenizer) Error!?[]const u8 {
         while (true) {
-            while (self.index < self.source.len and std.ascii.isWhitespace(self.source[self.index])) self.advance();
+            while (self.index < self.source.len and isSpace(self.source[self.index])) self.advance();
             if (self.index == self.source.len) return null;
 
             self.start = self.index;
             self.start_line = self.line;
-            while (self.index < self.source.len and !std.ascii.isWhitespace(self.source[self.index])) self.advance();
+            while (self.index < self.source.len and !isSpace(self.source[self.index])) self.advance();
             const token = self.source[self.start..self.index];
             if (eql(token, "\\")) {
-                while (self.index < self.source.len and self.source[self.index] != '\n') self.advance();
+                const line = self.line;
+                while (self.index < self.source.len and self.line == line and self.source[self.index] != '\n') self.advance();
             } else if (eql(token, "(") or eql(token, ".(")) {
                 while (self.index < self.source.len and self.source[self.index] != ')') self.advance();
                 if (self.index == self.source.len) return error.UnterminatedComment;
@@ -981,9 +1144,25 @@ const Tokenizer = struct {
         }
     }
 
+    /// skips the source up to and including the next `c`
+    fn skipPast(self: *Tokenizer, c: u8) void {
+        while (self.index < self.source.len and self.source[self.index] != c) self.advance();
+        if (self.index < self.source.len) self.advance();
+    }
+
     fn advance(self: *Tokenizer) void {
+        if (self.block_lines) {
+            self.index += 1;
+            if (self.index % 64 == 0) self.line += 1;
+            return;
+        }
         if (self.source[self.index] == '\n') self.line += 1;
         self.index += 1;
+    }
+
+    /// Blocks that were never written hold zeros
+    fn isSpace(c: u8) bool {
+        return std.ascii.isWhitespace(c) or c == 0;
     }
 };
 
@@ -1268,4 +1447,81 @@ test "comments and EXIT" {
     , &.{opcodes(.dup, .@";", .@";", .@";")});
     // EXIT within ASM[ leaves it, so it takes two to stop
     try expectAssembles("ASM[ # 0 NODE dup >BIN EXIT EXIT garbage", &.{opcodes(.dup, .@";", .@";", .@";")});
+}
+
+/// blocks holding the given lines, each padded with spaces to 64 characters
+fn testBlocks(comptime blocks: []const []const []const u8) [blocks.len * block_size]u8 {
+    var result: [blocks.len * block_size]u8 = @splat(' ');
+    for (blocks, 0..) |lines, b| for (lines, 0..) |line, l| {
+        @memcpy(result[b * block_size + l * 64 ..][0..line.len], line);
+    };
+    return result;
+}
+
+test "blocks" {
+    const disk = comptime testBlocks(&.{
+        &.{ "( load block)  1 FH LOAD  ASM[ # 0 NODE  dup  \\ to the line's end", "  drop  # 2 FH # 3 FH THRU" },
+        &.{ "2 CONSTANT two", "EXIT dup" },
+        // a bin may run on into the next block, which starts with ASM[
+        &.{"ASM[ two org over"},
+        &.{"ASM[ a >BIN ]ASM"},
+    });
+    var programs: [2]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleBlocks(&disk, &.{0}, &programs, &diagnostic);
+    try std.testing.expectEqual(1, assembled.len);
+    try std.testing.expectEqualSlices(Word, &.{
+        opcodes(.dup, .drop, .@".", .@"."), erased, opcodes(.over, .a, .@";", .@";"),
+    }, assembled[0].ram[0..3]);
+    // lines count 16 to a block
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 33 }, assembled[0].lines[0..3]);
+
+    // blocks may be loaded in turn
+    try std.testing.expectEqual(1, (try assembleBlocks(&disk, &.{ 1, 0 }, &programs, &diagnostic)).len);
+    try std.testing.expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{4}, &programs, &diagnostic));
+    try std.testing.expectEqual(0, diagnostic.line);
+}
+
+test "loading from within ASM[" {
+    // LOAD interprets the block as host code, and goes back to assembling
+    const disk = comptime testBlocks(&.{
+        &.{"ASM[ # 0 NODE  # 1 LOAD  dup >BIN ]ASM"},
+        &.{"( host code)  ASM[ drop"},
+    });
+    var programs: [1]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleBlocks(&disk, &.{0}, &programs, &diagnostic);
+    try std.testing.expectEqual(opcodes(.drop, .dup, .@";", .@";"), assembled[0].ram[0]);
+}
+
+test "conditional assembly" {
+    try expectAssembles("ASM[ # 0 NODE  # 1 IF{ dup {ELSE} drop }  # 0 IF{ over {ELSE} a } >BIN", &.{
+        opcodes(.dup, .a, .@";", .@";"),
+    });
+}
+
+test "block errors" {
+    const disk = comptime testBlocks(&.{
+        &.{"0 LOAD"},
+        &.{ "", "", "ASM[ # 0 NODE  nothing" },
+        &.{},
+    });
+    var programs: [1]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.LoadTooDeep, assembleBlocks(&disk, &.{0}, &programs, &diagnostic));
+    try std.testing.expectError(error.UnknownWord, assembleBlocks(&disk, &.{1}, &programs, &diagnostic));
+    try std.testing.expectEqual(16 + 3, diagnostic.line);
+    try std.testing.expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{ 2, 3 }, &programs, &diagnostic));
+    try std.testing.expectEqual(0, diagnostic.line);
+    try expectError(error.NoSuchBlock, "1 LOAD");
+    try expectError(error.NoSuchBlock, "1 FH");
+}
+
+test blockText {
+    const disk = comptime testBlocks(&.{&.{ "first", "second\n" }});
+    var text: [16 * 65]u8 = undefined;
+    const lines = blockText(&disk, &text);
+    try std.testing.expectEqual(16 * 65, lines.len);
+    try std.testing.expectEqualStrings("first ", lines[0..6]);
+    try std.testing.expectEqualStrings(" \nsecond ", lines[63 .. 65 + 7]);
 }

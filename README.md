@@ -106,6 +106,17 @@ ASM[ # 0 NODE ERS  # 0 org
 >BIN ]ASM
 ```
 
+Files ending in `.blk` are read as polyFORTH blocks of arrayForth 3 source,
+such as the disks arrayForth 3 keeps its source and projects in. Block 0 is
+loaded unless `--load` names other blocks, which are loaded in turn, and
+blocks can load others with `LOAD`, `THRU` and `FH`. For example, this
+assembles the Ethernet NIC from the arrayForth 3 distribution, after the
+block that configures where its modules are:
+
+```
+$ gasim --listing --load 1562 --load 2001 sF/pFDISK.blk
+```
+
 ### Terminal user interface
 
 The map shows every node: running nodes are green, nodes waiting on a port

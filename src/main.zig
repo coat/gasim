@@ -1,10 +1,10 @@
 //! gasim
 
 const usage =
-    \\usage: gasim [run] [options] <program.ga | program.af>
+    \\usage: gasim [run] [options] <program.ga | program.af | program.blk>
     \\
     \\Opens the program in a terminal user interface, reading .af files as
-    \\arrayForth 3 source. With run, or when stdin
+    \\arrayForth 3 source and .blk files as blocks of it. With run, or when stdin
     \\or stdout is not a terminal, runs it instead with the console on stdin
     \\and stdout, until every node is waiting, or one reaches a breakpoint or
     \\makes a watched transfer. With --listing, writes the assembled program
@@ -28,6 +28,9 @@ const usage =
     \\                             word a node executes
     \\  --why                      with run, say what each node is waiting on
     \\                             once every node is waiting
+    \\  --load <block>             with a .blk file, the block to load (default
+    \\                             0). Can be given more than once, to load
+    \\                             blocks such as configuration first.
     \\  --listing                  write each node's words with their
     \\                             disassembly and source lines to stdout,
     \\                             instead of running
@@ -36,6 +39,9 @@ const usage =
 const default_rom_path = "rom/ga144.txt";
 
 const max_source_len = 64 * 1024;
+
+/// the most a .blk file may hold, which is more than arrayForth 3's disks
+const max_blocks_len = 64 * 1024 * 1024;
 
 /// the console stopped by ctrl+c
 var interruptible: ?*Console = null;
@@ -69,6 +75,8 @@ pub fn main(init: std.process.Init) !void {
     var trace = false;
     var why = false;
     var listing = false;
+    var loads: [16]u32 = undefined;
+    var loads_len: usize = 0;
     var breakpoints: [Chip.max_breakpoints]struct { node: u16, address: u9 } = undefined;
     var breakpoints_len: usize = 0;
     var watches: [Chip.max_watches]struct { node: u16, direction: Direction, read: bool, write: bool } = undefined;
@@ -76,12 +84,16 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = if (run_command) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch")) {
+        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load")) {
             i += 1;
             if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
             const value = args[i];
             if (std.mem.eql(u8, arg, "--rom")) {
                 rom_path = value;
+            } else if (std.mem.eql(u8, arg, "--load")) {
+                if (loads_len == loads.len) fatal("more than {d} blocks to load", .{loads.len});
+                loads[loads_len] = std.fmt.parseInt(u32, value, 10) catch fatal("invalid block '{s}'", .{value});
+                loads_len += 1;
             } else if (std.mem.eql(u8, arg, "--break")) {
                 const colon = std.mem.indexOfScalar(u8, value, ':') orelse
                     fatal("invalid breakpoint '{s}', expected for example 105:003", .{value});
@@ -137,11 +149,26 @@ pub fn main(init: std.process.Init) !void {
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
 
+    const blocks = std.mem.endsWith(u8, source_path, ".blk");
+    if (loads_len > 0 and !blocks) fatal("--load needs a .blk file of blocks", .{});
+    if (loads_len == 0) {
+        loads[0] = 0;
+        loads_len = 1;
+    }
     // one spare byte tells a full buffer apart from a longer file
     var source_buffer: [max_source_len + 1]u8 = undefined;
-    const source = Io.Dir.cwd().readFile(io, source_path, &source_buffer) catch |err|
-        fatal("{s}: {t}", .{ source_path, err });
-    if (source.len > max_source_len) fatal("{s}: file is too large", .{source_path});
+    const file = if (blocks)
+        Io.Dir.cwd().readFileAlloc(io, source_path, arena, .limited(max_blocks_len)) catch |err|
+            fatal("{s}: {t}", .{ source_path, err })
+    else
+        Io.Dir.cwd().readFile(io, source_path, &source_buffer) catch |err|
+            fatal("{s}: {t}", .{ source_path, err });
+    if (!blocks and file.len > max_source_len) fatal("{s}: file is too large", .{source_path});
+    // blocks are listed as lines of text, numbered the same way
+    const source = if (blocks)
+        gasim.arrayforth.blockText(file, try arena.alloc(u8, gasim.arrayforth.blockCount(file) * 16 * 65))
+    else
+        file;
 
     var chip: Chip = try .init(init.gpa, layout);
     defer chip.deinit(init.gpa);
@@ -152,9 +179,17 @@ pub fn main(init: std.process.Init) !void {
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     var diagnostic: assembler.Diagnostic = .{};
-    const programs = assemble(source_path, source, program_buffer, &diagnostic) catch |err| switch (err) {
-        error.TooManyNodes => fatal("{s}:{d}: more nodes than a {d}x{d} layout has at '{s}'", .{ source_path, diagnostic.line, layout.rows, layout.columns, diagnostic.token }),
-        else => fatal("{s}:{d}: {t} at '{s}'", .{ source_path, diagnostic.line, err, diagnostic.token }),
+    const programs = (if (blocks)
+        gasim.arrayforth.assembleBlocks(file, loads[0..loads_len], program_buffer, &diagnostic)
+    else
+        assemble(source_path, file, program_buffer, &diagnostic)) catch |err| {
+        const where: Where = .{ .path = source_path, .line = diagnostic.line, .blocks = blocks };
+        switch (err) {
+            error.TooManyNodes => fatal("{f}: more nodes than a {d}x{d} layout has at '{s}'", .{ where, layout.rows, layout.columns, diagnostic.token }),
+            error.NoSuchBlock => if (diagnostic.line == 0) fatal("{s}: has fewer blocks than --load needs", .{source_path}),
+            else => {},
+        }
+        fatal("{f}: {t} at '{s}'", .{ where, err, diagnostic.token });
     };
     for (programs) |program| if (layout.index(program.node) == null)
         fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, program.node, layout.rows, layout.columns });
@@ -180,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
     const loadable = programs[0..loaded];
 
     if (roms == null) for (loadable) |program| if (program.rom_word) |word|
-        fatal("{s}:{d}: '{s}' is in ROM, which is not loaded (see --rom)", .{ source_path, word.line, word.token });
+        fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .blocks = blocks }, word.token });
 
     for (breakpoints[0..breakpoints_len]) |b| {
         const index = layout.index(b.node) orelse
@@ -347,6 +382,20 @@ fn handleInterrupt(_: posix.SIG) callconv(.c) void {
         posix.raise(.INT) catch {};
     }
 }
+
+/// where a line of source is, such as `hello.ga:3`, or for blocks
+/// `app.blk: block 2 line 5` with lines numbered from 0 as polyFORTH lists
+/// them
+const Where = struct {
+    path: []const u8,
+    line: usize,
+    blocks: bool,
+
+    pub fn format(self: Where, writer: *Io.Writer) Io.Writer.Error!void {
+        if (!self.blocks) return writer.print("{s}:{d}", .{ self.path, self.line });
+        try writer.print("{s}: block {d} line {d}", .{ self.path, (self.line -| 1) / 16, (self.line -| 1) % 16 });
+    }
+};
 
 /// Assembles source in gasim's syntax, or in arrayForth 3's for .af files
 fn assemble(path: []const u8, source: []const u8, programs: []assembler.Program, diagnostic: *assembler.Diagnostic) gasim.arrayforth.Error![]assembler.Program {
