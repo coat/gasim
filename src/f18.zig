@@ -132,6 +132,17 @@ pub const Instruction = packed struct(Word) {
 
 /// An F18A computer
 pub const Computer = struct {
+    pub const Transfers = struct {
+        read: port.Select = .empty,
+        written: port.Select = .empty,
+        value_read: Word = 0,
+        value_written: Word = 0,
+
+        pub fn any(self: Transfers) bool {
+            return self.read.count() > 0 or self.written.count() > 0;
+        }
+    };
+
     const State = enum {
         fetch,
         execution,
@@ -157,6 +168,8 @@ pub const Computer = struct {
     b: u9,
     /// instruction words containing 1, 2, 3 or 4 opcodes for execution
     i: Word,
+    /// where I was fetched from
+    word_address: Address,
     /// top 64 words are RAM, bottom half are ROM
     mem: [128]Word,
     // 9 word stack
@@ -182,17 +195,48 @@ pub const Computer = struct {
     /// waiting in mid-instruction on a comm port. The pending operation is
     /// retried by the next call to `step`.
     suspended: bool,
+    /// the comm ports read from and written to by the last call to `step`,
+    /// and the last value each way. Reads include instruction words fetched
+    /// from a port.
+    transfers: Transfers = .{},
 
     execution_time: f32,
+
+    pub const Status = union(enum) {
+        running,
+        /// executing from a port, waiting for code
+        code: u9,
+        reading: u9,
+        writing: u9,
+    };
+
+    /// what the computer is doing, and if it is waiting, the address it
+    /// waits on
+    pub fn status(self: Computer) Status {
+        if (!self.suspended) return .running;
+        if (self.state == .fetch) return .{ .code = @bitCast(self.p.address) };
+        const opcode = Instruction.decode(self.i).getSlot(self.slot);
+        const address: u9 = switch (opcode) {
+            .@"@p", .@"!p" => @bitCast(self.p.address),
+            .@"@b", .@"!b" => self.b,
+            else => @intCast(@as(u18, @bitCast(self.a)) & 0x1ff),
+        };
+        return switch (opcode) {
+            .@"@p", .@"@+", .@"@b", .@"@" => .{ .reading = address },
+            else => .{ .writing = address },
+        };
+    }
 
     /// Executes the rest of the current instruction word, fetching a new one
     /// first if needed. Returns early with `suspended` set when an opcode
     /// must wait on a comm port.
     pub fn step(self: *Computer) void {
         self.suspended = false;
+        self.transfers = .{};
         if (self.state == .fetch) {
             // instructions may be fetched from a port
             self.i = self.read(self.p.address) orelse return;
+            self.word_address = self.p.address;
             self.p.increment();
             self.slot = 0;
             self.state = .execution;
@@ -201,6 +245,12 @@ pub const Computer = struct {
             self.execute(Instruction.decode(self.i).getSlot(self.slot));
             if (self.suspended) return;
         }
+    }
+
+    /// The address of the instruction word being executed, or between words,
+    /// of the word to be fetched next
+    pub fn current(self: Computer) Address {
+        return if (self.state == .fetch) self.p.address else self.word_address;
     }
 
     pub fn execute(self: *Computer, opcode: Opcode) void {
@@ -284,6 +334,8 @@ pub const Computer = struct {
             const link = self.ports[@backingInt(direction)];
             const p = link.port orelse continue;
             if (p.read(link.side)) |word| {
+                self.transfers.read.insert(direction);
+                self.transfers.value_read = word;
                 var others = ports.iterator();
                 while (others.next()) |other| {
                     const other_link = self.ports[@backingInt(other)];
@@ -303,7 +355,11 @@ pub const Computer = struct {
         while (it.next()) |direction| {
             const link = self.ports[@backingInt(direction)];
             const p = link.port orelse continue;
-            if (p.write(link.side, value)) written = true;
+            if (p.write(link.side, value)) {
+                written = true;
+                self.transfers.written.insert(direction);
+                self.transfers.value_written = value;
+            }
         }
         if (written) {
             it = ports.iterator();
@@ -369,6 +425,7 @@ pub const Computer = struct {
         .a = 0,
         .b = 0x15d,
         .i = 0,
+        .word_address = .reset,
 
         .return_stack = .empty,
         .data_stack = .empty,
@@ -602,6 +659,21 @@ test "fetch" {
     try expectEqual(123, computer.fetch(rom_address));
 }
 
+test "current" {
+    var computer: Computer = .reset;
+    computer.p.address = Address.fromWord(5);
+    // between words, the next word
+    try expectEqual(Address.fromWord(5), computer.current());
+
+    // a word that reads a literal, past which P has moved
+    computer.mem[5] = Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@"!", .slot_2 = .@".", .slot_3 = 7 });
+    computer.a = 0x1d5;
+    computer.step();
+    try std.testing.expect(computer.suspended);
+    try expectEqual(Address.fromWord(7), computer.p.address);
+    try expectEqual(Address.fromWord(5), computer.current());
+}
+
 test "store" {
     var address: Address = .{ .io = false, .rom = false, .local = 0 };
     var computer: Computer = .reset;
@@ -811,15 +883,21 @@ test "computers communicate through a port" {
     try expect(sender.suspended);
     try expectEqual(42, sender.data_stack.t);
 
+    try expectEqual(port.Select.empty, sender.transfers.written);
+
     // the receiver takes the first word and waits for the second
     receiver.step();
     try expect(receiver.suspended);
     try expectEqual(42, receiver.data_stack.t);
+    try expectEqual(port.Select.initOne(.left), receiver.transfers.read);
+    try expectEqual(42, receiver.transfers.value_read);
 
     // the sender completes the first write and finishes its instruction word
     sender.step();
     try expect(!sender.suspended);
     try expectEqual(Address.fromWord(3), sender.p.address);
+    try expectEqual(port.Select.initOne(.right), sender.transfers.written);
+    try expectEqual(42, sender.transfers.value_written);
 
     // the receiver is not reading again until it resumes, so the sender waits
     sender.step();
@@ -996,3 +1074,22 @@ const std = @import("std");
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectApproxEqAbs = std.testing.expectApproxEqAbs;
+
+test "status" {
+    var n: Computer = .reset;
+    try std.testing.expectEqual(Computer.Status.running, n.status());
+
+    // fetching from a multiport
+    n.p.address = Address.fromWord(0x1a5);
+    n.suspended = true;
+    try std.testing.expectEqual(Computer.Status{ .code = 0x1a5 }, n.status());
+
+    // reading through B, and writing through A
+    n.state = .execution;
+    n.i = Instruction.encode(.{ .slot_0 = .@"@b", .slot_1 = .@"!", .slot_2 = .@".", .slot_3 = 7 });
+    n.b = 0x1d5;
+    try std.testing.expectEqual(Computer.Status{ .reading = 0x1d5 }, n.status());
+    n.slot = 1;
+    n.a = 0x145;
+    try std.testing.expectEqual(Computer.Status{ .writing = 0x145 }, n.status());
+}

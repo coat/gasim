@@ -27,10 +27,13 @@ const frame_budget: Io.Duration = .fromMilliseconds(15);
 /// most a byte a round, so the console has room for this many.
 const rounds_per_check = 256;
 
+/// how many times the user can go back, before steps and runs
+const history_capacity = 64;
+
 /// width of a node in the map
 const cell_width = 4;
 /// rows of the node panel above its memory listing
-const node_header_rows = 13;
+const node_header_rows = 14;
 /// rows of the memory listing: a heading and 64 words each for RAM and ROM
 const memory_rows = 2 * 65;
 
@@ -47,6 +50,7 @@ const colors = struct {
     const literal: vaxis.Style = .{ .fg = .{ .index = 3 } };
     const heading: vaxis.Style = .{ .bold = true };
     const dim: vaxis.Style = .{ .dim = true };
+    const breakpoint: vaxis.Style = .{ .fg = .{ .index = 1 }, .bold = true };
 };
 
 /// a key and what it does, for the status bar
@@ -54,6 +58,8 @@ const Hint = struct { []const u8, []const u8 };
 
 const Tui = struct {
     io: Io,
+    /// for snapshots of the chip, as they are needed
+    gpa: Allocator,
     chip: *Chip,
     options: Options,
     /// whether the user wants the chip to run
@@ -82,11 +88,27 @@ const Tui = struct {
     /// the first row of the memory listing in view, or null to follow
     /// execution
     memory_scroll: ?u16 = null,
+    /// the row of the memory listing where breakpoints are set, or null for
+    /// the current word
+    memory_cursor: ?u16 = null,
     /// the first column and row of the map in view, counting rows from the
     /// north edge
     map_scroll: struct { x: u16 = 0, y: u16 = 0 } = .{},
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
+    message_buffer: [64]u8 = undefined,
+    /// the next key chooses a port of the selected node to watch
+    choosing_watch: bool = false,
+    /// the chip before each step or run, to go back to, allocated the first
+    /// time each is needed. The `history_len` kept start from the oldest at
+    /// `history_start`, and the oldest is dropped to make room. The one after
+    /// them is saved before each step or run, and kept once the chip changes.
+    history: []?Chip.Snapshot = &.{},
+    history_start: usize = 0,
+    history_len: usize = 0,
+    /// whether the snapshot after those kept was saved before the last step
+    /// or run
+    pending: bool = false,
 
     /// where panels were last drawn, for the mouse
     windows: std.EnumArray(Panel, ?vaxis.Window) = .initFill(null),
@@ -100,13 +122,22 @@ const Tui = struct {
     frame_buffer: [64 * 1024]u8 = undefined,
     frame: std.heap.FixedBufferAllocator = undefined,
 
-    fn init(io: Io, chip: *Chip, options: Options) Tui {
-        return .{ .io = io, .chip = chip, .options = options, .selected = chip.layout.index(options.console_node) orelse 0 };
+    fn init(io: Io, gpa: Allocator, chip: *Chip, options: Options) Tui {
+        return .{ .io = io, .gpa = gpa, .chip = chip, .options = options, .selected = chip.layout.index(options.console_node) orelse 0 };
+    }
+
+    fn deinit(self: *Tui) void {
+        for (self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(self.gpa);
     }
 
     /// formats text that lasts until the next frame
     fn print(self: *Tui, comptime format: []const u8, args: anytype) []const u8 {
         return std.fmt.allocPrint(self.frame.allocator(), format, args) catch "…";
+    }
+
+    /// formats a message for the status bar
+    fn printLasting(self: *Tui, comptime format: []const u8, args: anytype) []const u8 {
+        return std.fmt.bufPrint(&self.message_buffer, format, args) catch "…";
     }
 
     /// keeps room in the console's output for another `rounds_per_check`
@@ -133,9 +164,21 @@ const Tui = struct {
                     self.settled = true;
                     return;
                 }
+                if (self.chip.hit != null) return self.stop();
             }
             if (Io.Timestamp.now(self.io, .awake).compare(.gte, deadline)) return;
         }
+    }
+
+    /// pauses at the breakpoint a node reached, or the watched transfer it
+    /// made, showing the node
+    fn stop(self: *Tui) void {
+        const hit = self.chip.hit orelse return;
+        self.chip.hit = null;
+        self.running = false;
+        self.select(hit.index());
+        self.memory_scroll = null;
+        self.message = self.printLasting("{f}", .{hit.describe(self.chip.layout)});
     }
 
     /// Handles an event, returning false to quit
@@ -159,6 +202,11 @@ const Tui = struct {
 
     /// Handles keys for the panels and the chip, returning false to quit
     fn key(self: *Tui, k: vaxis.Key) !bool {
+        if (self.choosing_watch) {
+            self.choosing_watch = false;
+            self.chooseWatch(k);
+            return true;
+        }
         if (k.matches('q', .{})) return false;
         // matching text would take tab for shift+tab too
         if (k.codepoint == vaxis.Key.tab) self.cycleFocus(if (k.mods.shift) -1 else 1);
@@ -175,10 +223,19 @@ const Tui = struct {
         if (k.matchesAny(&.{ '+', '=' }, .{})) self.map_height = (self.map_height orelse self.defaultMapHeight()) + 1;
 
         // running and stepping
-        if (k.matches(' ', .{})) self.running = !self.running;
+        if (k.matches(' ', .{})) {
+            if (!self.running) self.remember();
+            self.running = !self.running;
+            // a breakpoint reached while stepping is left behind
+            self.chip.hit = null;
+        }
         const stepping = k.matches('s', .{}) or k.matches('S', .{}) or k.matches('n', .{});
         if (stepping and self.running) self.message = "pause with space to step";
+        if (k.matches('z', .{})) {
+            if (self.running) self.message = "pause with space to go back" else self.back();
+        }
         if (!self.running) {
+            if (stepping) self.remember();
             if (k.matches('s', .{})) {
                 // the next node to run, which the view follows
                 self.trimOutput();
@@ -198,14 +255,28 @@ const Tui = struct {
             }
         }
 
+        if (self.chip.hit != null) self.stop();
+
         switch (self.focus) {
             .map => self.mapKey(k),
             .node => {
-                if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.scrollMemory(-1);
-                if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) self.scrollMemory(1);
-                if (k.matches(vaxis.Key.page_up, .{})) self.scrollMemory(-@as(i32, self.memoryPage()));
-                if (k.matches(vaxis.Key.page_down, .{})) self.scrollMemory(self.memoryPage());
-                if (k.matchesAny(&.{ vaxis.Key.home, 'g' }, .{})) self.memory_scroll = null;
+                if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.moveCursor(-1);
+                if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) self.moveCursor(1);
+                if (k.matches(vaxis.Key.page_up, .{})) self.moveCursor(-@as(i32, self.memoryPage()));
+                if (k.matches(vaxis.Key.page_down, .{})) self.moveCursor(self.memoryPage());
+                if (k.matchesAny(&.{ vaxis.Key.home, 'g' }, .{})) {
+                    self.memory_scroll = null;
+                    self.memory_cursor = null;
+                }
+                if (k.matches('b', .{})) {
+                    if (self.cursorRow()) |row| {
+                        self.toggleBreakpoint(row);
+                    } else self.message = "move to a word in memory first";
+                }
+                if (k.matches('w', .{})) {
+                    self.choosing_watch = true;
+                    self.message = "watch reads from r d l u, or writes to R D L U";
+                }
             },
             .console => {},
         }
@@ -323,6 +394,14 @@ const Tui = struct {
             const w = self.windows.get(panel) orelse continue;
             if (w.hasMouse(m) == null) continue;
             self.focus = panel;
+            if (panel == .node) if (self.memory_window) |listing| if (listing.hasMouse(m) != null) {
+                const row = self.memoryFirstRow() + @as(u16, @intCast(m.row - listing.y_off));
+                if (rowAddress(row) == null) return;
+                // the left edge sets and clears breakpoints
+                if (m.col - listing.x_off < 2) return self.toggleBreakpoint(row);
+                self.memory_scroll = self.memoryFirstRow();
+                self.memory_cursor = row;
+            };
             if (panel == .map) {
                 const column: u16 = @intCast(@divFloor(m.col - w.x_off, cell_width) + self.map_scroll.x);
                 const row: u16 = @intCast(m.row - w.y_off + self.map_scroll.y);
@@ -347,8 +426,100 @@ const Tui = struct {
     }
 
     fn select(self: *Tui, i: u16) void {
-        if (i != self.selected) self.memory_scroll = null;
+        if (i != self.selected) {
+            self.memory_scroll = null;
+            self.memory_cursor = null;
+        }
         self.selected = i;
+    }
+
+    /// the row of the memory listing under the cursor, which is nowhere while
+    /// following a node running code from a port
+    fn cursorRow(self: Tui) ?u16 {
+        return self.memory_cursor orelse memoryRow(self.chip.nodes[self.selected].current());
+    }
+
+    /// moves the cursor over the words of the memory listing, keeping it in view
+    fn moveCursor(self: *Tui, rows: i32) void {
+        // from above the first word, when the node runs code from a port
+        var row: i32 = std.math.clamp(@as(i32, self.cursorRow() orelse 0) + rows, 1, memory_rows - 1);
+        // past the heading of ROM
+        if (rowAddress(@intCast(row)) == null) row += if (rows < 0) -1 else 1;
+        self.memory_cursor = @intCast(row);
+        const page = self.memoryPage();
+        const first = self.memoryFirstRow();
+        if (row < first) self.memory_scroll = @intCast(row);
+        if (row >= first + page) self.memory_scroll = @intCast(row + 1 - page);
+        // so the RAM heading shows at the top
+        if (row == 1 and first <= 1) self.memory_scroll = 0;
+    }
+
+    /// saves the chip before the user steps or runs it, to go back to if it
+    /// changes
+    fn remember(self: *Tui) void {
+        // one is saved before it is kept
+        if (self.history.len < 2) return;
+        self.keepPending();
+        const snapshot = &self.history[self.historyIndex(self.history_len)];
+        if (snapshot.* == null) snapshot.* = Chip.Snapshot.init(self.gpa, self.chip.layout) catch {
+            self.message = "there is no memory left to go back with";
+            return;
+        };
+        self.chip.save(&snapshot.*.?);
+        self.pending = true;
+    }
+
+    /// keeps the snapshot saved before the last step or run, unless nothing
+    /// has changed since
+    fn keepPending(self: *Tui) void {
+        if (!self.pending) return;
+        self.pending = false;
+        if (self.chip.matches(&self.history[self.historyIndex(self.history_len)].?)) return;
+        if (self.history_len == self.history.len - 1) {
+            self.history_start = self.historyIndex(1);
+        } else self.history_len += 1;
+    }
+
+    /// goes back to before the last step or run
+    fn back(self: *Tui) void {
+        self.keepPending();
+        if (self.history_len == 0) {
+            self.message = "nothing to go back to";
+            return;
+        }
+        self.history_len -= 1;
+        self.chip.restore(&self.history[self.historyIndex(self.history_len)].?);
+        self.memory_scroll = null;
+        self.message = self.printLasting("back to {d} steps", .{self.chip.steps});
+    }
+
+    /// the index in `history` of the snapshot `i` from the oldest
+    fn historyIndex(self: Tui, i: usize) usize {
+        return (self.history_start + i) % self.history.len;
+    }
+
+    /// sets or clears a watch on the port of the selected node a key names
+    fn chooseWatch(self: *Tui, k: vaxis.Key) void {
+        const text = k.text orelse return;
+        if (text.len != 1) return;
+        const direction: Direction = switch (std.ascii.toLower(text[0])) {
+            'r' => .right,
+            'd' => .down,
+            'l' => .left,
+            'u' => .up,
+            else => return,
+        };
+        _ = self.chip.watches.toggle(.{ .index = self.selected, .direction = direction, .write = std.ascii.isUpper(text[0]) }) catch {
+            self.message = "there are too many watches";
+        };
+    }
+
+    fn toggleBreakpoint(self: *Tui, row: u16) void {
+        const address = rowAddress(row) orelse return;
+        _ = self.chip.breakpoints.toggle(.init(self.selected, address)) catch {
+            self.message = "there are too many breakpoints";
+            return;
+        };
     }
 
     fn toggle(self: *Tui, panel: Panel) void {
@@ -382,8 +553,14 @@ const Tui = struct {
 
     fn scrollMemory(self: *Tui, rows: i32) void {
         const page = self.memoryPage();
-        const first: i32 = self.memory_scroll orelse self.followedMemoryRow(page);
+        const first: i32 = self.memoryFirstRow();
         self.memory_scroll = @intCast(std.math.clamp(first + rows, 0, @max(memory_rows - @as(i32, page), 0)));
+    }
+
+    /// the first row of the memory listing in view
+    fn memoryFirstRow(self: Tui) u16 {
+        const page = self.memoryPage();
+        return @min(self.memory_scroll orelse self.followedMemoryRow(page), memory_rows -| page);
     }
 
     fn memoryPage(self: Tui) u16 {
@@ -396,7 +573,7 @@ const Tui = struct {
 
     /// the first row of the memory listing that centers the current word
     fn followedMemoryRow(self: Tui, page: u16) u16 {
-        const row = memoryRow(current(self.chip.nodes[self.selected])) orelse 0;
+        const row = memoryRow(self.chip.nodes[self.selected].current()) orelse 0;
         return @min(row -| page / 2, memory_rows -| page);
     }
 
@@ -484,7 +661,7 @@ const Tui = struct {
             const y = layout.rows - 1 - r;
             for (self.map_scroll.x..@min(layout.columns, self.map_scroll.x + columns)) |c| {
                 const i: u16 = @intCast(y * layout.columns + c);
-                var style = statusStyle(status(self.chip.nodes[i]));
+                var style = statusStyle(self.chip.nodes[i].status());
                 if (i == self.selected) style.reverse = true;
                 _ = win.printSegment(.{ .text = self.print("{d:0>3}", .{layout.nodeNumber(i)}), .style = style }, .{
                     .row_offset = @intCast(r - self.map_scroll.y),
@@ -569,15 +746,15 @@ const Tui = struct {
 
     fn drawNode(self: *Tui, win: vaxis.Window) void {
         const n = self.chip.nodes[self.selected];
-        const node_status = status(n);
+        const node_status = n.status();
         _ = win.printSegment(.{ .text = switch (node_status) {
             .running => "running",
-            .code => |address| self.print("waiting for code from {s}", .{ioName(address)}),
-            .reading => |address| self.print("waiting to read {s}", .{ioName(address)}),
-            .writing => |address| self.print("waiting to write {s}", .{ioName(address)}),
+            .code => |address| self.print("waiting for code from {s}", .{disassembler.ioName(address)}),
+            .reading => |address| self.print("waiting to read {s}", .{disassembler.ioName(address)}),
+            .writing => |address| self.print("waiting to write {s}", .{disassembler.ioName(address)}),
         }, .style = statusStyle(node_status) }, .{ .wrap = .none });
 
-        const word = current(n);
+        const word = n.current();
         self.fields(win, 2, &.{
             .{ "P", self.print("{x:0>3}", .{@as(u10, @bitCast(n.p))}) },
             .{ "slot", self.print("{d}", .{n.slot}) },
@@ -585,7 +762,7 @@ const Tui = struct {
             .{ "", if (n.p.extended_arithmetic) "extended arithmetic" else "" },
         });
         if (n.state == .fetch) {
-            self.fields(win, 3, &.{.{ "I", self.print("next word from {s}", .{if (word.io) ioName(@bitCast(word)) else "P"}) }});
+            self.fields(win, 3, &.{.{ "I", self.print("next word from {s}", .{if (word.io) disassembler.ioName(@bitCast(word)) else "P"}) }});
         } else self.fields(win, 3, &.{.{ "I", self.print("{s}  {s}", .{ self.hex(n.i), self.disassemble(n.i, @bitCast(word)) }) }});
         self.fields(win, 4, &.{ .{ "A", self.hex(n.a) }, .{ "B", self.print("{x:0>3}", .{n.b}) }, .{ "io", self.hex(n.io) } });
         self.fields(win, 5, &.{.{ "time", self.print("{d:.1} ns", .{n.execution_time}) }});
@@ -594,6 +771,7 @@ const Tui = struct {
         _ = win.printSegment(.{ .text = self.stack(&n.data_stack.stack, n.data_stack.index), .style = colors.dim }, .{ .row_offset = 8, .col_offset = 2, .wrap = .none });
         self.fields(win, 9, &.{.{ "R", self.hex(n.return_stack.t) }});
         _ = win.printSegment(.{ .text = self.stack(&n.return_stack.stack, n.return_stack.index), .style = colors.dim }, .{ .row_offset = 10, .col_offset = 2, .wrap = .none });
+        self.fields(win, 11, &.{.{ "watch", self.watches() }});
 
         if (win.height <= node_header_rows) return;
         const listing = win.child(.{ .y_off = node_header_rows - 1 });
@@ -604,10 +782,10 @@ const Tui = struct {
     /// RAM and ROM, following the current word unless scrolled
     fn drawMemory(self: *Tui, win: vaxis.Window, n: Computer) void {
         const page = @max(win.height, 1);
-        const first = @min(self.memory_scroll orelse self.followedMemoryRow(page), memory_rows -| page);
-        const here = memoryRow(current(n));
-        const ram_literals = literals(n.mem[0..64]);
-        const rom_literals = literals(n.mem[64..128]);
+        const first = self.memoryFirstRow();
+        const here = memoryRow(n.current());
+        const ram_literals = disassembler.literals(n.mem[0..64]);
+        const rom_literals = disassembler.literals(n.mem[64..128]);
 
         for (first..@min(memory_rows, first + page)) |r| {
             const row: u16 = @intCast(r - first);
@@ -626,14 +804,15 @@ const Tui = struct {
             const is_literal = (if (in_rom) rom_literals else ram_literals) & (@as(u64, 1) << @intCast(i)) != 0;
 
             var code: vaxis.Segment = .{ .text = self.disassemble(word, address), .style = if (word == 0) colors.dim else .{} };
-            if (is_literal) code = .{
-                // I/O addresses by name, and other values as numbers
-                .text = if (value >= 0x100 and value < 0x200) self.print("literal {s}", .{ioName(@intCast(value))}) else self.print("literal {d}", .{word}),
-                .style = colors.literal,
-            };
+            if (is_literal) code = .{ .text = self.literal(word), .style = colors.literal };
+            const is_breakpoint = self.chip.breakpoints.contains(.init(self.selected, address));
+            var address_style = colors.address;
+            if (self.focus == .node and r == (self.cursorRow() orelse memory_rows)) address_style.reverse = true;
             var segments = [_]vaxis.Segment{
+                .{ .text = if (is_breakpoint) "●" else " ", .style = colors.breakpoint },
                 .{ .text = if (is_here) ">" else " ", .style = .{ .fg = .{ .index = 2 }, .bold = true } },
-                .{ .text = self.print("{x:0>3} ", .{address}), .style = colors.address },
+                .{ .text = self.print("{x:0>3}", .{address}), .style = address_style },
+                .{ .text = " " },
                 .{ .text = self.print("{x:0>5}  ", .{value}), .style = colors.raw },
                 code,
             };
@@ -653,11 +832,11 @@ const Tui = struct {
         else
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
         const hints: []const Hint = switch (self.focus) {
-            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "arrows", "select" }, .{ "1-3", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
+            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "1-3", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
             .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "tab", "next" }, .{ "esc", "map" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "up/down/pgup/pgdn", "scroll" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
         };
-        var segments: [4 + 2 * 9]vaxis.Segment = undefined;
+        var segments: [4 + 2 * 10]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = state;
         len += 1;
@@ -675,10 +854,28 @@ const Tui = struct {
         _ = win.print(segments[0..len], .{ .wrap = .none });
     }
 
+    /// the ports of the selected node that are watched, such as `reads
+    /// right, writes up`
+    fn watches(self: *Tui) []const u8 {
+        var text: []const u8 = "";
+        for (self.chip.watches.items()) |w| if (w.index == self.selected) {
+            const separator = if (text.len == 0) "" else ", ";
+            text = self.print("{s}{s}{s} {t}", .{ text, separator, if (w.write) "writes" else "reads", w.direction });
+        };
+        return if (text.len == 0) "none, w to add" else text;
+    }
+
     fn disassemble(self: *Tui, word: Word, address: u9) []const u8 {
         const buffer = self.frame.allocator().alloc(u8, 48) catch return "";
         var writer: Io.Writer = .fixed(buffer);
         disassembler.write(&writer, word, address) catch {};
+        return writer.buffered();
+    }
+
+    fn literal(self: *Tui, word: Word) []const u8 {
+        const buffer = self.frame.allocator().alloc(u8, 32) catch return "";
+        var writer: Io.Writer = .fixed(buffer);
+        disassembler.writeLiteral(&writer, word) catch {};
         return writer.buffered();
     }
 
@@ -693,13 +890,10 @@ const Tui = struct {
     }
 };
 
-/// The address of the instruction word a node is executing, which is the
-/// address before P in memory, or the port itself. Between words, it is the
-/// word to be fetched next.
-fn current(n: Computer) Address {
-    var address = n.p.address;
-    if (!address.io and n.state != .fetch) address.local -%= 1;
-    return address;
+/// the address of a row of the memory listing, unless it is a heading
+fn rowAddress(row: u16) ?u9 {
+    if (row == 0 or row == 65 or row >= memory_rows) return null;
+    return @intCast(if (row > 65) 0x80 + row - 66 else row - 1);
 }
 
 /// the row of an address in the memory listing, if it is in memory
@@ -709,87 +903,13 @@ fn memoryRow(address: Address) ?u16 {
     return if (address.rom) 65 + 1 + i else 1 + i;
 }
 
-/// Finds the words of RAM or ROM that are literals read by @p, or written by
-/// !p, following the code from its first word. Data that is never reached
-/// this way looks like code.
-fn literals(words: *const [64]Word) u64 {
-    var data: u64 = 0;
-    var i: u7 = 0;
-    while (i < 64) : (i += 1) {
-        if (data & (@as(u64, 1) << @intCast(i)) != 0) continue;
-        const instruction: Instruction = .decode(words[i]);
-        var next = i + 1;
-        for (0..4) |slot| switch (instruction.getSlot(@intCast(slot))) {
-            .@"@p", .@"!p" => {
-                if (next < 64) data |= @as(u64, 1) << @intCast(next);
-                next += 1;
-            },
-            // the rest of the word does not run, or holds a destination
-            .@";", .ex, .jump, .call, .next, .@"if", .@"-if" => break,
-            else => {},
-        };
-    }
-    return data;
-}
-
-const Status = union(enum) {
-    running,
-    /// executing from a port, waiting for code
-    code: u9,
-    reading: u9,
-    writing: u9,
-};
-
-/// what a node is doing, and if it is waiting, the address it waits on
-fn status(n: Computer) Status {
-    if (!n.suspended) return .running;
-    if (n.state == .fetch) return .{ .code = @bitCast(n.p.address) };
-    const opcode = Instruction.decode(n.i).getSlot(n.slot);
-    const address: u9 = switch (opcode) {
-        .@"@p", .@"!p" => @bitCast(n.p.address),
-        .@"@b", .@"!b" => n.b,
-        else => @intCast(@as(u18, @bitCast(n.a)) & 0x1ff),
-    };
-    return switch (opcode) {
-        .@"@p", .@"@+", .@"@b", .@"@" => .{ .reading = address },
-        else => .{ .writing = address },
-    };
-}
-
-fn statusStyle(s: Status) vaxis.Style {
+fn statusStyle(s: Computer.Status) vaxis.Style {
     return switch (s) {
         .running => .{ .fg = .{ .index = 2 }, .bold = true },
         .code => .{ .dim = true },
         .reading, .writing => .{ .fg = .{ .index = 3 } },
     };
 }
-
-/// the name of an I/O address, such as right, rd-u or io
-fn ioName(address: u9) []const u8 {
-    if (address == Computer.io_address) return "io";
-    if (address == Computer.data_address) return "data";
-    const ports = gasim.port.select(address) orelse return "an undefined address";
-    return port_names[ports.bits.mask];
-}
-
-/// names of each set of ports, by their bits in a `port.Select`
-const port_names = names: {
-    var names: [16][]const u8 = undefined;
-    for (0..16) |bits| {
-        const single = [_][]const u8{ "right", "down", "left", "up" };
-        if (@popCount(bits) == 1) {
-            names[bits] = single[@ctz(bits)];
-        } else {
-            var name: [4]u8 = "----".*;
-            for ("rdlu", 0..) |letter, i| if (bits & (1 << i) != 0) {
-                name[i] = letter;
-            };
-            const final = name;
-            names[bits] = &final;
-        }
-    }
-    break :names names;
-};
 
 /// Shows the chip until the user quits
 pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chip, options: Options) !void {
@@ -812,7 +932,11 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
     vx.caps.sgr_pixels = false;
     try vx.setMouseMode(tty.writer(), true);
 
-    var tui: Tui = .init(io, chip, options);
+    // and one more, saved before each step or run
+    var history: [history_capacity + 1]?Chip.Snapshot = @splat(null);
+    var tui: Tui = .init(io, gpa, chip, options);
+    defer tui.deinit();
+    tui.history = &history;
     while (true) {
         // wait for the user unless the chip has something to do
         const busy = tui.running and !tui.settled;
@@ -837,6 +961,8 @@ const TestTui = struct {
     output: Io.Writer = undefined,
     console: Console = undefined,
     screen: vaxis.Screen = undefined,
+    /// keeping two
+    history: [3]?Chip.Snapshot = @splat(null),
     tui: Tui = undefined,
 
     fn init(self: *TestTui, source: []const u8) !void {
@@ -852,10 +978,12 @@ const TestTui = struct {
         self.console = .{ .io = std.testing.io, .input = &self.input, .output = &self.output };
         try self.chip.attachConsole(&self.console, 0, .up);
         self.screen = try .init(gpa, .{ .rows = 30, .cols = 120, .x_pixel = 0, .y_pixel = 0 });
-        self.tui = .init(std.testing.io, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up });
+        self.tui = .init(std.testing.io, gpa, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up });
+        self.tui.history = &self.history;
     }
 
     fn deinit(self: *TestTui) void {
+        self.tui.deinit();
         self.screen.deinit(std.testing.allocator);
         self.chip.deinit(std.testing.allocator);
     }
@@ -899,8 +1027,8 @@ test "draws the chip, console and selected node" {
     try std.testing.expect(try t.shows(1, "700 701"));
     try std.testing.expect(try t.shows(8, "000 001"));
     try std.testing.expect(try t.shows(10, "2 console 000:up"));
-    try std.testing.expect(try t.shows(13, "RAM"));
-    try std.testing.expect(try t.shows(14, ">000"));
+    try std.testing.expect(try t.shows(14, "RAM"));
+    try std.testing.expect(try t.shows(15, ">000"));
 
     // stepping follows the node that runs, and the console shows its output
     try t.press('s');
@@ -1050,35 +1178,75 @@ test "wraps the console, ends its input, and keeps sizes on screen" {
     try std.testing.expect(!try t.shows(t.tui.row_border.?, "000:up"));
 }
 
-test status {
-    var n: Computer = .reset;
-    try std.testing.expectEqual(Status.running, status(n));
+test "stops at breakpoints set in the memory listing" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("begin dup drop again");
+    defer t.deinit();
+    t.tui.focus = .node;
+    t.draw();
 
-    // fetching from a multiport
-    n.p.address = Address.fromWord(0x1a5);
-    n.suspended = true;
-    try std.testing.expectEqual(Status{ .code = 0x1a5 }, status(n));
+    // on the current word, and then the next one
+    try t.press('b');
+    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(0, 0)));
+    try std.testing.expect(try t.shows(15, "#>000"));
+    try t.press(vaxis.Key.down);
+    try t.press('b');
+    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(0, 1)));
+    // and cleared by clicking the left edge
+    const left: u16 = @intCast(t.tui.memory_window.?.x_off);
+    try t.click(left, 16, .press);
+    try std.testing.expect(!t.tui.chip.breakpoints.contains(.init(0, 1)));
+    // clicking a word moves the cursor to it
+    try t.click(left + 4, 17, .press);
+    try std.testing.expectEqual(3, t.tui.memory_cursor);
 
-    // reading through B, and writing through A
-    n.state = .execution;
-    n.i = Instruction.encode(.{ .slot_0 = .@"@b", .slot_1 = .@"!", .slot_2 = .@".", .slot_3 = 7 });
-    n.b = 0x1d5;
-    try std.testing.expectEqual(Status{ .reading = 0x1d5 }, status(n));
-    n.slot = 1;
-    n.a = 0x145;
-    try std.testing.expectEqual(Status{ .writing = 0x145 }, status(n));
+    // running stops when the node loops back
+    t.tui.running = true;
+    try t.tui.run();
+    try std.testing.expect(!t.tui.running);
+    try std.testing.expectEqualStrings("node 000 reached 000", t.tui.message.?);
 }
 
-test current {
-    var n: Computer = .reset;
-    n.p.address = Address.fromWord(5);
-    // between words, the next word
-    try std.testing.expectEqual(Address.fromWord(5), current(n));
-    n.state = .execution;
-    try std.testing.expectEqual(Address.fromWord(4), current(n));
-    // from a port
-    n.p.address = Address.fromWord(0x1d5);
-    try std.testing.expectEqual(Address.fromWord(0x1d5), current(n));
+test "breakpoints need a word in memory" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("dup");
+    defer t.deinit();
+    t.tui.focus = .node;
+    // node 001 is waiting for code from its ports
+    t.tui.select(1);
+    try t.press('b');
+    try std.testing.expectEqualStrings("move to a word in memory first", t.tui.message.?);
+    try std.testing.expectEqual(0, t.tui.chip.breakpoints.len);
+
+    // moving down starts at its first word
+    try t.press('j');
+    try t.press('b');
+    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(1, 0)));
+}
+
+test "stops at watched transfers" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("up b! 72 !b left b! @b");
+    defer t.deinit();
+    t.tui.focus = .node;
+    t.draw();
+    try std.testing.expect(try t.shows(12, "watch none"));
+
+    // writes to up, and reads from left
+    try t.press('w');
+    try t.press('U');
+    try t.press('w');
+    try t.press('l');
+    try std.testing.expect(try t.shows(12, "watch writes up, reads left"));
+    // another key leaves the watches as they were
+    try t.press('w');
+    try t.press('x');
+    try std.testing.expectEqual(2, t.tui.chip.watches.len);
+
+    // the console reads the write in the round after
+    t.tui.running = true;
+    try t.tui.run();
+    try std.testing.expectEqualStrings("node 000 wrote 00048 to up", t.tui.message.?);
 }
 
 test memoryRow {
@@ -1091,25 +1259,48 @@ test memoryRow {
     try std.testing.expectEqual(null, memoryRow(Address.fromWord(0x1d5)));
 }
 
-test literals {
-    var words: [64]Word = @splat(Instruction.encode(.{ .slot_0 = .@".", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }));
-    // two literals after the first word, which look like a return
-    words[0] = Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@"@p", .slot_2 = .@"+", .slot_3 = 7 });
-    words[1] = 0;
-    words[2] = 0;
-    // a literal after a jump does not count, nor one after the end
-    words[3] = Instruction.encode(.{ .slot_0 = .jump, .slot_1 = .@"@p", .slot_2 = .@".", .slot_3 = 7 });
-    words[63] = Instruction.encode(.{ .slot_0 = .@"!p", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
-    try std.testing.expectEqual(0b110, literals(&words));
+test "goes back before steps" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("begin 1 + again");
+    defer t.deinit();
+    try t.press('z');
+    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+
+    for (0..3) |_| try t.press('n');
+    try std.testing.expectEqual(3, t.tui.chip.steps);
+    try t.press('z');
+    try std.testing.expectEqual(2, t.tui.chip.steps);
+    try std.testing.expectEqualStrings("back to 2 steps", t.tui.message.?);
+    // the test history only keeps the last two
+    try t.press('z');
+    try std.testing.expectEqual(1, t.tui.chip.steps);
+    try t.press('z');
+    try std.testing.expectEqual(1, t.tui.chip.steps);
+    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+
+    // and before running
+    try t.press(' ');
+    try t.tui.run();
+    try t.press('z');
+    try std.testing.expectEqualStrings("pause with space to go back", t.tui.message.?);
+    try t.press(' ');
+    try t.press('z');
+    try std.testing.expectEqual(1, t.tui.chip.steps);
 }
 
-test ioName {
-    try std.testing.expectEqualStrings("io", ioName(0x15d));
-    try std.testing.expectEqualStrings("right", ioName(0x1d5));
-    try std.testing.expectEqualStrings("up", ioName(0x145));
-    try std.testing.expectEqualStrings("rd-u", ioName(0x185));
-    try std.testing.expectEqualStrings("rdlu", ioName(0x1a5));
-    try std.testing.expectEqualStrings("an undefined address", ioName(0x100));
+test "steps that change nothing are not gone back to" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("left b! @b");
+    defer t.deinit();
+    while (try t.tui.chip.advance()) {}
+
+    // every node is waiting
+    try t.press('S');
+    try t.press('s');
+    try t.press('z');
+    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+    // each saved over the one before, so only one was allocated
+    try std.testing.expect(t.tui.history[0] != null and t.tui.history[1] == null);
 }
 
 const gasim = @import("gasim");

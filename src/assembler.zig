@@ -33,6 +33,9 @@ pub const Program = struct {
     ram: [64]Word,
     /// number of words used, from address 0
     len: u7,
+    /// the source line each word was assembled from, or 0 for an unused
+    /// word. Lines past the largest number that fits get that number.
+    lines: [64]u16 = @splat(0),
     entry: Address,
     /// where the program first calls a ROM word, which needs the node's ROM
     rom_word: ?Diagnostic = null,
@@ -169,6 +172,7 @@ const Assembler = struct {
     node: u16,
 
     ram: [64]Word = @splat(0),
+    lines: [64]u16 = @splat(0),
     /// next free address, up to 64
     here: u7 = 0,
     len: u7 = 0,
@@ -220,6 +224,7 @@ const Assembler = struct {
             .node = node,
             .ram = self.ram,
             .len = self.len,
+            .lines = self.lines,
             .entry = .{
                 .io = false,
                 .rom = false,
@@ -368,6 +373,7 @@ const Assembler = struct {
 
     fn alloc(self: *Assembler) Error!u6 {
         const result = try self.address();
+        self.lines[result] = @intCast(@min(self.tokens.start_line, std.math.maxInt(u16)));
         self.here += 1;
         self.len = @max(self.len, self.here);
         return result;
@@ -633,6 +639,13 @@ test "data, strings and org" {
         0,
         1,
     });
+}
+
+test "source lines" {
+    var diagnostic: Diagnostic = .{};
+    // an instruction word is from the line it starts on
+    const program = try assemble("5 dup\ndrop\n\n7 ,", &diagnostic);
+    try std.testing.expectEqualSlices(u16, &.{ 1, 1, 4, 0 }, program.lines[0..4]);
 }
 
 test "labels, calls and tail calls" {
