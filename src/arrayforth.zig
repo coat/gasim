@@ -2373,8 +2373,8 @@ test "a session acts on a chip, as the IDE does" {
     // node 000 has no data register, so x141 is not one
     try std.testing.expectError(error.PortAccess, session.interpret("x141 R@"));
     try std.testing.expectError(error.PortAccess, session.interpret("5. x141 R!"));
-    // and the node still waits for code, rather than on x141
-    try std.testing.expectEqual(.code, std.meta.activeTag(chip.nodes[chip.layout.index(0).?].status()));
+    // and the node still takes words, rather than waiting on x141
+    try session.interpret("RDUP RDROP");
     try std.testing.expectEqualStrings("4155 000 04155  @p + ;\n001 00001  literal 1\n", out.buffered());
 
     // completion knows words, opcodes and labels
