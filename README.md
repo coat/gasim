@@ -46,6 +46,9 @@ Options:
 - `--boot`: load programs with a boot stream through the SERDES port of node
   001, as one GA144 boots another, instead of writing them straight into RAM.
   This needs ROM.
+- `--break <node>:<address>`: stop when the node is about to fetch the word at
+  the address, given in hex, and print its stacks and registers. Can be given
+  more than once.
 
 See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
 
@@ -61,16 +64,20 @@ node's registers, stacks, and RAM and ROM around the word it is executing.
 | `s` | step the next node to run, and select it |
 | `S` | step every node once |
 | `n` | step the selected node |
-| arrows, `hjkl` | select a node on the map, or scroll the node panel |
+| arrows, `hjkl` | select a node on the map, or move through memory in the node panel |
 | `tab`, `shift+tab` | move to the next or previous panel |
 | `1` `2` `3` | show or hide the map, console and node panels |
 | `f`, `esc` | fill the screen with the panel, and go back |
 | `<` `>` `-` `+` | resize the panels, as can dragging their borders |
-| `pgup` `pgdn` | scroll the node panel or the console |
+| `pgup` `pgdn` | page through memory, or scroll the console |
+| `b` | set or clear a breakpoint on the word in memory under the cursor |
 | `g` | follow the word the node is executing again |
 | `q`, `ctrl+c` | quit |
 
 Clicking a panel selects it, and clicking a node on the map selects it.
+Clicking a word in memory moves the cursor to it, and clicking to its left
+sets or clears a breakpoint, shown as a red dot. Running pauses when a node
+is about to fetch a word with a breakpoint, and selects that node.
 Borders between panels can be dragged, or on touch screens, which turn drags
 into scrolling, tapped and then tapped again where they should go. In
 the console, typed text is sent as input with `enter`, `ctrl+d` ends the

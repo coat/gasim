@@ -5,7 +5,7 @@ const usage =
     \\
     \\Opens the program in a terminal user interface. With run, or when stdin
     \\or stdout is not a terminal, runs it instead with the console on stdin
-    \\and stdout, until every node is waiting.
+    \\and stdout, until every node is waiting or reaches a breakpoint.
     \\
     \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
@@ -14,6 +14,9 @@ const usage =
     \\                             (default rom/ga144.txt, if it exists)
     \\  --boot                     load programs with a boot stream through the
     \\                             SERDES port of node 001, which needs ROM
+    \\  --break <node>:<address>   stop when the node is about to fetch the word
+    \\                             at the address, in hex, such as 105:003. Can
+    \\                             be given more than once.
 ;
 
 const default_rom_path = "rom/ga144.txt";
@@ -49,15 +52,28 @@ pub fn main(init: std.process.Init) !void {
     var path: ?[]const u8 = null;
     var rom_path: ?[]const u8 = null;
     var boot = false;
+    var breakpoints: [Chip.max_breakpoints]struct { node: u16, address: u9 } = undefined;
+    var breakpoints_len: usize = 0;
     var i: usize = if (run_command) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom")) {
+        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break")) {
             i += 1;
             if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
             const value = args[i];
             if (std.mem.eql(u8, arg, "--rom")) {
                 rom_path = value;
+            } else if (std.mem.eql(u8, arg, "--break")) {
+                const colon = std.mem.indexOfScalar(u8, value, ':') orelse
+                    fatal("invalid breakpoint '{s}', expected for example 105:003", .{value});
+                if (breakpoints_len == breakpoints.len) fatal("more than {d} breakpoints", .{breakpoints.len});
+                breakpoints[breakpoints_len] = .{
+                    .node = std.fmt.parseInt(u16, value[0..colon], 10) catch
+                        fatal("invalid breakpoint node '{s}'", .{value[0..colon]}),
+                    .address = std.fmt.parseInt(u9, value[colon + 1 ..], 16) catch
+                        fatal("invalid breakpoint address '{s}', expected 000 to 1ff", .{value[colon + 1 ..]}),
+                };
+                breakpoints_len += 1;
             } else if (std.mem.eql(u8, arg, "--layout")) {
                 layout = Chip.Layout.parse(value) catch fatal("invalid layout '{s}', expected for example 8x18", .{value});
             } else {
@@ -99,6 +115,13 @@ pub fn main(init: std.process.Init) !void {
         fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, program.node, layout.rows, layout.columns });
     if (roms == null) for (programs) |program| if (program.rom_word) |word|
         fatal("{s}:{d}: '{s}' is in ROM, which is not loaded (see --rom)", .{ source_path, word.line, word.token });
+
+    for (breakpoints[0..breakpoints_len]) |b| {
+        const index = layout.index(b.node) orelse
+            fatal("breakpoint node {d:0>3} is not in a {d}x{d} layout", .{ b.node, layout.rows, layout.columns });
+        // the same breakpoint twice is still set
+        if (!chip.hasBreakpoint(.init(index, b.address))) _ = chip.toggleBreakpoint(.init(index, b.address)) catch unreachable;
+    }
 
     var feeder: Chip.Feeder = .{ .words = &.{} };
     if (boot) {
@@ -161,6 +184,19 @@ pub fn main(init: std.process.Init) !void {
         error.ReadFailed => if (stdin_file_reader.err.? != error.Canceled)
             fatal("stdin: {t}", .{stdin_file_reader.err.?}),
     };
+    if (chip.hit) |hit| {
+        const n = chip.nodes[hit.index];
+        std.log.info("node {d:0>3} reached {x:0>3}: T {x:0>5}  S {x:0>5}  R {x:0>5}  A {x:0>5}  B {x:0>3}", .{
+            layout.nodeNumber(hit.index),
+            hit.address,
+            @as(u18, @bitCast(n.data_stack.t)),
+            @as(u18, @bitCast(n.data_stack.s)),
+            @as(u18, @bitCast(n.return_stack.t)),
+            @as(u18, @bitCast(n.a)),
+            n.b,
+        });
+        return;
+    }
     // the conventional status for a program stopped by SIGINT
     if (console.interrupted.load(.monotonic)) std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
     // most likely the console is on a port the program does not use

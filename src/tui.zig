@@ -47,6 +47,7 @@ const colors = struct {
     const literal: vaxis.Style = .{ .fg = .{ .index = 3 } };
     const heading: vaxis.Style = .{ .bold = true };
     const dim: vaxis.Style = .{ .dim = true };
+    const breakpoint: vaxis.Style = .{ .fg = .{ .index = 1 }, .bold = true };
 };
 
 /// a key and what it does, for the status bar
@@ -82,11 +83,15 @@ const Tui = struct {
     /// the first row of the memory listing in view, or null to follow
     /// execution
     memory_scroll: ?u16 = null,
+    /// the row of the memory listing where breakpoints are set, or null for
+    /// the current word
+    memory_cursor: ?u16 = null,
     /// the first column and row of the map in view, counting rows from the
     /// north edge
     map_scroll: struct { x: u16 = 0, y: u16 = 0 } = .{},
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
+    message_buffer: [64]u8 = undefined,
 
     /// where panels were last drawn, for the mouse
     windows: std.EnumArray(Panel, ?vaxis.Window) = .initFill(null),
@@ -107,6 +112,11 @@ const Tui = struct {
     /// formats text that lasts until the next frame
     fn print(self: *Tui, comptime format: []const u8, args: anytype) []const u8 {
         return std.fmt.allocPrint(self.frame.allocator(), format, args) catch "…";
+    }
+
+    /// formats a message for the status bar
+    fn printLasting(self: *Tui, comptime format: []const u8, args: anytype) []const u8 {
+        return std.fmt.bufPrint(&self.message_buffer, format, args) catch "…";
     }
 
     /// keeps room in the console's output for another `rounds_per_check`
@@ -133,9 +143,20 @@ const Tui = struct {
                     self.settled = true;
                     return;
                 }
+                if (self.chip.hit != null) return self.stopAtBreakpoint();
             }
             if (Io.Timestamp.now(self.io, .awake).compare(.gte, deadline)) return;
         }
+    }
+
+    /// pauses at the breakpoint a node reached, showing the node
+    fn stopAtBreakpoint(self: *Tui) void {
+        const hit = self.chip.hit orelse return;
+        self.chip.hit = null;
+        self.running = false;
+        self.select(hit.index);
+        self.memory_scroll = null;
+        self.message = self.printLasting("node {d:0>3} reached {x:0>3}", .{ self.chip.layout.nodeNumber(hit.index), hit.address });
     }
 
     /// Handles an event, returning false to quit
@@ -175,7 +196,11 @@ const Tui = struct {
         if (k.matchesAny(&.{ '+', '=' }, .{})) self.map_height = (self.map_height orelse self.defaultMapHeight()) + 1;
 
         // running and stepping
-        if (k.matches(' ', .{})) self.running = !self.running;
+        if (k.matches(' ', .{})) {
+            self.running = !self.running;
+            // a breakpoint reached while stepping is left behind
+            self.chip.hit = null;
+        }
         const stepping = k.matches('s', .{}) or k.matches('S', .{}) or k.matches('n', .{});
         if (stepping and self.running) self.message = "pause with space to step";
         if (!self.running) {
@@ -198,14 +223,24 @@ const Tui = struct {
             }
         }
 
+        if (self.chip.hit != null) self.stopAtBreakpoint();
+
         switch (self.focus) {
             .map => self.mapKey(k),
             .node => {
-                if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.scrollMemory(-1);
-                if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) self.scrollMemory(1);
-                if (k.matches(vaxis.Key.page_up, .{})) self.scrollMemory(-@as(i32, self.memoryPage()));
-                if (k.matches(vaxis.Key.page_down, .{})) self.scrollMemory(self.memoryPage());
-                if (k.matchesAny(&.{ vaxis.Key.home, 'g' }, .{})) self.memory_scroll = null;
+                if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.moveCursor(-1);
+                if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) self.moveCursor(1);
+                if (k.matches(vaxis.Key.page_up, .{})) self.moveCursor(-@as(i32, self.memoryPage()));
+                if (k.matches(vaxis.Key.page_down, .{})) self.moveCursor(self.memoryPage());
+                if (k.matchesAny(&.{ vaxis.Key.home, 'g' }, .{})) {
+                    self.memory_scroll = null;
+                    self.memory_cursor = null;
+                }
+                if (k.matches('b', .{})) {
+                    if (self.cursorRow()) |row| {
+                        self.toggleBreakpoint(row);
+                    } else self.message = "move to a word in memory first";
+                }
             },
             .console => {},
         }
@@ -323,6 +358,14 @@ const Tui = struct {
             const w = self.windows.get(panel) orelse continue;
             if (w.hasMouse(m) == null) continue;
             self.focus = panel;
+            if (panel == .node) if (self.memory_window) |listing| if (listing.hasMouse(m) != null) {
+                const row = self.memoryFirstRow() + @as(u16, @intCast(m.row - listing.y_off));
+                if (rowAddress(row) == null) return;
+                // the left edge sets and clears breakpoints
+                if (m.col - listing.x_off < 2) return self.toggleBreakpoint(row);
+                self.memory_scroll = self.memoryFirstRow();
+                self.memory_cursor = row;
+            };
             if (panel == .map) {
                 const column: u16 = @intCast(@divFloor(m.col - w.x_off, cell_width) + self.map_scroll.x);
                 const row: u16 = @intCast(m.row - w.y_off + self.map_scroll.y);
@@ -347,8 +390,39 @@ const Tui = struct {
     }
 
     fn select(self: *Tui, i: u16) void {
-        if (i != self.selected) self.memory_scroll = null;
+        if (i != self.selected) {
+            self.memory_scroll = null;
+            self.memory_cursor = null;
+        }
         self.selected = i;
+    }
+
+    /// the row of the memory listing under the cursor, which is nowhere while
+    /// following a node running code from a port
+    fn cursorRow(self: Tui) ?u16 {
+        return self.memory_cursor orelse memoryRow(self.chip.nodes[self.selected].current());
+    }
+
+    /// moves the cursor over the words of the memory listing, keeping it in view
+    fn moveCursor(self: *Tui, rows: i32) void {
+        // from above the first word, when the node runs code from a port
+        var row: i32 = std.math.clamp(@as(i32, self.cursorRow() orelse 0) + rows, 1, memory_rows - 1);
+        // past the heading of ROM
+        if (rowAddress(@intCast(row)) == null) row += if (rows < 0) -1 else 1;
+        self.memory_cursor = @intCast(row);
+        const page = self.memoryPage();
+        const first = self.memoryFirstRow();
+        if (row < first) self.memory_scroll = @intCast(row);
+        if (row >= first + page) self.memory_scroll = @intCast(row + 1 - page);
+        // so the RAM heading shows at the top
+        if (row == 1 and first <= 1) self.memory_scroll = 0;
+    }
+
+    fn toggleBreakpoint(self: *Tui, row: u16) void {
+        const address = rowAddress(row) orelse return;
+        _ = self.chip.toggleBreakpoint(.init(self.selected, address)) catch {
+            self.message = "there are too many breakpoints";
+        };
     }
 
     fn toggle(self: *Tui, panel: Panel) void {
@@ -382,8 +456,14 @@ const Tui = struct {
 
     fn scrollMemory(self: *Tui, rows: i32) void {
         const page = self.memoryPage();
-        const first: i32 = self.memory_scroll orelse self.followedMemoryRow(page);
+        const first: i32 = self.memoryFirstRow();
         self.memory_scroll = @intCast(std.math.clamp(first + rows, 0, @max(memory_rows - @as(i32, page), 0)));
+    }
+
+    /// the first row of the memory listing in view
+    fn memoryFirstRow(self: Tui) u16 {
+        const page = self.memoryPage();
+        return @min(self.memory_scroll orelse self.followedMemoryRow(page), memory_rows -| page);
     }
 
     fn memoryPage(self: Tui) u16 {
@@ -604,7 +684,7 @@ const Tui = struct {
     /// RAM and ROM, following the current word unless scrolled
     fn drawMemory(self: *Tui, win: vaxis.Window, n: Computer) void {
         const page = @max(win.height, 1);
-        const first = @min(self.memory_scroll orelse self.followedMemoryRow(page), memory_rows -| page);
+        const first = self.memoryFirstRow();
         const here = memoryRow(n.current());
         const ram_literals = literals(n.mem[0..64]);
         const rom_literals = literals(n.mem[64..128]);
@@ -631,9 +711,14 @@ const Tui = struct {
                 .text = if (value >= 0x100 and value < 0x200) self.print("literal {s}", .{ioName(@intCast(value))}) else self.print("literal {d}", .{word}),
                 .style = colors.literal,
             };
+            const is_breakpoint = self.chip.hasBreakpoint(.init(self.selected, address));
+            var address_style = colors.address;
+            if (self.focus == .node and r == (self.cursorRow() orelse memory_rows)) address_style.reverse = true;
             var segments = [_]vaxis.Segment{
+                .{ .text = if (is_breakpoint) "●" else " ", .style = colors.breakpoint },
                 .{ .text = if (is_here) ">" else " ", .style = .{ .fg = .{ .index = 2 }, .bold = true } },
-                .{ .text = self.print("{x:0>3} ", .{address}), .style = colors.address },
+                .{ .text = self.print("{x:0>3}", .{address}), .style = address_style },
+                .{ .text = " " },
                 .{ .text = self.print("{x:0>5}  ", .{value}), .style = colors.raw },
                 code,
             };
@@ -655,7 +740,7 @@ const Tui = struct {
         const hints: []const Hint = switch (self.focus) {
             .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "arrows", "select" }, .{ "1-3", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
             .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "tab", "next" }, .{ "esc", "map" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "up/down/pgup/pgdn", "scroll" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "b", "breakpoint" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
         };
         var segments: [4 + 2 * 9]vaxis.Segment = undefined;
         var len: usize = 0;
@@ -692,6 +777,12 @@ const Tui = struct {
         return text;
     }
 };
+
+/// the address of a row of the memory listing, unless it is a heading
+fn rowAddress(row: u16) ?u9 {
+    if (row == 0 or row == 65 or row >= memory_rows) return null;
+    return @intCast(if (row > 65) 0x80 + row - 66 else row - 1);
+}
 
 /// the row of an address in the memory listing, if it is in memory
 fn memoryRow(address: Address) ?u16 {
@@ -1039,6 +1130,52 @@ test "wraps the console, ends its input, and keeps sizes on screen" {
     t.draw();
     try std.testing.expect(try t.shows(t.tui.row_border.?, "2 console"));
     try std.testing.expect(!try t.shows(t.tui.row_border.?, "000:up"));
+}
+
+test "stops at breakpoints set in the memory listing" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("begin dup drop again");
+    defer t.deinit();
+    t.tui.focus = .node;
+    t.draw();
+
+    // on the current word, and then the next one
+    try t.press('b');
+    try std.testing.expect(t.tui.chip.hasBreakpoint(.init(0, 0)));
+    try std.testing.expect(try t.shows(14, "#>000"));
+    try t.press(vaxis.Key.down);
+    try t.press('b');
+    try std.testing.expect(t.tui.chip.hasBreakpoint(.init(0, 1)));
+    // and cleared by clicking the left edge
+    const left: u16 = @intCast(t.tui.memory_window.?.x_off);
+    try t.click(left, 15, .press);
+    try std.testing.expect(!t.tui.chip.hasBreakpoint(.init(0, 1)));
+    // clicking a word moves the cursor to it
+    try t.click(left + 4, 16, .press);
+    try std.testing.expectEqual(3, t.tui.memory_cursor);
+
+    // running stops when the node loops back
+    t.tui.running = true;
+    try t.tui.run();
+    try std.testing.expect(!t.tui.running);
+    try std.testing.expectEqualStrings("node 000 reached 000", t.tui.message.?);
+}
+
+test "breakpoints need a word in memory" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("dup");
+    defer t.deinit();
+    t.tui.focus = .node;
+    // node 001 is waiting for code from its ports
+    t.tui.select(1);
+    try t.press('b');
+    try std.testing.expectEqualStrings("move to a word in memory first", t.tui.message.?);
+    try std.testing.expectEqual(0, t.tui.chip.breakpoints_len);
+
+    // moving down starts at its first word
+    try t.press('j');
+    try t.press('b');
+    try std.testing.expect(t.tui.chip.hasBreakpoint(.init(1, 0)));
 }
 
 test status {

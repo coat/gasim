@@ -25,6 +25,16 @@ queue_len: usize = 0,
 queued: []bool,
 /// how many times a node has been stepped
 steps: u64 = 0,
+/// whether a node has been stepped, after the breakpoints on the words the
+/// nodes start at were checked
+started: bool = false,
+
+/// where running stops, by node index
+breakpoints: [max_breakpoints]Breakpoint = undefined,
+breakpoints_len: u8 = 0,
+/// the first breakpoint a node reached since `run` started, or since it was
+/// last cleared
+hit: ?Breakpoint = null,
 
 /// the console, and the index of the node it is attached to
 console: ?struct { device: *Console, index: u16 } = null,
@@ -32,6 +42,20 @@ console: ?struct { device: *Console, index: u16 } = null,
 feeder: ?struct { device: *Feeder, index: u16 } = null,
 
 const Chip = @This();
+
+pub const max_breakpoints = 32;
+
+/// A node about to fetch the word at an address. RAM and ROM addresses that
+/// repeat the same word, such as x000 and x040, are the same breakpoint.
+pub const Breakpoint = struct {
+    index: u16,
+    address: u9,
+
+    pub fn init(index: u16, address: u9) Breakpoint {
+        // only the low 6 bits of a RAM or ROM address select a word
+        return .{ .index = index, .address = if (address & 0x100 == 0) address & 0x1bf else address };
+    }
+};
 
 /// Writes words to a node through a port, such as a boot stream
 pub const Feeder = struct {
@@ -253,6 +277,14 @@ fn feed(self: *Chip) bool {
 /// suspended, and stepping would do nothing.
 pub fn step(self: *Chip) bool {
     if (self.queue_len == 0) return false;
+    if (!self.started) {
+        // a breakpoint on the first word a node runs
+        for (self.nodes, 0..) |*n, i| if (self.hit == null and !n.suspended and n.state == .fetch) {
+            self.hit = self.breakpointAt(@intCast(i));
+        };
+        self.started = true;
+        if (self.hit != null) return true;
+    }
     // nodes woken during this round run in the next one
     for (0..self.queue_len) |_| self.stepNode(self.dequeue().?);
     return true;
@@ -277,13 +309,41 @@ pub fn stepNode(self: *Chip, i: u16) void {
 
     n.step();
     self.steps += 1;
+    self.started = true;
     if (!n.suspended) self.wake(i);
+    if (self.hit == null and !n.suspended and n.state == .fetch) self.hit = self.breakpointAt(i);
 
     for (n.ports, before, 0..) |link, state, d| {
         const p = link.port orelse continue;
         if (std.meta.eql(state, p.state)) continue;
         if (self.layout.neighbour(i, @fromBackingInt(@intCast(d)))) |other| self.wake(other);
     }
+}
+
+/// a breakpoint on the word a node is about to fetch
+fn breakpointAt(self: *const Chip, i: u16) ?Breakpoint {
+    if (self.breakpoints_len == 0) return null;
+    const here: Breakpoint = .init(i, @bitCast(self.nodes[i].p.address));
+    return if (self.hasBreakpoint(here)) here else null;
+}
+
+pub fn hasBreakpoint(self: Chip, breakpoint: Breakpoint) bool {
+    for (self.breakpoints[0..self.breakpoints_len]) |b| if (std.meta.eql(b, breakpoint)) return true;
+    return false;
+}
+
+/// Sets a breakpoint, or clears it if it is set. Returns whether it is set.
+pub fn toggleBreakpoint(self: *Chip, breakpoint: Breakpoint) error{TooManyBreakpoints}!bool {
+    const set = self.breakpoints[0..self.breakpoints_len];
+    for (set, 0..) |b, i| if (std.meta.eql(b, breakpoint)) {
+        set[i] = set[set.len - 1];
+        self.breakpoints_len -= 1;
+        return false;
+    };
+    if (set.len == max_breakpoints) return error.TooManyBreakpoints;
+    self.breakpoints[set.len] = breakpoint;
+    self.breakpoints_len += 1;
+    return true;
 }
 
 /// queues a node to be stepped
@@ -329,15 +389,17 @@ pub fn service(self: *Chip) !bool {
 }
 
 /// Runs until every node is suspended on something the console cannot
-/// complete, or the console is interrupted.
+/// complete, a node reaches a breakpoint, or the console is interrupted. A
+/// breakpoint stops the run at the end of the round, leaving `hit` set.
 pub fn run(self: *Chip) !void {
+    self.hit = null;
     const console = self.console orelse {
-        while (self.feed() or self.step()) {}
+        while (self.hit == null and (self.feed() or self.step())) {}
         return;
     };
     const output = console.device.output;
     var quiet_rounds: u16 = 0;
-    while (!console.device.interrupted.load(.monotonic)) {
+    while (self.hit == null and !console.device.interrupted.load(.monotonic)) {
         const pending = output.end;
         if (try console.device.service(false)) self.wake(console.index);
         // flush once output stops for a while, so a busy node does not hold
@@ -618,6 +680,30 @@ test stepNext {
     try expectEqual(1, try chip.stepNext());
     try expectEqual(null, try chip.stepNext());
     try expectEqual(2, chip.steps);
+}
+
+test "stops at breakpoints" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    // loops forever, from x000
+    try chip.load(try assembler.assemble("begin dup drop again", &diagnostic));
+
+    // x040 is the same word as x000, as RAM repeats. The node starts there.
+    try expectEqual(true, try chip.toggleBreakpoint(.init(0, 0x40)));
+    try chip.run();
+    try expectEqual(Breakpoint{ .index = 0, .address = 0 }, chip.hit);
+    try expectEqual(0, chip.steps);
+    // running again goes past it, and around the loop to it again
+    const steps = chip.steps;
+    try chip.run();
+    try std.testing.expect(chip.hit != null and chip.steps > steps);
+
+    // clearing it, and filling them up
+    try expectEqual(false, try chip.toggleBreakpoint(.init(0, 0)));
+    try std.testing.expect(!chip.hasBreakpoint(.init(0, 0)));
+    for (0..max_breakpoints) |i| _ = try chip.toggleBreakpoint(.init(0, @intCast(0x80 + i)));
+    try std.testing.expectError(error.TooManyBreakpoints, chip.toggleBreakpoint(.init(0, 0)));
 }
 
 test "stops when interrupted" {
