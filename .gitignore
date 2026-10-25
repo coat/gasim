@@ -5,3 +5,4 @@ result
 # Zig
 zig-out/
 .zig-cache/
+zig-pkg/
