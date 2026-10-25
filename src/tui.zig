@@ -222,6 +222,14 @@ const Tui = struct {
                 // a key ends moving a border by tapping
                 self.dragging = null;
                 if (k.matches('c', .{ .ctrl = true })) return false;
+                // a digit with alt, or with ctrl where the terminal reports it,
+                // focuses a panel, even from the panels that take text
+                for ([_]Panel{ .map, .console, .node, .forth }, "1234") |panel, digit| {
+                    if (k.matches(digit, .{ .alt = true }) or k.matches(digit, .{ .ctrl = true })) {
+                        self.focusPanel(panel);
+                        return true;
+                    }
+                }
                 if (self.focus == .console and try self.consoleKey(k)) return true;
                 if (self.focus == .forth and try self.forthKey(k)) return true;
                 return self.key(k);
@@ -327,10 +335,11 @@ const Tui = struct {
     }
 
     /// Handles keys typed into the console, returning false for keys it
-    /// leaves to the panels: tab to move on, and escape to leave
+    /// leaves to the panels. Escape leaves it, and tab does nothing, as input
+    /// is printable characters.
     fn consoleKey(self: *Tui, k: vaxis.Key) !bool {
         if (k.codepoint == vaxis.Key.tab) {
-            return false;
+            return true;
         } else if (k.matches(vaxis.Key.escape, .{})) {
             // to a panel in view, rather than one hidden by zooming
             self.zoomed = null;
@@ -369,10 +378,10 @@ const Tui = struct {
     }
 
     /// Handles keys typed into the forth panel, returning false for keys it
-    /// leaves to the panels: tab to move on, and escape to leave
+    /// leaves to the panels. Escape leaves it, and tab completes words.
     fn forthKey(self: *Tui, k: vaxis.Key) !bool {
         if (k.codepoint == vaxis.Key.tab) {
-            return false;
+            if (!k.mods.shift) self.complete();
         } else if (k.matches(vaxis.Key.escape, .{})) {
             self.zoomed = null;
             for ([_]Panel{ .map, .node }) |panel| if (self.shown.contains(panel)) {
@@ -398,6 +407,37 @@ const Tui = struct {
             };
         } else return false;
         return true;
+    }
+
+    /// Completes the word being typed into the forth panel, as far as the
+    /// words it could be agree, or lists them when that adds nothing
+    fn complete(self: *Tui) void {
+        const forth = self.options.forth.?;
+        const input = self.forth_input[0..self.forth_input_len];
+        const start = if (std.mem.findScalarLast(u8, input, ' ')) |space| space + 1 else 0;
+        var words: Completions = .{ .partial = input[start..] };
+        forth.session.complete(words.partial, &words);
+        if (words.len == 0) {
+            self.message = "no word starts with that";
+            return;
+        }
+        const found = words.found[0..@min(words.len, words.found.len)];
+        // as much as every word starts with, and a space after a whole word
+        var common = found[0];
+        for (found[1..]) |word| common = common[0 .. std.mem.indexOfDiff(u8, common, word) orelse common.len];
+        const end = start + common.len + @intFromBool(found.len == 1);
+        if (end > self.forth_input.len) return;
+        if (common.len > words.partial.len or found.len == 1) {
+            @memcpy(self.forth_input[start..][0..common.len], common);
+            if (found.len == 1) self.forth_input[end - 1] = ' ';
+            self.forth_input_len = @intCast(end);
+            return;
+        }
+        const output = forth.output;
+        self.forth_scroll = 0;
+        for (found) |word| output.print(" {s}", .{word}) catch {};
+        if (words.len > found.len) output.print(" and {d} more", .{words.len - found.len}) catch {};
+        output.writeByte('\n') catch {};
     }
 
     /// puts the line typed `lines_back` lines ago into the forth panel's
@@ -629,6 +669,15 @@ const Tui = struct {
             self.message = "there are too many breakpoints";
             return;
         };
+    }
+
+    /// Moves the focus to a panel, showing it if it is hidden, and filling
+    /// the screen with it if another panel fills it
+    fn focusPanel(self: *Tui, panel: Panel) void {
+        if (panel == .forth and self.options.forth == null) return;
+        self.shown.insert(panel);
+        if (self.zoomed != null) self.zoomed = panel;
+        self.focus = panel;
     }
 
     fn toggle(self: *Tui, panel: Panel) void {
@@ -971,8 +1020,8 @@ const Tui = struct {
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
         const hints: []const Hint = switch (self.focus) {
             .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ if (self.options.forth == null) "1-3" else "1-4", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
-            .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "tab", "next" }, .{ "esc", "map" } },
-            .forth => &.{ .{ "enter", "interpret" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "tab", "next" }, .{ "esc", "map" } },
+            .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-4", "panels" }, .{ "esc", "map" } },
+            .forth => &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-4", "panels" }, .{ "esc", "map" } },
             .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
         };
         var segments: [4 + 2 * 10]vaxis.Segment = undefined;
@@ -1091,6 +1140,21 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
     }
 }
 
+/// words that could complete what was typed into the forth panel, up to as
+/// many as are listed
+const Completions = struct {
+    partial: []const u8,
+    found: [16][]const u8 = undefined,
+    len: usize = 0,
+
+    pub fn add(self: *Completions, word: []const u8) void {
+        // a word can be both an opcode and a label, or several labels
+        for (self.found[0..@min(self.len, self.found.len)]) |other| if (std.mem.eql(u8, other, word)) return;
+        if (self.len < self.found.len) self.found[self.len] = word;
+        self.len += 1;
+    }
+};
+
 /// a TUI showing a GA144 sized chip loaded with `source`, for tests
 const TestTui = struct {
     chip: Chip,
@@ -1136,6 +1200,11 @@ const TestTui = struct {
         const len = try std.unicode.utf8Encode(codepoint, &buffer);
         const text: ?[]const u8 = if (codepoint < 0x80) buffer[0..len] else null;
         try std.testing.expect(try self.tui.handle(.{ .key_press = .{ .codepoint = codepoint, .text = text } }));
+        self.draw();
+    }
+
+    fn pressWith(self: *TestTui, codepoint: u21, mods: vaxis.Key.Modifiers) !void {
+        try std.testing.expect(try self.tui.handle(.{ .key_press = .{ .codepoint = codepoint, .mods = mods } }));
         self.draw();
     }
 
@@ -1185,11 +1254,14 @@ test "draws the chip, console and selected node" {
     try t.press('1');
     try std.testing.expect(try t.shows(0, "2 console"));
     try t.press('1');
-    // tab moves on from the map, to the console, to the node
+    // tab moves on from the map to the console, which keeps tab, and alt
+    // with a digit moves to a panel from anywhere
     t.tui.focus = .map;
     try t.press(vaxis.Key.tab);
     try std.testing.expectEqual(.console, t.tui.focus);
     try t.press(vaxis.Key.tab);
+    try std.testing.expectEqual(.console, t.tui.focus);
+    try t.pressWith('3', .{ .alt = true });
     try std.testing.expectEqual(.node, t.tui.focus);
     try t.press('f');
     try std.testing.expect(!try t.shows(0, "1 chip"));
@@ -1239,7 +1311,7 @@ test "escapes from the console, and ends moving a border with a key" {
     t.tui.focus = .console;
     t.draw();
     try std.testing.expect(t.screen.cursor_vis);
-    try t.press(vaxis.Key.tab);
+    try t.pressWith('1', .{ .alt = true });
     try std.testing.expect(!t.screen.cursor_vis);
 
     // escape from a zoomed console shows the map again
@@ -1499,10 +1571,47 @@ test "the forth panel interprets arrayForth 3 at the selected node" {
     try t.press(vaxis.Key.up);
     try std.testing.expect(try t.shows(27, "707> 707 NODE x15. LIT"));
 
+    // and down goes back to the line being typed
+    try t.press(vaxis.Key.down);
+    try t.press(vaxis.Key.down);
+    try std.testing.expect(!try t.shows(27, "707> 707"));
+
+    // tab completes a word, as far as the words it could be agree, and
+    // lists them when that adds nothing
+    for ("RDU") |c| try t.press(c);
+    try t.press(vaxis.Key.tab);
+    try std.testing.expect(try t.shows(27, "707> RDUP "));
+    for ("R2") |c| try t.press(c);
+    try t.press(vaxis.Key.tab);
+    try std.testing.expect(try t.shows(27, "707> RDUP R2"));
+    try std.testing.expect(try t.shows(24, " R2* R2/"));
+    for (0..6) |_| try t.press(vaxis.Key.backspace);
+    try std.testing.expect(try t.shows(27, "707> "));
+
     // and the chip can go back to before a line, as before a step
     try t.press(vaxis.Key.escape);
     try t.press('z');
     try std.testing.expectEqual(0, t.chip.nodes[i].data_stack.t);
+}
+
+test "alt or ctrl and a digit focus a panel, showing it" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+    try t.press('1');
+    try std.testing.expect(!t.tui.shown.contains(.map));
+    t.tui.focus = .console;
+    try t.pressWith('1', .{ .ctrl = true });
+    try std.testing.expectEqual(.map, t.tui.focus);
+    try std.testing.expect(t.tui.shown.contains(.map));
+    // a panel filling the screen gives way to the one chosen
+    t.tui.zoomed = .map;
+    try t.pressWith('3', .{ .alt = true });
+    try std.testing.expectEqual(.node, t.tui.zoomed);
+    // there is no forth panel without a session
+    try t.pressWith('4', .{ .alt = true });
+    try std.testing.expectEqual(.node, t.tui.focus);
 }
 
 test "a short screen leaves text panels no rows" {
