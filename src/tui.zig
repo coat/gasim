@@ -1,7 +1,7 @@
 //! A terminal user interface for watching and controlling a chip: a map of
-//! its nodes, the registers, stacks and memory of the selected node, and
-//! the console. Panels can be hidden, zoomed to fill the screen, resized and
-//! scrolled.
+//! its nodes, the registers, stacks and memory of the selected node, the
+//! console, and arrayForth 3 typed at the chip with the words of its IDE.
+//! Panels can be hidden, zoomed to fill the screen, resized and scrolled.
 
 /// bytes of console output kept for display
 pub const console_capacity = 16 * 1024;
@@ -13,7 +13,26 @@ pub const Options = struct {
     console: *Console,
     console_node: u16,
     console_port: Direction,
+    /// arrayForth 3 typed into the forth panel, if it is shown
+    forth: ?Forth = null,
 };
+
+pub const Forth = struct {
+    /// interprets the lines typed, with the selected node as the target of
+    /// the IDE's words
+    session: *Session,
+    /// where the session writes, a fixed buffer of `forth_capacity` bytes
+    output: *Io.Writer,
+    diagnostic: *const Diagnostic,
+    /// keeps the lines typed, which the session's labels refer to
+    arena: Allocator,
+};
+
+/// bytes of the forth panel's output kept for display
+pub const forth_capacity = 16 * 1024;
+
+/// lines typed into the forth panel that up and down recall
+const recall_capacity = 32;
 
 const Event = union(enum) {
     key_press: vaxis.Key,
@@ -37,7 +56,7 @@ const node_header_rows = 14;
 /// rows of the memory listing: a heading and 64 words each for RAM and ROM
 const memory_rows = 2 * 65;
 
-const Panel = enum { map, console, node };
+const Panel = enum { map, console, forth, node };
 
 /// the border between the left panels and the node panel, or between the
 /// map and the console
@@ -85,6 +104,16 @@ const Tui = struct {
     input_len: u8 = 0,
     /// rows of console output scrolled back from the end
     console_scroll: usize = 0,
+    /// the line being typed into the forth panel, and rows of its output
+    /// scrolled back from the end
+    forth_input: [256]u8 = undefined,
+    forth_input_len: u8 = 0,
+    forth_scroll: usize = 0,
+    /// lines typed into the forth panel, the latest last, and how far back
+    /// up has recalled
+    recalled: [recall_capacity][]const u8 = undefined,
+    recalled_len: usize = 0,
+    recalling: usize = 0,
     /// the first row of the memory listing in view, or null to follow
     /// execution
     memory_scroll: ?u16 = null,
@@ -123,7 +152,9 @@ const Tui = struct {
     frame: std.heap.FixedBufferAllocator = undefined,
 
     fn init(io: Io, gpa: Allocator, chip: *Chip, options: Options) Tui {
-        return .{ .io = io, .gpa = gpa, .chip = chip, .options = options, .selected = chip.layout.index(options.console_node) orelse 0 };
+        var tui: Tui = .{ .io = io, .gpa = gpa, .chip = chip, .options = options, .selected = chip.layout.index(options.console_node) orelse 0 };
+        if (options.forth == null) tui.shown.remove(.forth);
+        return tui;
     }
 
     fn deinit(self: *Tui) void {
@@ -192,6 +223,7 @@ const Tui = struct {
                 self.dragging = null;
                 if (k.matches('c', .{ .ctrl = true })) return false;
                 if (self.focus == .console and try self.consoleKey(k)) return true;
+                if (self.focus == .forth and try self.forthKey(k)) return true;
                 return self.key(k);
             },
             .mouse => |m| self.mouse(m),
@@ -212,8 +244,8 @@ const Tui = struct {
         if (k.codepoint == vaxis.Key.tab) self.cycleFocus(if (k.mods.shift) -1 else 1);
         if (k.matches(vaxis.Key.escape, .{})) self.zoomed = null;
         if (k.matches('f', .{})) self.zoomed = if (self.zoomed == null) self.focus else null;
-        for ([_]Panel{ .map, .console, .node }, "123") |panel, digit| {
-            if (k.matches(digit, .{})) self.toggle(panel);
+        for ([_]Panel{ .map, .console, .node, .forth }, "1234") |panel, digit| {
+            if (k.matches(digit, .{}) and (panel != .forth or self.options.forth != null)) self.toggle(panel);
         }
 
         // resizing
@@ -278,7 +310,7 @@ const Tui = struct {
                     self.message = "watch reads from r d l u, or writes to R D L U";
                 }
             },
-            .console => {},
+            .console, .forth => {},
         }
         return true;
     }
@@ -336,6 +368,80 @@ const Tui = struct {
         return true;
     }
 
+    /// Handles keys typed into the forth panel, returning false for keys it
+    /// leaves to the panels: tab to move on, and escape to leave
+    fn forthKey(self: *Tui, k: vaxis.Key) !bool {
+        if (k.codepoint == vaxis.Key.tab) {
+            return false;
+        } else if (k.matches(vaxis.Key.escape, .{})) {
+            self.zoomed = null;
+            for ([_]Panel{ .map, .node }) |panel| if (self.shown.contains(panel)) {
+                self.focus = panel;
+                break;
+            };
+        } else if (k.matches(vaxis.Key.page_up, .{})) {
+            self.forth_scroll += self.textPage(.forth);
+        } else if (k.matches(vaxis.Key.page_down, .{})) {
+            self.forth_scroll -|= self.textPage(.forth);
+        } else if (k.matches(vaxis.Key.up, .{})) {
+            if (self.recalling < self.recalled_len) self.recall(self.recalling + 1);
+        } else if (k.matches(vaxis.Key.down, .{})) {
+            if (self.recalling > 0) self.recall(self.recalling - 1);
+        } else if (k.matches(vaxis.Key.backspace, .{})) {
+            self.forth_input_len -|= 1;
+        } else if (k.matches(vaxis.Key.enter, .{})) {
+            try self.interpret();
+        } else if (k.text) |text| {
+            for (text) |byte| if (self.forth_input_len < self.forth_input.len and byte >= ' ' and byte < 0x7f) {
+                self.forth_input[self.forth_input_len] = byte;
+                self.forth_input_len += 1;
+            };
+        } else return false;
+        return true;
+    }
+
+    /// puts the line typed `lines_back` lines ago into the forth panel's
+    /// input, or an empty line for none
+    fn recall(self: *Tui, lines_back: usize) void {
+        self.recalling = lines_back;
+        const line: []const u8 = if (lines_back == 0) "" else self.recalled[(self.recalled_len - lines_back) % recall_capacity];
+        const len = @min(line.len, self.forth_input.len);
+        @memcpy(self.forth_input[0..len], line[0..len]);
+        self.forth_input_len = @intCast(len);
+    }
+
+    /// Interprets the line typed into the forth panel, with the selected node
+    /// as the target, and selects the target it leaves. The chip is
+    /// remembered first, to go back to as after a step.
+    fn interpret(self: *Tui) !void {
+        const forth = self.options.forth.?;
+        const line = try forth.arena.dupe(u8, self.forth_input[0..self.forth_input_len]);
+        self.forth_input_len = 0;
+        self.forth_scroll = 0;
+        self.recalling = 0;
+        if (line.len > 0) {
+            self.recalled[self.recalled_len % recall_capacity] = line;
+            self.recalled_len += 1;
+        }
+
+        // keep room for what the line writes
+        const output = forth.output;
+        if (output.end > output.buffer.len / 2) {
+            const keep = output.buffer.len / 4;
+            @memmove(output.buffer[0..keep], output.buffer[output.end - keep .. output.end]);
+            output.end = keep;
+        }
+        const layout = self.chip.layout;
+        if (!self.running) self.remember();
+        forth.session.setTarget(layout.nodeNumber(self.selected));
+        output.print("{d:0>3}> {s}\n", .{ layout.nodeNumber(self.selected), line }) catch {};
+        repl.interpret(forth.session, line, forth.diagnostic, output) catch {
+            self.message = "the forth panel's output is full";
+        };
+        if (forth.session.target()) |node| if (layout.index(node)) |i| self.select(i);
+        self.memory_scroll = null;
+    }
+
     /// sends the text typed into the console as input
     fn send(self: *Tui) !void {
         const text = self.input[0..self.input_len];
@@ -379,6 +485,9 @@ const Tui = struct {
             if (self.windows.get(.console)) |w| if (w.hasMouse(m) != null) {
                 self.console_scroll = if (wheel < 0) self.console_scroll + 3 else self.console_scroll -| 3;
             };
+            if (self.windows.get(.forth)) |w| if (w.hasMouse(m) != null) {
+                self.forth_scroll = if (wheel < 0) self.forth_scroll + 3 else self.forth_scroll -| 3;
+            };
             return;
         }
         if (m.type != .press or m.button != .left) return;
@@ -390,7 +499,7 @@ const Tui = struct {
             return;
         }
 
-        for ([_]Panel{ .map, .console, .node }) |panel| {
+        for ([_]Panel{ .map, .console, .forth, .node }) |panel| {
             const w = self.windows.get(panel) orelse continue;
             if (w.hasMouse(m) == null) continue;
             self.focus = panel;
@@ -529,7 +638,7 @@ const Tui = struct {
         if (self.zoomed == panel) self.zoomed = null;
         // rather than the console, where keys would be typed as input
         if (!self.shown.contains(self.focus)) {
-            for ([_]Panel{ .node, .map, .console }) |other| if (self.shown.contains(other)) {
+            for ([_]Panel{ .node, .map, .console, .forth }) |other| if (self.shown.contains(other)) {
                 self.focus = other;
                 break;
             };
@@ -538,7 +647,7 @@ const Tui = struct {
 
     /// moves the focus to the next panel in view
     fn cycleFocus(self: *Tui, direction: i2) void {
-        const panels = [_]Panel{ .map, .console, .node };
+        const panels = [_]Panel{ .map, .console, .forth, .node };
         var i: usize = @backingInt(self.focus);
         for (0..panels.len) |_| {
             i = @intCast(@mod(@as(isize, @intCast(i)) + direction, panels.len));
@@ -568,7 +677,12 @@ const Tui = struct {
     }
 
     fn consolePage(self: Tui) u16 {
-        return if (self.windows.get(.console)) |w| @max(w.height -| 1, 1) else 8;
+        return self.textPage(.console);
+    }
+
+    /// rows of output a page of the console or forth panel shows
+    fn textPage(self: Tui, panel: Panel) u16 {
+        return if (self.windows.get(panel)) |w| @max(w.height -| 1, 1) else 8;
     }
 
     /// the first row of the memory listing that centers the current word
@@ -602,7 +716,8 @@ const Tui = struct {
         const layout = self.chip.layout;
         const body_height = win.height - 1;
         const shown = self.visible();
-        const left = shown.contains(.map) or shown.contains(.console);
+        const below_map = shown.contains(.console) or shown.contains(.forth);
+        const left = shown.contains(.map) or below_map;
 
         // the map and console on the left, and the node on the right
         var left_width: u16 = win.width;
@@ -615,7 +730,7 @@ const Tui = struct {
             }
         }
         var map_height: u16 = body_height;
-        if (shown.contains(.map) and shown.contains(.console)) {
+        if (shown.contains(.map) and below_map) {
             map_height = std.math.clamp(self.map_height orelse @min(self.defaultMapHeight(), body_height -| 5), 3, body_height - 3);
             self.row_border = map_height;
             if (self.map_height != null) self.map_height = map_height;
@@ -624,8 +739,15 @@ const Tui = struct {
         if (shown.contains(.map)) {
             self.drawMap(self.drawPanel(win, .map, 0, 0, left_width, map_height, self.print("1 chip {d}x{d}", .{ layout.rows, layout.columns })));
         }
+        // the console above the forth panel, sharing the rest of the column
+        const rest = body_height - map_height;
+        const console_height = if (shown.contains(.console) and shown.contains(.forth)) rest / 2 else rest;
         if (shown.contains(.console)) {
-            self.drawConsole(self.drawPanel(win, .console, 0, map_height, left_width, body_height - map_height, self.print("2 console {d:0>3}:{t}", .{ self.options.console_node, self.options.console_port })));
+            self.drawConsole(self.drawPanel(win, .console, 0, map_height, left_width, console_height, self.print("2 console {d:0>3}:{t}", .{ self.options.console_node, self.options.console_port })));
+        }
+        if (shown.contains(.forth)) {
+            const y = if (shown.contains(.console)) map_height + console_height else map_height;
+            self.drawForth(self.drawPanel(win, .forth, 0, y, left_width, body_height - y, "4 forth"));
         }
         if (shown.contains(.node)) {
             self.drawNode(self.drawPanel(win, .node, left_width, 0, win.width - left_width, body_height, self.print("3 node {d:0>3}", .{layout.nodeNumber(self.selected)})));
@@ -672,8 +794,28 @@ const Tui = struct {
     }
 
     fn drawConsole(self: *Tui, win: vaxis.Window) void {
-        const output = self.options.console.output.buffered();
-        const rows = win.height -| 1;
+        const prompt = if (self.console_scroll > 0)
+            self.print("  {d} lines back, pgdn to return", .{self.console_scroll})
+        else
+            self.print("> {s}", .{self.input[0..self.input_len]});
+        self.drawText(win, .console, self.options.console.output.buffered(), &self.console_scroll, prompt);
+    }
+
+    fn drawForth(self: *Tui, win: vaxis.Window) void {
+        const prompt = if (self.forth_scroll > 0)
+            self.print("  {d} lines back, pgdn to return", .{self.forth_scroll})
+        else
+            self.print("{d:0>3}> {s}", .{ self.chip.layout.nodeNumber(self.selected), self.forth_input[0..self.forth_input_len] });
+        self.drawText(win, .forth, self.options.forth.?.output.buffered(), &self.forth_scroll, prompt);
+    }
+
+    /// Draws the end of some output, `scroll` rows back from it, above a
+    /// prompt with the cursor at its end when the panel has the focus and
+    /// is not scrolled back
+    fn drawText(self: *Tui, win: vaxis.Window, panel: Panel, output: []const u8, scroll: *usize, prompt: []const u8) void {
+        // too short for even the prompt
+        if (win.height == 0) return;
+        const rows = win.height - 1;
         const width = @max(win.width, 1);
         // the rows that fit above the input line, with long lines wrapped,
         // scrolled back from the end and collected from the last
@@ -688,7 +830,7 @@ const Tui = struct {
             const line = std.mem.trimEnd(u8, output[start..end], "\r");
             var line_rows = @max(std.math.divCeil(usize, line.len, width) catch unreachable, 1);
             while (line_rows > 0) : (line_rows -= 1) {
-                if (skipped < self.console_scroll) {
+                if (skipped < scroll.*) {
                     skipped += 1;
                     continue;
                 }
@@ -701,10 +843,10 @@ const Tui = struct {
         };
         // scrolled back past the start, so show the first page instead
         if (count < rows and skipped > 0) {
-            self.console_scroll = skipped -| (rows - count);
-            return self.drawConsole(win);
+            scroll.* = skipped -| (rows - count);
+            return self.drawText(win, panel, output, scroll, prompt);
         }
-        self.console_scroll = skipped;
+        scroll.* = skipped;
 
         for (collected[rows - count ..], 0..) |row, r| {
             // sanitized for display
@@ -717,13 +859,9 @@ const Tui = struct {
             _ = win.printSegment(.{ .text = text }, .{ .row_offset = @intCast(r), .wrap = .none });
         }
 
-        const prompt = if (self.console_scroll > 0)
-            self.print("  {d} lines back, pgdn to return", .{self.console_scroll})
-        else
-            self.print("> {s}", .{self.input[0..self.input_len]});
-        const style: vaxis.Style = if (self.focus == .console) .{} else colors.dim;
+        const style: vaxis.Style = if (self.focus == panel) .{} else colors.dim;
         _ = win.printSegment(.{ .text = prompt, .style = style }, .{ .row_offset = win.height - 1, .wrap = .none });
-        if (self.focus == .console and self.console_scroll == 0) win.showCursor(@intCast(@min(prompt.len, win.width - 1)), win.height - 1);
+        if (self.focus == panel and scroll.* == 0) win.showCursor(@intCast(@min(prompt.len, win.width - 1)), win.height - 1);
     }
 
     /// prints labelled values on a row, with the labels in their own color
@@ -832,8 +970,9 @@ const Tui = struct {
         else
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
         const hints: []const Hint = switch (self.focus) {
-            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "1-3", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
+            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ if (self.options.forth == null) "1-3" else "1-4", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
             .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "tab", "next" }, .{ "esc", "map" } },
+            .forth => &.{ .{ "enter", "interpret" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "tab", "next" }, .{ "esc", "map" } },
             .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
         };
         var segments: [4 + 2 * 10]vaxis.Segment = undefined;
@@ -1308,12 +1447,76 @@ const Address = gasim.Address;
 const Chip = gasim.Chip;
 const Computer = gasim.Computer;
 const Console = gasim.Console;
+const Diagnostic = gasim.assembler.Diagnostic;
 const Direction = gasim.Direction;
 const Instruction = gasim.Instruction;
 const Word = gasim.Word;
 const disassembler = gasim.disassembler;
+const Session = gasim.arrayforth.Session;
+const repl = @import("repl.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const vaxis = @import("vaxis");
+
+test "the forth panel interprets arrayForth 3 at the selected node" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("up b! @b");
+    defer t.deinit();
+    var programs: [2]gasim.assembler.Program = undefined;
+    var descriptors: [2]gasim.boot.Descriptor = undefined;
+    var buffer: [forth_capacity]u8 = undefined;
+    var output: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &output, .chip = &t.chip });
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    t.tui.options.forth = .{ .session = &session, .output = &output, .diagnostic = &diagnostic, .arena = arena.allocator() };
+    t.tui.shown.insert(.forth);
+    t.tui.focus = .forth;
+    t.draw();
+    try std.testing.expect(try t.shows(19, "4 forth"));
+
+    // NODE selects the node, and LIT pushes onto its stack
+    for ("707 NODE x15. LIT") |c| try t.press(c);
+    try std.testing.expect(try t.shows(27, "000> 707 NODE x15. LIT"));
+    try t.press(vaxis.Key.enter);
+    const i = t.chip.layout.index(707).?;
+    try std.testing.expectEqual(i, t.tui.selected);
+    try std.testing.expectEqual(0x15, t.chip.nodes[i].data_stack.t);
+    try std.testing.expect(try t.shows(0, "3 node 707"));
+    try std.testing.expect(try t.shows(20, "000> 707 NODE x15. LIT"));
+    try std.testing.expect(try t.shows(21, " ok"));
+
+    // the selected node is the target, and errors are shown
+    for ("nothing") |c| try t.press(c);
+    try t.press(vaxis.Key.enter);
+    try std.testing.expect(try t.shows(23, "error: UnknownWord at 'nothing'"));
+
+    // up recalls lines typed before
+    try t.press(vaxis.Key.up);
+    try t.press(vaxis.Key.up);
+    try std.testing.expect(try t.shows(27, "707> 707 NODE x15. LIT"));
+
+    // and the chip can go back to before a line, as before a step
+    try t.press(vaxis.Key.escape);
+    try t.press('z');
+    try std.testing.expectEqual(0, t.chip.nodes[i].data_stack.t);
+}
+
+test "a short screen leaves text panels no rows" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    var programs: [1]gasim.assembler.Program = undefined;
+    var descriptors: [1]gasim.boot.Descriptor = undefined;
+    var buffer: [64]u8 = undefined;
+    var output: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &output });
+    t.tui.options.forth = .{ .session = &session, .output = &output, .diagnostic = &diagnostic, .arena = std.testing.allocator };
+    t.tui.shown.insert(.forth);
+    // the console gets one row of the four below the map, inside its border
+    for (8..14) |height| t.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = @intCast(height), .screen = &t.screen });
+}

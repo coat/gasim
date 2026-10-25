@@ -173,10 +173,10 @@ node's registers, stacks, and RAM and ROM around the word it is executing.
 | `z` | go back to before the last step or run, up to 64 times |
 | arrows, `hjkl` | select a node on the map, or move through memory in the node panel |
 | `tab`, `shift+tab` | move to the next or previous panel |
-| `1` `2` `3` | show or hide the map, console and node panels |
+| `1` `2` `3` `4` | show or hide the map, console, node and forth panels |
 | `f`, `esc` | fill the screen with the panel, and go back |
 | `<` `>` `-` `+` | resize the panels, as can dragging their borders |
-| `pgup` `pgdn` | page through memory, or scroll the console |
+| `pgup` `pgdn` | page through memory, or scroll the console or forth panel |
 | `b` | set or clear a breakpoint on the word in memory under the cursor |
 | `w` | watch the selected node's reads from a port, with `r` `d` `l` `u`, or its writes to one, with `R` `D` `L` `U`, or stop watching it |
 | `g` | follow the word the node is executing again |
@@ -193,6 +193,11 @@ into scrolling, tapped and then tapped again where they should go. In
 the console, typed text is sent as input with `enter`, `ctrl+d` ends the
 input as the end of a pipe would, and `esc` goes back to the map. Long lines
 of output wrap.
+
+The forth panel takes lines of arrayForth 3, as `gasim repl` does, with the
+selected node as the target of the IDE's words: `x15. LIT` pushes onto its
+stack, and `NODE` selects another node. `up` and `down` recall lines typed
+before, and `z` goes back to before a line, as it does after a step.
 
 ### ROM
 

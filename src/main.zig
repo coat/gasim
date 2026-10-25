@@ -194,12 +194,15 @@ pub fn main(init: std.process.Init) !void {
     // the prompt, and the console with it, write here
     var repl_buffer: [4096]u8 = undefined;
     var repl_writer: Io.File.Writer = .init(.stdout(), io, &repl_buffer);
-    // arrayForth 3 at the prompt keeps the bins and labels of an arrayForth
-    // 3 program
-    const session: ?*gasim.arrayforth.Session = if (command == .repl) session: {
+    // and the terminal user interface's forth panel here
+    var forth_buffer: [tui.forth_capacity]u8 = undefined;
+    var forth_output: Io.Writer = .fixed(&forth_buffer);
+    // arrayForth 3 at the prompt or in the forth panel keeps the bins and
+    // labels of an arrayForth 3 program
+    const session: ?*gasim.arrayforth.Session = if (command != .run) session: {
         const session = try arena.create(gasim.arrayforth.Session);
         session.* = .init(program_buffer, descriptor_buffer, &diagnostic, .{
-            .out = &repl_writer.interface,
+            .out = if (command == .tui) &forth_output else &repl_writer.interface,
             .chip = &chip,
             .blocks = if (blocks) file else null,
         });
@@ -326,6 +329,7 @@ pub fn main(init: std.process.Init) !void {
         .console = &console,
         .console_node = console_node,
         .console_port = console_port,
+        .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
     });
 
     var stderr_buffer: [4096]u8 = undefined;

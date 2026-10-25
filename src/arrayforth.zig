@@ -201,6 +201,11 @@ pub const Session = struct {
         return self.interpreter.target;
     }
 
+    /// makes a node of the chip the target of the IDE words, as NODE does
+    pub fn setTarget(self: *Session, node: u16) void {
+        self.interpreter.target = node;
+    }
+
     /// Calls `completer.add(word)` for each word the session knows that
     /// starts with `prefix`: FORTH and ASM words, opcodes, named literals
     /// and calls, the labels of the bin being assembled, and defined names
