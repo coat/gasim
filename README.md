@@ -63,7 +63,20 @@ $ gasim run --trace --break 000:004 examples/hello.ga
 000 000 04b12 @p b! @p .  T 00007 S 00000 R 00000
 ...
 000 003 2bcba a! @+ >r .  T 00000 S 00000 R 0000d
-info: node 000 reached 004: T 00000  S 00000  R 0000d  A 00008  B 145
+info: node 000 reached 004
+info: P 004  T 00000  S 00000  R 0000d  A 00008  B 145
+```
+
+- `--listing`: instead of running, write each node's words: the address, the
+  raw word, its opcodes or literal value, and the source line it came from.
+
+```
+$ gasim --listing examples/hello.ga
+node 000
+000 04b12  @p b! @p .                 7      up b!                  \ B addresses the console
+001 00145  literal up
+002 00007  literal 7                  8      'message a!            \ A walks through the message
+...
 ```
 
 See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.

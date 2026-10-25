@@ -681,9 +681,9 @@ const Tui = struct {
         const node_status = status(n);
         _ = win.printSegment(.{ .text = switch (node_status) {
             .running => "running",
-            .code => |address| self.print("waiting for code from {s}", .{ioName(address)}),
-            .reading => |address| self.print("waiting to read {s}", .{ioName(address)}),
-            .writing => |address| self.print("waiting to write {s}", .{ioName(address)}),
+            .code => |address| self.print("waiting for code from {s}", .{disassembler.ioName(address)}),
+            .reading => |address| self.print("waiting to read {s}", .{disassembler.ioName(address)}),
+            .writing => |address| self.print("waiting to write {s}", .{disassembler.ioName(address)}),
         }, .style = statusStyle(node_status) }, .{ .wrap = .none });
 
         const word = n.current();
@@ -694,7 +694,7 @@ const Tui = struct {
             .{ "", if (n.p.extended_arithmetic) "extended arithmetic" else "" },
         });
         if (n.state == .fetch) {
-            self.fields(win, 3, &.{.{ "I", self.print("next word from {s}", .{if (word.io) ioName(@bitCast(word)) else "P"}) }});
+            self.fields(win, 3, &.{.{ "I", self.print("next word from {s}", .{if (word.io) disassembler.ioName(@bitCast(word)) else "P"}) }});
         } else self.fields(win, 3, &.{.{ "I", self.print("{s}  {s}", .{ self.hex(n.i), self.disassemble(n.i, @bitCast(word)) }) }});
         self.fields(win, 4, &.{ .{ "A", self.hex(n.a) }, .{ "B", self.print("{x:0>3}", .{n.b}) }, .{ "io", self.hex(n.io) } });
         self.fields(win, 5, &.{.{ "time", self.print("{d:.1} ns", .{n.execution_time}) }});
@@ -716,8 +716,8 @@ const Tui = struct {
         const page = @max(win.height, 1);
         const first = self.memoryFirstRow();
         const here = memoryRow(n.current());
-        const ram_literals = literals(n.mem[0..64]);
-        const rom_literals = literals(n.mem[64..128]);
+        const ram_literals = disassembler.literals(n.mem[0..64]);
+        const rom_literals = disassembler.literals(n.mem[64..128]);
 
         for (first..@min(memory_rows, first + page)) |r| {
             const row: u16 = @intCast(r - first);
@@ -736,11 +736,7 @@ const Tui = struct {
             const is_literal = (if (in_rom) rom_literals else ram_literals) & (@as(u64, 1) << @intCast(i)) != 0;
 
             var code: vaxis.Segment = .{ .text = self.disassemble(word, address), .style = if (word == 0) colors.dim else .{} };
-            if (is_literal) code = .{
-                // I/O addresses by name, and other values as numbers
-                .text = if (value >= 0x100 and value < 0x200) self.print("literal {s}", .{ioName(@intCast(value))}) else self.print("literal {d}", .{word}),
-                .style = colors.literal,
-            };
+            if (is_literal) code = .{ .text = self.literal(word), .style = colors.literal };
             const is_breakpoint = self.chip.breakpoints.contains(.init(self.selected, address));
             var address_style = colors.address;
             if (self.focus == .node and r == (self.cursorRow() orelse memory_rows)) address_style.reverse = true;
@@ -808,6 +804,13 @@ const Tui = struct {
         return writer.buffered();
     }
 
+    fn literal(self: *Tui, word: Word) []const u8 {
+        const buffer = self.frame.allocator().alloc(u8, 32) catch return "";
+        var writer: Io.Writer = .fixed(buffer);
+        disassembler.writeLiteral(&writer, word) catch {};
+        return writer.buffered();
+    }
+
     /// the 8 entries of a circular stack below its top, most recent first
     fn stack(self: *Tui, entries: *const [8]Word, index: u3) []const u8 {
         var text: []const u8 = "";
@@ -830,29 +833,6 @@ fn memoryRow(address: Address) ?u16 {
     if (address.io) return null;
     const i = address.local % 64;
     return if (address.rom) 65 + 1 + i else 1 + i;
-}
-
-/// Finds the words of RAM or ROM that are literals read by @p, or written by
-/// !p, following the code from its first word. Data that is never reached
-/// this way looks like code.
-fn literals(words: *const [64]Word) u64 {
-    var data: u64 = 0;
-    var i: u7 = 0;
-    while (i < 64) : (i += 1) {
-        if (data & (@as(u64, 1) << @intCast(i)) != 0) continue;
-        const instruction: Instruction = .decode(words[i]);
-        var next = i + 1;
-        for (0..4) |slot| switch (instruction.getSlot(@intCast(slot))) {
-            .@"@p", .@"!p" => {
-                if (next < 64) data |= @as(u64, 1) << @intCast(next);
-                next += 1;
-            },
-            // the rest of the word does not run, or holds a destination
-            .@";", .ex, .jump, .call, .next, .@"if", .@"-if" => break,
-            else => {},
-        };
-    }
-    return data;
 }
 
 const Status = union(enum) {
@@ -886,33 +866,6 @@ fn statusStyle(s: Status) vaxis.Style {
         .reading, .writing => .{ .fg = .{ .index = 3 } },
     };
 }
-
-/// the name of an I/O address, such as right, rd-u or io
-fn ioName(address: u9) []const u8 {
-    if (address == Computer.io_address) return "io";
-    if (address == Computer.data_address) return "data";
-    const ports = gasim.port.select(address) orelse return "an undefined address";
-    return port_names[ports.bits.mask];
-}
-
-/// names of each set of ports, by their bits in a `port.Select`
-const port_names = names: {
-    var names: [16][]const u8 = undefined;
-    for (0..16) |bits| {
-        const single = [_][]const u8{ "right", "down", "left", "up" };
-        if (@popCount(bits) == 1) {
-            names[bits] = single[@ctz(bits)];
-        } else {
-            var name: [4]u8 = "----".*;
-            for ("rdlu", 0..) |letter, i| if (bits & (1 << i) != 0) {
-                name[i] = letter;
-            };
-            const final = name;
-            names[bits] = &final;
-        }
-    }
-    break :names names;
-};
 
 /// Shows the chip until the user quits
 pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chip, options: Options) !void {
@@ -1271,27 +1224,6 @@ test memoryRow {
     try std.testing.expectEqual(66, memoryRow(Address.fromWord(0x80)));
     try std.testing.expectEqual(76, memoryRow(Address.fromWord(0xca)));
     try std.testing.expectEqual(null, memoryRow(Address.fromWord(0x1d5)));
-}
-
-test literals {
-    var words: [64]Word = @splat(Instruction.encode(.{ .slot_0 = .@".", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }));
-    // two literals after the first word, which look like a return
-    words[0] = Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@"@p", .slot_2 = .@"+", .slot_3 = 7 });
-    words[1] = 0;
-    words[2] = 0;
-    // a literal after a jump does not count, nor one after the end
-    words[3] = Instruction.encode(.{ .slot_0 = .jump, .slot_1 = .@"@p", .slot_2 = .@".", .slot_3 = 7 });
-    words[63] = Instruction.encode(.{ .slot_0 = .@"!p", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
-    try std.testing.expectEqual(0b110, literals(&words));
-}
-
-test ioName {
-    try std.testing.expectEqualStrings("io", ioName(0x15d));
-    try std.testing.expectEqualStrings("right", ioName(0x1d5));
-    try std.testing.expectEqualStrings("up", ioName(0x145));
-    try std.testing.expectEqualStrings("rd-u", ioName(0x185));
-    try std.testing.expectEqualStrings("rdlu", ioName(0x1a5));
-    try std.testing.expectEqualStrings("an undefined address", ioName(0x100));
 }
 
 const gasim = @import("gasim");

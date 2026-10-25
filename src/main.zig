@@ -6,7 +6,8 @@ const usage =
     \\Opens the program in a terminal user interface. With run, or when stdin
     \\or stdout is not a terminal, runs it instead with the console on stdin
     \\and stdout, until every node is waiting, or one reaches a breakpoint or
-    \\makes a watched transfer.
+    \\makes a watched transfer. With --listing, writes the assembled program
+    \\instead.
     \\
     \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
@@ -24,6 +25,9 @@ const usage =
     \\                             more than once.
     \\  --trace                    with run, write a line to stderr for each
     \\                             word a node executes
+    \\  --listing                  write each node's words with their
+    \\                             disassembly and source lines to stdout,
+    \\                             instead of running
 ;
 
 const default_rom_path = "rom/ga144.txt";
@@ -60,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     var rom_path: ?[]const u8 = null;
     var boot = false;
     var trace = false;
+    var listing = false;
     var breakpoints: [Chip.max_breakpoints]struct { node: u16, address: u9 } = undefined;
     var breakpoints_len: usize = 0;
     var watches: [Chip.max_watches]struct { node: u16, direction: Direction, read: bool, write: bool } = undefined;
@@ -116,12 +121,14 @@ pub fn main(init: std.process.Init) !void {
             boot = true;
         } else if (std.mem.eql(u8, arg, "--trace")) {
             trace = true;
+        } else if (std.mem.eql(u8, arg, "--listing")) {
+            listing = true;
         } else if (path == null and !std.mem.startsWith(u8, arg, "-")) {
             path = arg;
         } else fatal(usage, .{});
     }
     const source_path = path orelse fatal(usage, .{});
-    if (trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
+    if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
 
     // one spare byte tells a full buffer apart from a longer file
     var source_buffer: [max_source_len + 1]u8 = undefined;
@@ -144,6 +151,18 @@ pub fn main(init: std.process.Init) !void {
     };
     for (programs) |program| if (layout.index(program.node) == null)
         fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, program.node, layout.rows, layout.columns });
+    if (listing) {
+        var buffer: [4096]u8 = undefined;
+        var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+        const writer = &file_writer.interface;
+        for (programs, 0..) |program, n| {
+            if (n > 0) try writer.writeByte('\n');
+            try writer.print("node {d:0>3}\n", .{program.node});
+            try gasim.disassembler.listing(writer, program, source);
+        }
+        try writer.flush();
+        return;
+    }
     if (roms == null) for (programs) |program| if (program.rom_word) |word|
         fatal("{s}:{d}: '{s}' is in ROM, which is not loaded (see --rom)", .{ source_path, word.line, word.token });
 
