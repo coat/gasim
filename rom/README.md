@@ -17,3 +17,10 @@ at commit `de5974a`.
 For each node, its number on a line, followed by its 64 ROM words, for
 addresses x080 to x0bf, in decimal, one per line. Words are as stored in
 memory, so instruction words are XORed with x15555.
+
+## Checking the arrayForth 3 assembler
+
+The ROM's source is in `sF/pFDISK.blk` of the arrayForth 3 distribution.
+Copied here as `rom/pFDISK.blk`, which git ignores, `zig build test`
+assembles every node's ROM from it and checks that it is the same as
+`ga144.txt`, word for word.

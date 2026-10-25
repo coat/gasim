@@ -38,20 +38,27 @@ pub fn writeLiteral(writer: *Io.Writer, word: Word) Io.Writer.Error!void {
 ///     003 29fb2  b! @b . .                   1  left b! @b
 ///
 /// Each source line is written next to the first word assembled from it.
+/// Code assembled into ROM follows, from x080.
 pub fn listing(writer: *Io.Writer, program: Program, source: []const u8) Io.Writer.Error!void {
-    const data = literals(&program.ram);
     var lines: Lines = .{ .source = source };
+    try listWords(writer, &program.ram, program.lines[0..program.len], 0, &lines);
+    if (program.rom) |rom| try listWords(writer, &rom.words, rom.lines[0..rom.len], 0x80, &lines);
+}
+
+fn listWords(writer: *Io.Writer, words: *const [64]Word, word_lines: []const u32, first: u9, lines: *Lines) Io.Writer.Error!void {
+    const data = literals(words);
     var previous: usize = 0;
-    for (program.ram[0..program.len], program.lines[0..program.len], 0..) |word, line, i| {
+    for (words[0..word_lines.len], word_lines, 0..) |word, line, i| {
         var buffer: [48]u8 = undefined;
         var text: Io.Writer = .fixed(&buffer);
+        const address: u9 = first + @as(u9, @intCast(i));
         // a word skipped by org is neither code nor a literal
         if (line != 0) {
             if (data & (@as(u64, 1) << @intCast(i)) != 0) {
                 try writeLiteral(&text, word);
-            } else try write(&text, word, @intCast(i));
+            } else try write(&text, word, address);
         }
-        try writer.print("{x:0>3} {x:0>5}", .{ i, @as(u18, @bitCast(word)) });
+        try writer.print("{x:0>3} {x:0>5}", .{ address, @as(u18, @bitCast(word)) });
         if (line != 0 and line != previous) {
             try writer.print("  {s:<24}{d:>4}  {s}", .{ text.buffered(), line, lines.get(line) });
         } else if (text.end != 0) try writer.print("  {s}", .{text.buffered()});

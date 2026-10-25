@@ -1,0 +1,9 @@
+\ echo.af - copy console input to the console until the input ends, as
+\ echo.ga does in arrayForth 3
+\
+\ Reading the up port takes a byte of input from the console, and writing
+\ the up port outputs a byte.
+
+ASM[ # 0 NODE ERS  # 0 org
+: main  up b!  begin @b !b again
+>BIN ]ASM

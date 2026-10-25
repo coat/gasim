@@ -426,6 +426,67 @@ pub fn load(self: *Chip, program: assembler.Program) error{NoSuchNode}!void {
     program.load(self.node(program.node) orelse return error.NoSuchNode);
 }
 
+/// Sets up a node as a boot descriptor says, without a boot stream: loads
+/// its RAM from `programs`, sets its registers, pushes onto its stacks and
+/// starts it at P. Set up nodes before stepping the chip.
+pub fn setUp(self: *Chip, descriptor: boot.Descriptor, programs: []const assembler.Program) error{ NoSuchNode, NoSuchBin }!void {
+    const n = self.node(descriptor.node) orelse return error.NoSuchNode;
+    for (descriptor.loads[0..descriptor.load_count]) |part| {
+        const program = boot.findBin(programs, part.bin) orelse return error.NoSuchBin;
+        @memcpy(n.mem[part.destination..][0..part.len], program.ram[part.source..][0..part.len]);
+    }
+    if (descriptor.io) |io| n.io = io;
+    if (descriptor.a) |a| n.a = a;
+    if (descriptor.b) |b| n.b = @truncate(@as(u18, @bitCast(b)));
+    for (descriptor.return_stack[0..descriptor.return_stack_len]) |value| n.return_stack.push(value);
+    for (descriptor.stack[0..descriptor.stack_len]) |value| n.data_stack.push(value);
+    n.p = @bitCast(descriptor.p);
+}
+
+/// Has a node that is waiting for code from a port execute an instruction
+/// word instead, as arrayForth 3's IDE gives words to a node through a port.
+/// The node stops waiting on the port, and runs the word as if called from
+/// it, with the port's address pushed onto the return stack: a return goes
+/// back to the port, as does running off the end of the word, to wait for
+/// code again. So `op ; ; ;` runs an opcode, and a jump runs code that
+/// returns to the port.
+pub fn execute(self: *Chip, i: u16, word: Word) error{NotWaitingForCode}!void {
+    const n = &self.nodes[i];
+    if (n.status() != .code) return error.NotWaitingForCode;
+    const ports = port.select(@bitCast(n.p.address)) orelse return error.NotWaitingForCode;
+    // a word already delivered to the node is code it will run first, so
+    // check every port before withdrawing the node's reads from any
+    var it = ports.iterator();
+    while (it.next()) |direction| {
+        const link = n.ports[@backingInt(direction)];
+        const p = link.port orelse continue;
+        if (p.state == .delivered and p.state.delivered.side == link.side) return error.NotWaitingForCode;
+    }
+    it = ports.iterator();
+    while (it.next()) |direction| {
+        const link = n.ports[@backingInt(direction)];
+        if (link.port) |p| p.cancelRead(link.side);
+    }
+    n.return_stack.push(n.p.toWord());
+    n.i = word;
+    n.word_address = n.p.address;
+    n.slot = 0;
+    n.state = .execution;
+    n.suspended = false;
+    self.wake(i);
+}
+
+/// Steps the chip until node `i` waits for code from a port, for at most
+/// `limit` rounds. Returns false if it did not, because it was still
+/// running or every node was waiting on something else.
+pub fn runUntilWaiting(self: *Chip, i: u16, limit: usize) !bool {
+    for (0..limit) |_| {
+        if (self.nodes[i].status() == .code) return true;
+        if (!try self.advance()) break;
+    }
+    return self.nodes[i].status() == .code;
+}
+
 /// Attaches a console to a port of a node that faces off the array
 pub fn attachConsole(self: *Chip, console: *Console, number: u16, direction: Direction) error{ NoSuchNode, PortConnected }!void {
     const i = self.layout.index(number) orelse return error.NoSuchNode;
@@ -631,7 +692,28 @@ pub fn expectOutput(source: []const u8, input: []const u8, expected: []const u8)
     var programs: [8]assembler.Program = undefined;
     var diagnostic: assembler.Diagnostic = .{};
     for (try assembler.assembleNodes(source, &programs, &diagnostic)) |program| try chip.load(program);
+    try expectRun(&chip, input, expected);
+}
 
+/// As `expectOutput`, for arrayForth 3 source, with each bin loaded into its
+/// own node unless boot descriptors say otherwise
+pub fn expectArrayForthOutput(source: []const u8, input: []const u8, expected: []const u8) !void {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+
+    var programs: [8]assembler.Program = undefined;
+    var descriptors: [8]boot.Descriptor = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try arrayforth.assembleNodes(source, &programs, &descriptors, &diagnostic);
+    if (assembled.descriptors.len > 0) {
+        for (assembled.descriptors) |descriptor| try chip.setUp(descriptor, assembled.programs);
+    } else for (assembled.programs) |program| if (program.bin == null) try chip.setUp(.ofProgram(program), assembled.programs);
+    try expectRun(&chip, input, expected);
+}
+
+/// runs a chip with the console on node 000's up port, with `input`, and
+/// checks its output
+fn expectRun(chip: *Chip, input: []const u8, expected: []const u8) !void {
     var input_buffer: [256]u8 = undefined;
     var input_queue = try Console.testInput(&input_buffer, input);
     var buffer: [256]u8 = undefined;
@@ -1023,6 +1105,64 @@ test "traces a node waiting on a port once" {
     , writer.buffered());
 }
 
+test "executes words from a port, as the IDE does" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    const program = try assembler.assemble(": inc 1 + ; : spin begin again", &diagnostic);
+    // node 000 executes from its left port, which faces off the chip
+    var descriptor: boot.Descriptor = .ofProgram(program);
+    descriptor.p = 0x175;
+    try chip.setUp(descriptor, &.{program});
+    const i = chip.layout.index(0).?;
+    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+
+    // code jumped to returns to the port, where the node waits for code
+    // again, with its return stack as it was
+    chip.nodes[i].data_stack.push(5);
+    chip.nodes[i].return_stack.push(9);
+    try chip.execute(i, Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }, 0, 0));
+    try std.testing.expect(try chip.runUntilWaiting(i, 100));
+    try std.testing.expectEqual(6, chip.nodes[i].data_stack.t);
+    try std.testing.expectEqual(9, chip.nodes[i].return_stack.t);
+    try std.testing.expectEqual(0x175, @as(u9, @bitCast(chip.nodes[i].p.address)));
+
+    // as does an opcode followed by returns
+    try chip.execute(i, Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }));
+    try std.testing.expect(try chip.runUntilWaiting(i, 100));
+    try std.testing.expectEqual(6, chip.nodes[i].data_stack.s);
+    try std.testing.expectEqual(9, chip.nodes[i].return_stack.t);
+
+    // code that does not come back leaves the node running
+    try chip.execute(i, Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }, 0, 2));
+    try std.testing.expect(!try chip.runUntilWaiting(i, 100));
+    try std.testing.expectError(error.NotWaitingForCode, chip.execute(i, 0));
+}
+
+test "words are only refused for code delivered to the node" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    // node 101 waits for code on all four of its ports
+    try chip.setUp(.{ .node = 101, .p = 0x1a5 }, &.{});
+    const i = chip.layout.index(101).?;
+    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    const n = &chip.nodes[i];
+    const right = n.ports[@backingInt(Direction.right)];
+    const left = n.ports[@backingInt(Direction.left)];
+
+    // a word delivered to the node's neighbour is not code for it
+    right.port.?.state = .{ .delivered = .{ .side = right.side.other(), .value = 1 } };
+    try chip.execute(i, 0x15555);
+    try std.testing.expectEqual(right.side.other(), right.port.?.state.delivered.side);
+
+    // but one delivered to it is, and its other reads are left as they were
+    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    right.port.?.state = .{ .delivered = .{ .side = right.side, .value = 1 } };
+    try std.testing.expectEqual(Port.State{ .reading = left.side }, left.port.?.state);
+    try std.testing.expectError(error.NotWaitingForCode, chip.execute(i, 0x15555));
+    try std.testing.expectEqual(Port.State{ .reading = left.side }, left.port.?.state);
+}
+
 test "stops when interrupted" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
     defer chip.deinit(std.testing.allocator);
@@ -1046,7 +1186,9 @@ test "stops when interrupted" {
     try std.testing.expectEqualStrings("\x01", writer.buffered());
 }
 
+const arrayforth = @import("arrayforth.zig");
 const assembler = @import("assembler.zig");
+const boot = @import("boot.zig");
 const disassembler = @import("disassembler.zig");
 const ga144 = @import("ga144.zig");
 const Console = @import("Console.zig");

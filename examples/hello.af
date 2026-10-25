@@ -1,0 +1,17 @@
+\ hello.af - print a greeting, as hello.ga does in arrayForth 3
+\
+\ The console is attached to the up port of node 000, which faces off the
+\ south edge of the chip. Each word written to it is output as a byte.
+\ Labels must be defined before they are used, so the message comes first,
+\ and # leaves each number for , to lay down rather than assembling it.
+
+ASM[ # 0 NODE ERS  # 0 org
+: message  # 13. ,                                \ the length - 1
+   # 72. , # 101. , # 108. , # 108. , # 111. , # 44. , # 32. ,    \ Hello,
+   # 119. , # 111. , # 114. , # 108. , # 100. , # 33. , # 10. ,   \ world!
+: main
+   up b!                                  \ B addresses the console
+   # message alit a!                      \ A walks through the message
+   @+ for @+ !b unext                     \ the first word is the length - 1
+   left b! @b                             \ left faces off the west edge, so wait forever
+>BIN ]ASM

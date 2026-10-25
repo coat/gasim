@@ -37,19 +37,19 @@ pub fn romWords(rom_type: RomType) []const RomWord {
         .basic => &.{
             .{ "relay", 0xa1 },    .{ "warm", 0xa9 },     .{ "poly", 0xaa },
             .{ "*.17", 0xb0 },     .{ "*.", 0xb7 },       .{ "taps", 0xbc },
-            .{ "interp", 0xc4 },   .{ "triangle", 0xce }, .{ "clc", 0xd3 },
+            .{ "interp", 0xc4 },   .{ "triangle", 0xce }, .{ "clc", 0x2d3 },
             .{ "--u/mod", 0x2d5 }, .{ "-u/mod", 0x2d6 },
         },
         .analog => &.{
             .{ "relay", 0xa1 },    .{ "warm", 0xa9 },     .{ "poly", 0xaa },
             .{ "*.17", 0xb0 },     .{ "*.", 0xb7 },       .{ "-dac", 0xbc },
-            .{ "interp", 0xc4 },   .{ "triangle", 0xce }, .{ "clc", 0xd3 },
+            .{ "interp", 0xc4 },   .{ "triangle", 0xce }, .{ "clc", 0x2d3 },
             .{ "--u/mod", 0x2d5 }, .{ "-u/mod", 0x2d6 },
         },
         .serdes_boot => &.{
             .{ "relay", 0xa1 },    .{ "warm", 0xa9 },     .{ "cold", 0xaa },
             .{ "*.17", 0xb0 },     .{ "*.", 0xb7 },       .{ "taps", 0xbc },
-            .{ "interp", 0xc4 },   .{ "triangle", 0xce }, .{ "clc", 0xd3 },
+            .{ "interp", 0xc4 },   .{ "triangle", 0xce }, .{ "clc", 0x2d3 },
             .{ "--u/mod", 0x2d5 }, .{ "-u/mod", 0x2d6 },
         },
         .sync_boot => &.{
@@ -63,7 +63,7 @@ pub fn romWords(rom_type: RomType) []const RomWord {
         .spi_boot => &.{ .{ "relay", 0xa1 }, .{ "warm", 0xa9 }, .{ "cold", 0xaa } },
         .one_wire => &.{
             .{ "warm", 0xa9 },     .{ "cold", 0xaa },    .{ "triangle", 0xbe },
-            .{ "*.17", 0xc3 },     .{ "*.", 0xca },      .{ "clc", 0xcf },
+            .{ "*.17", 0xc3 },     .{ "*.", 0xca },      .{ "clc", 0x2cf },
             .{ "--u/mod", 0x2d1 }, .{ "-u/mod", 0x2d2 },
         },
         .special => &.{.{ "warm", 0xa9 }},

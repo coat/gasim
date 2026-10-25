@@ -10,11 +10,26 @@
 //!     123 ,           compile a number into memory as data
 //!     "text"          compile each byte of text into memory as data
 //!     0x10 org        continue assembling at an address
+//!     ..              fill the rest of the instruction word with nops
+//!     2 <sl           make the next opcode go in slot 0 or 1, starting a new
+//!                     instruction word if needed
 //!     begin again     loop forever
+//!     begin until     loop until T is nonzero
+//!     begin -until    loop until T is negative
+//!     begin while repeat
+//!                     loop while T is nonzero, or with -while while T is
+//!                     negative
 //!     for next        loop R+1 times
 //!     for unext       loop R+1 times within a single instruction word
+//!     for -if *next then
+//!                     loop R+1 times, leaving the loop when T is positive
 //!     if then         skip ahead when T is zero
 //!     -if then        skip ahead when T is positive
+//!     zif then        skip ahead when R is nonzero, decrementing it, or
+//!                     otherwise drop R
+//!     ahead then      skip ahead
+//!     leap then       call ahead
+//!     if else then    skip ahead to after else, which skips ahead to then
 //!     io right rdlu   push the address of the io register, a port or multiport
 //!     \ comment       comment to the end of the line
 //!     ( comment )     comment
@@ -30,15 +45,28 @@
 pub const Program = struct {
     /// node number, yxx
     node: u16 = 0,
+    /// the bin arrayForth 3's BIN saved the program as, or null for the
+    /// node's own bin. Only programs in their node's own bin are loaded.
+    bin: ?u32 = null,
     ram: [64]Word,
     /// number of words used, from address 0
     len: u7,
     /// the source line each word was assembled from, or 0 for an unused
     /// word. Lines past the largest number that fits get that number.
-    lines: [64]u16 = @splat(0),
+    lines: [64]u32 = @splat(0),
     entry: Address,
     /// where the program first calls a ROM word, which needs the node's ROM
     rom_word: ?Diagnostic = null,
+    /// code assembled into ROM by arrayForth 3, as for checking a chip's ROM
+    rom: ?Rom = null,
+
+    pub const Rom = struct {
+        /// x080 to x0bf
+        words: [64]Word,
+        lines: [64]u32,
+        /// number of words used, from x080
+        len: u7,
+    };
 
     /// Copies the program into the RAM of `node` and starts it at the entry
     pub fn load(self: Program, node: *Computer) void {
@@ -53,26 +81,19 @@ pub const Diagnostic = struct {
     token: []const u8 = "",
 };
 
-pub const Error = error{
+pub const Error = Builder.Error || error{
     UnknownWord,
     MissingLabelName,
     UnterminatedComment,
     UnterminatedString,
-    NumberOutOfRange,
-    ProgramTooLarge,
-    TooManyLabels,
-    DuplicateLabel,
     /// a label named like an opcode, port, number or other word
     ReservedLabel,
-    UndefinedLabel,
     /// a control structure word without its matching begin, for or if
     UnmatchedControl,
     /// begin, for or if without its closing word
     UnclosedControl,
     /// begin, for and if nested too deeply
     ControlTooDeep,
-    /// the body of a for unext loop must fit in one instruction word
-    UnextBodyTooLong,
     /// node without a number from 0 to 9999
     InvalidNode,
     DuplicateNode,
@@ -97,7 +118,7 @@ pub fn assembleNodes(source: []const u8, programs: []Program, diagnostic: *Diagn
     while (true) {
         var assembler: Assembler = .{ .tokens = &tokens, .diagnostic = diagnostic, .node = node.number };
         const next_node = try assembler.run();
-        if (assembler.len > 0) {
+        if (assembler.builder.len > 0) {
             errdefer diagnostic.* = node.diagnostic;
             for (programs[0..count]) |program| if (program.node == node.number) return error.DuplicateNode;
             if (count == programs.len) return error.TooManyNodes;
@@ -138,31 +159,11 @@ const constants = [_]struct { []const u8, u9 }{
     .{ "rdlu", 0x1a5 },
 };
 
-const nops: Instruction = .{ .slot_0 = .@".", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 };
-
-const Location = struct { address: u6, slot: Slot };
-
-const Label = struct {
-    name: []const u8,
-    /// null until the label is defined. A label at the end of a full RAM is
-    /// at 64, which P reaches by running off the end.
-    address: ?u7,
-};
-
-/// a reference to a label that is resolved once all labels are defined
-const Fixup = struct {
-    /// a jump in a slot, or a literal word
-    slot: ?Slot,
-    address: u6,
-    label: u8,
-    line: usize,
-};
-
 const Control = union(enum) {
     /// address jumped back to by again, next and unext
-    begin: u6,
+    begin: u7,
     /// jump patched by then
-    forward: Location,
+    forward: Builder.Location,
 };
 
 const Assembler = struct {
@@ -171,24 +172,9 @@ const Assembler = struct {
     /// number of the node being assembled, which decides its ROM words
     node: u16,
 
-    ram: [64]Word = @splat(0),
-    lines: [64]u16 = @splat(0),
-    /// next free address, up to 64
-    here: u7 = 0,
-    len: u7 = 0,
-
-    /// address of the instruction word being packed
-    word: ?u6 = null,
-    slot: u2 = 0,
-    instruction: Instruction = nops,
-    /// the call that a following ; turns into a jump
-    last_call: ?Location = null,
+    builder: Builder = .{},
     rom_word: ?Diagnostic = null,
 
-    labels: [64]Label = undefined,
-    label_count: u8 = 0,
-    fixups: [64]Fixup = undefined,
-    fixup_count: u8 = 0,
     control: [16]Control = undefined,
     control_count: u8 = 0,
 
@@ -222,44 +208,27 @@ const Assembler = struct {
     fn program(self: Assembler, node: u16) Program {
         return .{
             .node = node,
-            .ram = self.ram,
-            .len = self.len,
-            .lines = self.lines,
-            .entry = .{
-                .io = false,
-                .rom = false,
-                .local = if (self.find("main")) |main| self.labels[main].address orelse 0 else 0,
-            },
+            .ram = self.builder.mem[0..64].*,
+            .len = self.builder.len,
+            .lines = self.builder.lines[0..64].*,
+            .entry = .{ .io = false, .rom = false, .local = self.builder.labelAddress("main") orelse 0 },
             .rom_word = self.rom_word,
         };
     }
 
     /// resolves references once all of a node's words are assembled
     fn finish(self: *Assembler) Error!void {
-        self.finishWord();
-
         if (self.control_count != 0) {
             self.diagnostic.* = .{ .line = self.tokens.line };
             return error.UnclosedControl;
         }
-
-        for (self.fixups[0..self.fixup_count]) |fixup| {
-            const label = self.labels[fixup.label];
-            const destination = label.address orelse {
-                self.diagnostic.* = .{ .line = fixup.line, .token = label.name };
-                return error.UndefinedLabel;
-            };
-            if (fixup.slot) |slot| {
-                self.patch(.{ .address = fixup.address, .slot = slot }, destination);
-            } else {
-                self.ram[fixup.address] = destination;
-            }
-        }
+        try self.builder.finish(self.diagnostic);
     }
 
     fn next(self: *Assembler) Error!?[]const u8 {
         const token = self.tokens.next() catch |err| return self.tokenError(self.tokens.*, err);
         self.diagnostic.* = .{ .line = self.tokens.start_line, .token = token orelse return null };
+        self.builder.line = self.tokens.start_line;
         return token;
     }
 
@@ -275,186 +244,75 @@ const Assembler = struct {
     }
 
     fn compile(self: *Assembler, token: []const u8) Error!void {
-        const call = self.last_call;
-        self.last_call = null;
-
+        const b = &self.builder;
         if (eql(token, ":")) {
             const name = try self.next() orelse return error.MissingLabelName;
-            try self.define(name);
+            if (reserved(name) or ga144.romWord(self.node, name) != null) return error.ReservedLabel;
+            try b.define(name);
         } else if (eql(token, ";")) {
-            if (call) |location| {
-                // tail call: jump instead of call and return
-                self.ram[location.address] ^= switch (location.slot) {
-                    0 => 1 << 13,
-                    1 => 1 << 8,
-                    else => 1 << 3,
-                };
-            } else {
-                try self.emit(.@";");
-                self.finishWord();
-            }
-        } else if (eql(token, "ex")) {
-            try self.emit(.ex);
-            self.finishWord();
+            try b.ret();
         } else if (eql(token, "begin")) {
-            try self.begin();
+            try self.pushControl(.{ .begin = try b.begin() });
         } else if (eql(token, "again")) {
-            _ = try self.emitJump(.jump, try self.popBegin());
+            try b.back(.jump, try self.popBegin());
         } else if (eql(token, "for")) {
-            try self.emit(.@">r");
-            try self.begin();
+            try b.emit(.@">r");
+            try self.pushControl(.{ .begin = try b.begin() });
         } else if (eql(token, "next")) {
-            _ = try self.emitJump(.next, try self.popBegin());
+            try b.back(.next, try self.popBegin());
         } else if (eql(token, "unext")) {
-            const begin_address = try self.popBegin();
-            if ((self.word orelse self.here) != begin_address) return error.UnextBodyTooLong;
-            try self.emit(.unext);
-        } else if (eql(token, "if") or eql(token, "-if")) {
-            const location = try self.emitJump(if (eql(token, "if")) .@"if" else .@"-if", null);
-            try self.pushControl(.{ .forward = location });
+            try b.unext(try self.popBegin());
+        } else if (forwards.get(token)) |opcode| {
+            try self.pushControl(.{ .forward = try b.forward(opcode) });
         } else if (eql(token, "then")) {
-            if (self.control_count == 0 or self.control[self.control_count - 1] != .forward) {
-                return error.UnmatchedControl;
-            }
-            self.control_count -= 1;
-            self.finishWord();
-            self.patch(self.control[self.control_count].forward, self.here);
+            try b.then(try self.popForward());
+        } else if (eql(token, "else")) {
+            const location = try self.popForward();
+            try self.pushControl(.{ .forward = try b.forward(.jump) });
+            try b.then(location);
+        } else if (eql(token, "while") or eql(token, "-while")) {
+            // the forward jump goes under the begin it leaves
+            const destination = try self.popBegin();
+            try self.pushControl(.{ .forward = try b.forward(if (eql(token, "while")) .@"if" else .@"-if") });
+            try self.pushControl(.{ .begin = destination });
+        } else if (eql(token, "until") or eql(token, "-until")) {
+            try b.back(if (eql(token, "until")) .@"if" else .@"-if", try self.popBegin());
+        } else if (eql(token, "repeat")) {
+            try b.back(.jump, try self.popBegin());
+            try b.then(try self.popForward());
+        } else if (eql(token, "*next")) {
+            // a next back past a forward jump, which stays unresolved
+            const location = try self.popForward();
+            try b.back(.next, try self.popBegin());
+            try self.pushControl(.{ .forward = location });
+        } else if (eql(token, "..")) {
+            b.alignWord();
         } else if (token[0] == '"') {
-            self.finishWord();
-            for (token[1 .. token.len - 1]) |byte| self.ram[try self.alloc()] = byte;
+            for (token[1 .. token.len - 1]) |byte| try b.data(byte);
         } else if (token[0] == '\'' and token.len > 1) {
-            try self.emit(.@"@p");
-            const word = try self.alloc();
             if (self.romWord(token[1..])) |destination| {
-                self.ram[word] = destination;
-                return;
-            }
-            const label = try self.reference(token[1..]);
-            if (self.labels[label].address) |destination| {
-                self.ram[word] = destination;
-            } else try self.addFixup(.{ .slot = null, .address = word, .label = label, .line = self.tokens.line });
+                try b.literal(destination);
+            } else try b.literalLabel(token[1..]);
         } else if (constant(token)) |value| {
-            try self.literal(value);
+            try b.literal(value);
         } else if (std.meta.stringToEnum(Opcode, token)) |opcode| switch (opcode) {
             .jump, .call => return error.UnknownWord,
-            else => try self.emit(opcode),
+            else => try b.emit(opcode),
         } else if (try number(token)) |value| {
             const following = try self.peek();
             if (following != null and eql(following.?, ",")) {
                 _ = try self.next();
-                self.finishWord();
-                self.ram[try self.alloc()] = value;
+                try b.data(value);
             } else if (following != null and eql(following.?, "org")) {
                 _ = try self.next();
-                self.finishWord();
-                if (value < 0 or value >= 64) return error.NumberOutOfRange;
-                self.here = @intCast(value);
-            } else try self.literal(value);
-        } else {
-            if (self.romWord(token)) |destination| {
-                self.last_call = try self.emitJump(.call, destination);
-                return;
-            }
-            const label = try self.reference(token);
-            const known = self.labels[label].address;
-            const location = try self.emitJump(.call, if (known) |a| a else null);
-            if (self.labels[label].address == null) {
-                try self.addFixup(.{ .slot = location.slot, .address = location.address, .label = label, .line = self.tokens.line });
-            }
-            self.last_call = location;
-        }
-    }
-
-    /// address of the next word, which must exist
-    fn address(self: *Assembler) Error!u6 {
-        if (self.here >= 64) return error.ProgramTooLarge;
-        return @intCast(self.here);
-    }
-
-    fn alloc(self: *Assembler) Error!u6 {
-        const result = try self.address();
-        self.lines[result] = @intCast(@min(self.tokens.start_line, std.math.maxInt(u16)));
-        self.here += 1;
-        self.len = @max(self.len, self.here);
-        return result;
-    }
-
-    fn startWord(self: *Assembler) Error!void {
-        self.word = try self.alloc();
-        self.slot = 0;
-        self.instruction = nops;
-    }
-
-    /// stores the instruction word being packed, leaving unused slots as nops
-    fn finishWord(self: *Assembler) void {
-        const word = self.word orelse return;
-        self.ram[word] = self.instruction.encode();
-        self.word = null;
-    }
-
-    fn setSlot(self: *Assembler, opcode: Opcode) void {
-        switch (self.slot) {
-            0 => self.instruction.slot_0 = opcode,
-            1 => self.instruction.slot_1 = opcode,
-            2 => self.instruction.slot_2 = opcode,
-            3 => self.instruction.slot_3 = @intCast(@backingInt(opcode) >> 2),
-        }
-    }
-
-    fn emit(self: *Assembler, opcode: Opcode) Error!void {
-        if (self.word == null) try self.startWord();
-        // only opcodes with their two low bits clear fit in slot 3
-        if (self.slot == 3 and @backingInt(opcode) & 3 != 0) {
-            self.finishWord();
-            try self.startWord();
-        }
-        self.setSlot(opcode);
-        if (self.slot == 3) self.finishWord() else self.slot += 1;
-    }
-
-    /// Compiles an opcode whose destination field fills the rest of the
-    /// instruction word, starting a new word if the destination is not
-    /// reachable from the current slot. A null destination is patched later.
-    fn emitJump(self: *Assembler, opcode: Opcode, destination: ?u10) Error!Location {
-        if (self.word == null) try self.startWord();
-        if (!self.reachable(destination)) {
-            self.finishWord();
-            try self.startWord();
-        }
-        self.setSlot(opcode);
-        const location: Location = .{ .address = self.word.?, .slot = self.slot };
-        self.ram[location.address] = self.instruction.encodeJump(location.slot, destination orelse 0);
-        self.word = null;
-        return location;
-    }
-
-    /// Unknown destinations are labels, which are in RAM
-    fn reachable(self: Assembler, destination: ?u10) bool {
-        return switch (self.slot) {
-            0 => true,
-            // slot 1 replaces the low 8 bits of P, reaching RAM and ROM but
-            // not Extended Arithmetic Mode
-            1 => if (destination) |d| d < 0x100 else true,
-            // slot 2 replaces the low 3 bits of P, which has been incremented
-            // past this word and its literals
-            2 => if (destination) |d| d < 0x100 and d >> 3 == self.here >> 3 else false,
-            3 => false,
-        };
-    }
-
-    fn patch(self: *Assembler, location: Location, destination: u7) void {
-        const word = &self.ram[location.address];
-        word.* = (word.* & ~Instruction.destinationMask(location.slot)) | destination;
-    }
-
-    fn literal(self: *Assembler, value: Word) Error!void {
-        try self.emit(.@"@p");
-        self.ram[try self.alloc()] = value;
-    }
-
-    fn begin(self: *Assembler) Error!void {
-        self.finishWord();
-        try self.pushControl(.{ .begin = try self.address() });
+                try b.org(value);
+            } else if (following != null and eql(following.?, "<sl")) {
+                _ = try self.next();
+                try b.limitSlot(value);
+            } else try b.literal(value);
+        } else if (self.romWord(token)) |destination| {
+            try b.call(destination);
+        } else try b.callLabel(token);
     }
 
     fn pushControl(self: *Assembler, control: Control) Error!void {
@@ -463,7 +321,7 @@ const Assembler = struct {
         self.control_count += 1;
     }
 
-    fn popBegin(self: *Assembler) Error!u6 {
+    fn popBegin(self: *Assembler) Error!u7 {
         if (self.control_count == 0 or self.control[self.control_count - 1] != .begin) {
             return error.UnmatchedControl;
         }
@@ -471,11 +329,12 @@ const Assembler = struct {
         return self.control[self.control_count].begin;
     }
 
-    fn find(self: Assembler, name: []const u8) ?u8 {
-        for (self.labels[0..self.label_count], 0..) |label, i| {
-            if (eql(label.name, name)) return @intCast(i);
+    fn popForward(self: *Assembler) Error!Builder.Location {
+        if (self.control_count == 0 or self.control[self.control_count - 1] != .forward) {
+            return error.UnmatchedControl;
         }
-        return null;
+        self.control_count -= 1;
+        return self.control[self.control_count].forward;
     }
 
     /// the address of a ROM word of the node, noting the first one used
@@ -484,29 +343,6 @@ const Assembler = struct {
         if (self.rom_word == null) self.rom_word = .{ .line = self.tokens.start_line, .token = name };
         return destination;
     }
-
-    /// returns the label with `name`, adding it as undefined if needed
-    fn reference(self: *Assembler, name: []const u8) Error!u8 {
-        if (self.find(name)) |label| return label;
-        if (self.label_count == self.labels.len) return error.TooManyLabels;
-        self.labels[self.label_count] = .{ .name = name, .address = null };
-        self.label_count += 1;
-        return self.label_count - 1;
-    }
-
-    fn define(self: *Assembler, name: []const u8) Error!void {
-        if (reserved(name) or ga144.romWord(self.node, name) != null) return error.ReservedLabel;
-        self.finishWord();
-        const label = &self.labels[try self.reference(name)];
-        if (label.address != null) return error.DuplicateLabel;
-        label.address = self.here;
-    }
-
-    fn addFixup(self: *Assembler, fixup: Fixup) Error!void {
-        if (self.fixup_count == self.fixups.len) return error.TooManyLabels;
-        self.fixups[self.fixup_count] = fixup;
-        self.fixup_count += 1;
-    }
 };
 
 fn constant(token: []const u8) ?Word {
@@ -514,8 +350,20 @@ fn constant(token: []const u8) ?Word {
     return null;
 }
 
+/// words that jump forward to a then, with the opcode they compile
+const forwards: std.StaticStringMap(Opcode) = .initComptime(.{
+    .{ "if", .@"if" },
+    .{ "-if", .@"-if" },
+    .{ "zif", .next },
+    .{ "ahead", .jump },
+    .{ "leap", .call },
+});
+
 /// words other than opcodes and constants that compile takes before labels
-const keywords = [_][]const u8{ ":", ",", "org", "begin", "again", "for", "then", "node" };
+const keywords = [_][]const u8{
+    ":",     ",",      "org",   "<sl",    "..",     "begin", "again", "for",   "then", "else",
+    "while", "-while", "until", "-until", "repeat", "*next", "zif",   "ahead", "leap", "node",
+};
 
 /// True for names that would compile as something other than a label
 fn reserved(name: []const u8) bool {
@@ -645,7 +493,7 @@ test "source lines" {
     var diagnostic: Diagnostic = .{};
     // an instruction word is from the line it starts on
     const program = try assemble("5 dup\ndrop\n\n7 ,", &diagnostic);
-    try std.testing.expectEqualSlices(u16, &.{ 1, 1, 4, 0 }, program.lines[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1, 4, 0 }, program.lines[0..4]);
 }
 
 test "labels, calls and tail calls" {
@@ -703,6 +551,67 @@ test "control structures" {
     });
 }
 
+test "loops that end on a condition" {
+    try expectAssembles("begin dup until", &.{
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .@"if", .slot_2 = .@".", .slot_3 = 7 }, 1, 0),
+    });
+    try expectAssembles("begin dup -until", &.{
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .@"-if", .slot_2 = .@".", .slot_3 = 7 }, 1, 0),
+    });
+    try expectAssembles("begin dup while drop repeat dup", &.{
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .@"if", .slot_2 = .@".", .slot_3 = 7 }, 1, 2),
+        Instruction.encodeJump(.{ .slot_0 = .drop, .slot_1 = .jump, .slot_2 = .@".", .slot_3 = 7 }, 1, 0),
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    try expectAssembles("begin -while again then", &.{
+        Instruction.encodeJump(.{ .slot_0 = .@"-if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
+        Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 0),
+    });
+    // a next back to the start of the loop, past a -if out of it
+    try expectAssembles("for dup -if *next then drop", &.{
+        Instruction.encode(.{ .slot_0 = .@">r", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .@"-if", .slot_2 = .@".", .slot_3 = 7 }, 1, 3),
+        Instruction.encodeJump(.{ .slot_0 = .next, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 1),
+        Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+}
+
+test "jumps ahead" {
+    try expectAssembles("ahead dup then", &.{
+        Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    // zif is next going forward
+    try expectAssembles("zif then", &.{
+        Instruction.encodeJump(.{ .slot_0 = .next, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 1),
+    });
+    // leap calls ahead, so a return after it is not a tail call
+    try expectAssembles("leap ; then dup ;", &.{
+        Instruction.encodeJump(.{ .slot_0 = .call, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
+        Instruction.encode(.{ .slot_0 = .@";", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@";", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    try expectAssembles("if dup else drop then", &.{
+        Instruction.encodeJump(.{ .slot_0 = .@"if", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 2),
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .jump, .slot_2 = .@".", .slot_3 = 7 }, 1, 3),
+        Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+}
+
+test "slot alignment" {
+    try expectAssembles("dup .. dup", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    try expectAssembles("dup dup 2 <sl drop", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .dup, .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
+    try expectAssembles("dup 2 <sl drop", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .drop, .slot_2 = .@".", .slot_3 = 7 }),
+    });
+}
+
 test "jumps move to a new word when the destination is out of reach" {
     // a forward reference needs at least slot 1
     try expectAssembles("dup dup -if then", &.{
@@ -740,7 +649,16 @@ test "errors" {
     try expectError(error.ProgramTooLarge, "63 org 1 ,  2 ,");
     try expectError(error.UnmatchedControl, "then");
     try expectError(error.UnmatchedControl, "if next");
+    try expectError(error.UnmatchedControl, "else");
+    try expectError(error.UnmatchedControl, "if while");
+    try expectError(error.UnmatchedControl, "begin repeat");
+    try expectError(error.UnmatchedControl, "begin *next");
     try expectError(error.UnclosedControl, "begin");
+    try expectError(error.UnclosedControl, "begin while again");
+    try expectError(error.NumberOutOfRange, "0 <sl");
+    try expectError(error.NumberOutOfRange, "5 <sl");
+    try expectError(error.ReservedLabel, ": while");
+    try expectError(error.ReservedLabel, ": ..");
     try expectError(error.UnextBodyTooLong, "for dup dup dup dup unext");
     try expectError(error.ControlTooDeep, repeat("begin ", 17));
     try expectError(error.ReservedLabel, ": up");
@@ -783,6 +701,7 @@ test "labels and then at the end of RAM" {
     );
 }
 
+const Builder = @import("Builder.zig");
 const f18 = @import("f18.zig");
 const ga144 = @import("ga144.zig");
 const Address = f18.Address;
