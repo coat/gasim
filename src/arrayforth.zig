@@ -50,6 +50,8 @@
 //!     t IF{ ... {ELSE} ... }
 //!                       interpret the first part if t is nonzero, otherwise
 //!                       the second
+//!     { ... }           a comment
+//!     nn ZAP            erase a bin, which NODE does anyway
 //!
 //! Boot descriptors, from section 6.1.1 of DB013, say which bins to load
 //! into which nodes, and how to start them. Once a source has any, they
@@ -119,7 +121,13 @@ pub const Assembled = struct {
 /// Assembles the bins in `source` into `programs`, returning the programs
 /// saved with >BIN.
 pub fn assembleNodes(source: []const u8, programs: []Program, descriptors: []boot.Descriptor, diagnostic: *Diagnostic) Error!Assembled {
-    var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs, .descriptors = descriptors };
+    return assembleScript(source, null, programs, descriptors, diagnostic);
+}
+
+/// Assembles the bins in `source`, which may LOAD and THRU `blocks`, such as
+/// a script that loads parts of a disk
+pub fn assembleScript(source: []const u8, blocks: ?[]const u8, programs: []Program, descriptors: []boot.Descriptor, diagnostic: *Diagnostic) Error!Assembled {
+    var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs, .descriptors = descriptors, .blocks = blocks };
     interpreter.frames[0] = .{ .tokens = .{ .source = source } };
     try interpreter.run();
     return interpreter.assembled();
@@ -202,6 +210,12 @@ const Label = struct {
 /// Labels are told apart by their length and up to 7 characters
 fn sameLabel(a: []const u8, b: []const u8) bool {
     return a.len == b.len and std.mem.eql(u8, a[0..@min(a.len, 7)], b[0..@min(b.len, 7)]);
+}
+
+fn sameLabels(a: []const Label, b: []const Label) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (x.value != y.value or !eql(x.name, y.name)) return false;
+    return true;
 }
 
 /// the code and labels being assembled for a node
@@ -727,12 +741,18 @@ const Interpreter = struct {
             .rom_word = bin.rom_word,
         };
 
-        // keeps the bin's own labels, and refers to the ROM's
+        // keeps the bin's own labels, sharing them with a bin that has the
+        // same, such as the ROMs of nodes of a kind, and refers to the ROM's
         const own = bin.labels[bin.rom_labels.len..bin.label_count];
-        if (self.pool_len + own.len > self.label_pool.len) return error.TooManyLabels;
-        const labels = self.label_pool[self.pool_len..][0..own.len];
-        @memcpy(labels, own);
-        self.pool_len += @intCast(own.len);
+        const labels = for (self.saved[0..self.saved_count]) |saved| {
+            if (sameLabels(saved.labels, own)) break saved.labels;
+        } else copy: {
+            if (self.pool_len + own.len > self.label_pool.len) return error.TooManyLabels;
+            const copy = self.label_pool[self.pool_len..][0..own.len];
+            @memcpy(copy, own);
+            self.pool_len += @intCast(own.len);
+            break :copy copy;
+        };
         const saved_bin: SavedBin = .{ .number = bin.number, .rom_labels = bin.rom_labels, .labels = labels };
 
         bin.changed = false;
@@ -949,6 +969,8 @@ const Interpreter = struct {
             .@"IF{" => if (try self.pop() == 0) self.tokens().skipPast('}'),
             .@"{ELSE}" => self.tokens().skipPast('}'),
             .@"}" => {},
+            .@"{" => self.tokens().skipPast('}'),
+            .ZAP => _ = try self.pop(),
             .FORGET => {
                 const forget_name = try self.name();
                 self.name_count = self.findName(forget_name) orelse return error.UnknownWord;
@@ -1142,6 +1164,8 @@ const ForthWord = enum {
     @"IF{",
     @"{ELSE}",
     @"}",
+    @"{",
+    ZAP,
     @"+NODE",
     @"/RAM",
     @"/SOME",
@@ -1797,6 +1821,76 @@ test "boot descriptor errors" {
     try std.testing.expectError(error.TooManyLoads, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  0 1 1 /PART 0 1 1 /PART 0 1 1 /PART 0 1 1 /PART", &programs, &descriptors, &diagnostic));
     try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  60 5 1 /PART", &programs, &descriptors, &diagnostic));
     try std.testing.expectError(error.NumberOutOfRange, assembleNodes("1 +NODE  11 /STACK", &programs, &descriptors, &diagnostic));
+}
+
+/// Reads arrayForth 3's disk from rom/, skipping the test if it is missing,
+/// as it is GreenArrays' and not part of gasim
+fn testDisk(gpa: std.mem.Allocator) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => error.SkipZigTest,
+        else => |e| e,
+    };
+}
+
+test "the ROM source assembles to the chip's ROM" {
+    const gpa = std.testing.allocator;
+    var roms: [144]ga144.NodeRom = undefined;
+    const chip_roms = try ga144.testRom(&roms);
+    const disk = try testDisk(gpa);
+    defer gpa.free(disk);
+
+    // what block 2221 does with host code: names the blocks of the pieces
+    // the ROMs share, then loads each node's ROM block with its number,
+    // and then the blocks of the nodes with SDRAM and eForth ROMs
+    var script: std.Io.Writer.Allocating = .init(gpa);
+    defer script.deinit();
+    const writer = &script.writer;
+    for ([_][]const u8{ "POLY", "INTERP", "FILTER", "RELAY", "MPLY", "SHIFT", "TRIANG", ".MULT", "DIVIDE" }, 2232..) |name, block| {
+        try writer.print("{d} CONSTANT {s}\n", .{ block, name });
+    }
+    for (chip_roms) |rom| {
+        const block: u32 = switch (ga144.romType(rom.node)) {
+            .basic => 2222,
+            .serdes_boot => 2223,
+            .sync_boot => 2224,
+            .async_boot => 2225,
+            .spi_boot => 2227,
+            .analog => 2229,
+            .one_wire => 2230,
+            .special => continue,
+        };
+        try writer.print("{d} {d} LOAD\n", .{ rom.node, block });
+    }
+    try writer.writeAll("2241 LOAD\n");
+
+    const programs = try gpa.alloc(Program, 160);
+    defer gpa.free(programs);
+    var diagnostic: Diagnostic = .{};
+    const assembled = assembleScript(script.written(), disk, programs, &.{}, &diagnostic) catch |err| {
+        std.debug.print("{t} at block {d} line {d} '{s}'\n", .{ err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
+        return err;
+    };
+
+    var differences: usize = 0;
+    for (chip_roms) |rom| {
+        const program = for (assembled.programs) |*p| {
+            if (p.node == rom.node and p.bin == null) break p;
+        } else {
+            std.debug.print("node {d:0>3}: no ROM assembled\n", .{rom.node});
+            differences += 1;
+            continue;
+        };
+        const words = program.rom orelse {
+            std.debug.print("node {d:0>3}: no ROM assembled\n", .{rom.node});
+            differences += 1;
+            continue;
+        };
+        for (words.words, rom.words, 0x80..) |ours, theirs, address| if (ours != theirs) {
+            if (differences < 20) std.debug.print("node {d:0>3} {x:0>3}: assembled {x:0>5}, chip {x:0>5}\n", .{ rom.node, address, @as(u18, @bitCast(ours)), @as(u18, @bitCast(theirs)) });
+            differences += 1;
+        };
+    }
+    try std.testing.expectEqual(0, differences);
 }
 
 test "assembling into ROM" {

@@ -6,3 +6,6 @@ result
 zig-out/
 .zig-cache/
 zig-pkg/
+
+# arrayForth 3 disks, which are GreenArrays'
+rom/*.blk
