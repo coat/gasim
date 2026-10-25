@@ -178,11 +178,12 @@ pub fn main(init: std.process.Init) !void {
         fatal("{s}: has no ROM for node {d}, which nodes without their own ROM use", .{ rom_path orelse default_rom_path, ga144.basic_node });
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
+    const descriptor_buffer = try arena.alloc(gasim.boot.Descriptor, layout.count());
     var diagnostic: assembler.Diagnostic = .{};
-    const programs = (if (blocks)
-        gasim.arrayforth.assembleBlocks(file, loads[0..loads_len], program_buffer, &diagnostic)
+    const assembled = (if (blocks)
+        gasim.arrayforth.assembleBlocks(file, loads[0..loads_len], program_buffer, descriptor_buffer, &diagnostic)
     else
-        assemble(source_path, file, program_buffer, &diagnostic)) catch |err| {
+        assemble(source_path, file, program_buffer, descriptor_buffer, &diagnostic)) catch |err| {
         const where: Where = .{ .path = source_path, .line = diagnostic.line, .blocks = blocks };
         switch (err) {
             error.TooManyNodes => fatal("{f}: more nodes than a {d}x{d} layout has at '{s}'", .{ where, layout.rows, layout.columns, diagnostic.token }),
@@ -191,6 +192,7 @@ pub fn main(init: std.process.Init) !void {
         }
         fatal("{f}: {t} at '{s}'", .{ where, err, diagnostic.token });
     };
+    const programs = assembled.programs;
     for (programs) |program| if (layout.index(program.node) == null)
         fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, program.node, layout.rows, layout.columns });
     if (listing) {
@@ -203,22 +205,33 @@ pub fn main(init: std.process.Init) !void {
             try writer.print("node {d:0>3}\n", .{program.node});
             try gasim.disassembler.listing(writer, program, source);
         }
+        for (assembled.descriptors) |descriptor| try writer.print("\n{f}", .{descriptor});
         try writer.flush();
         return;
     }
-    // code saved in other bins than its node's is not loaded
-    var loaded: usize = 0;
-    for (programs) |program| if (program.bin == null) {
-        programs[loaded] = program;
-        loaded += 1;
+    // boot descriptors say what to load into nodes and how to start them.
+    // Without them, each program in its node's own bin is loaded and started
+    // at its entry, and code saved in other bins is not loaded.
+    const descriptors = if (assembled.descriptors.len > 0) assembled.descriptors else own: {
+        var count: usize = 0;
+        for (programs) |program| if (program.bin == null) {
+            descriptor_buffer[count] = .ofProgram(program);
+            count += 1;
+        };
+        break :own descriptor_buffer[0..count];
     };
-    const loadable = programs[0..loaded];
-    // each program is loaded from its bin and started at its entry
-    const descriptors = try arena.alloc(gasim.boot.Descriptor, loadable.len);
-    for (loadable, descriptors) |program, *descriptor| descriptor.* = .ofProgram(program);
+    for (descriptors) |descriptor| if (layout.index(descriptor.node) == null)
+        fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, descriptor.node, layout.rows, layout.columns });
 
-    if (roms == null) for (loadable) |program| if (program.rom_word) |word|
-        fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .blocks = blocks }, word.token });
+    if (roms == null) for (descriptors) |descriptor| {
+        for (descriptor.loads[0..descriptor.load_count]) |part| {
+            const program = gasim.boot.findBin(programs, part.bin) orelse continue;
+            if (program.rom_word) |word|
+                fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .blocks = blocks }, word.token });
+        }
+        if (descriptor.p & 0x180 == 0x080)
+            fatal("{s}: node {d:0>3} starts in ROM at {x:0>3}, which is not loaded (see --rom)", .{ source_path, descriptor.node, descriptor.p });
+    };
 
     for (breakpoints[0..breakpoints_len]) |b| {
         const index = layout.index(b.node) orelse
@@ -242,13 +255,16 @@ pub fn main(init: std.process.Init) !void {
         if (console_node == 1 and console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
         if (roms == null) fatal("--boot needs a ROM, for node 001 to boot from (see --rom)", .{});
         const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors));
-        feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, descriptors, loadable, buffer) catch |err| switch (err) {
+        feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, descriptors, programs, buffer) catch |err| switch (err) {
             error.NoSuchNode => fatal("--boot needs node 001, which is not in a {d}x{d} layout", .{ layout.rows, layout.columns }),
             error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
             else => |e| return e,
         };
         chip.attachFeeder(&feeder, 1, .up) catch fatal("--boot needs node 001's up port to face off the chip", .{});
-    } else for (descriptors) |descriptor| chip.setUp(descriptor, loadable) catch unreachable;
+    } else for (descriptors) |descriptor| chip.setUp(descriptor, programs) catch |err| switch (err) {
+        error.NoSuchBin => fatal("{s}: node {d:0>3} loads a bin that was not saved", .{ source_path, descriptor.node }),
+        error.NoSuchNode => unreachable,
+    };
 
     var stdin_buffer: [1024]u8 = undefined;
     var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -401,9 +417,15 @@ const Where = struct {
 };
 
 /// Assembles source in gasim's syntax, or in arrayForth 3's for .af files
-fn assemble(path: []const u8, source: []const u8, programs: []assembler.Program, diagnostic: *assembler.Diagnostic) gasim.arrayforth.Error![]assembler.Program {
-    if (std.mem.endsWith(u8, path, ".af")) return gasim.arrayforth.assembleNodes(source, programs, diagnostic);
-    return assembler.assembleNodes(source, programs, diagnostic);
+fn assemble(
+    path: []const u8,
+    source: []const u8,
+    programs: []assembler.Program,
+    descriptors: []gasim.boot.Descriptor,
+    diagnostic: *assembler.Diagnostic,
+) gasim.arrayforth.Error!gasim.arrayforth.Assembled {
+    if (std.mem.endsWith(u8, path, ".af")) return gasim.arrayforth.assembleNodes(source, programs, descriptors, diagnostic);
+    return .{ .programs = try assembler.assembleNodes(source, programs, diagnostic), .descriptors = &.{} };
 }
 
 const have_sigint = builtin.os.tag != .windows and builtin.os.tag != .wasi;

@@ -49,6 +49,28 @@
 //!                       interpret the first part if t is nonzero, otherwise
 //!                       the second
 //!
+//! Boot descriptors, from section 6.1.1 of DB013, say which bins to load
+//! into which nodes, and how to start them. Once a source has any, they
+//! decide what is loaded instead of each bin going into its own node:
+//!
+//!     nn +NODE          describe node nn, which by default starts at warm
+//!                       with B addressing IO
+//!     bin /RAM  a n bin /PART  s d n bin /SOME
+//!                       load all of a saved bin, n words of it at a, or n
+//!                       words from s into RAM at d, up to three loads
+//!     d /A  d /B  d /IO  a /P
+//!                       set registers and where the node starts
+//!     d.. n /STACK  d.. n /RSTACK  /RINF
+//!                       push up to 10 values onto the data stack and 9 onto
+//!                       the return stack, the last on top, or fill the
+//!                       return stack with -1s
+//!     nn !ND  a. b. p nn +ND  s d nn +wire
+//!                       load a node's own bin, and set A, B and P, or make
+//!                       it a wire from bin 1802
+//!     nn ITS name       the value of a label in a saved bin
+//!     UP DOWN LEFT RIGHT IO DATA LDATA NORTH SOUTH EAST WEST
+//!                       addresses, the cardinal ones for the +NODE node
+//!
 //! along with the opcodes ; ex @p @+ @b @ !p !+ !b ! +* 2* 2/ inv + and xor
 //! drop dup r> over a . >r b! a!, and ( ) and \ comments. Unused slots of a
 //! word that ends with a return or jump are left as returns, as arrayForth
@@ -76,22 +98,37 @@ pub const Error = assembler.Error || error{
     NoSuchBlock,
     /// blocks loading blocks too deeply
     LoadTooDeep,
+    /// a boot descriptor that loads a bin that has not been saved
+    NoSuchBin,
+    /// a boot descriptor such as /P before +NODE
+    NoBootNode,
+    /// boot descriptors for more nodes than there is space for
+    TooManyDescriptors,
+    /// more than three loads into one node's RAM
+    TooManyLoads,
+};
+
+/// the programs saved in bins, and the boot descriptors for nodes
+pub const Assembled = struct {
+    programs: []Program,
+    descriptors: []boot.Descriptor,
 };
 
 /// Assembles the bins in `source` into `programs`, returning the programs
 /// saved with >BIN.
-pub fn assembleNodes(source: []const u8, programs: []Program, diagnostic: *Diagnostic) Error![]Program {
-    var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs };
+pub fn assembleNodes(source: []const u8, programs: []Program, descriptors: []boot.Descriptor, diagnostic: *Diagnostic) Error!Assembled {
+    var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs, .descriptors = descriptors };
     interpreter.frames[0] = .{ .tokens = .{ .source = source } };
-    return interpreter.run();
+    try interpreter.run();
+    return interpreter.assembled();
 }
 
 /// Assembles the bins of polyFORTH blocks, loading each of `loads` in turn,
 /// such as a block of configuration and then the load block of an
 /// application. The line numbers of the programs and the diagnostic count
 /// 16 lines to a block, from line 1 of block 0.
-pub fn assembleBlocks(blocks: []const u8, loads: []const u32, programs: []Program, diagnostic: *Diagnostic) Error![]Program {
-    var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs, .blocks = blocks };
+pub fn assembleBlocks(blocks: []const u8, loads: []const u32, programs: []Program, descriptors: []boot.Descriptor, diagnostic: *Diagnostic) Error!Assembled {
+    var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs, .descriptors = descriptors, .blocks = blocks };
     for (loads) |load| {
         if (load >= blockCount(blocks)) {
             diagnostic.* = .{};
@@ -100,9 +137,9 @@ pub fn assembleBlocks(blocks: []const u8, loads: []const u32, programs: []Progra
         interpreter.frames[0] = .{ .tokens = blockTokens(blocks, load), .block = load, .last = load };
         interpreter.frame_count = 1;
         interpreter.assembling = false;
-        _ = try interpreter.run();
+        try interpreter.run();
     }
-    return programs[0..interpreter.count];
+    return interpreter.assembled();
 }
 
 pub const block_size = 1024;
@@ -145,7 +182,7 @@ const Frame = struct {
 /// Assembles the single bin in `source`
 pub fn assemble(source: []const u8, diagnostic: *Diagnostic) Error!Program {
     var programs: [1]Program = undefined;
-    const assembled = try assembleNodes(source, &programs, diagnostic);
+    const assembled = (try assembleNodes(source, &programs, &.{}, diagnostic)).programs;
     return if (assembled.len == 1) assembled[0] else .{ .ram = @splat(erased), .len = 0, .entry = .{ .io = false, .rom = false, .local = 0 } };
 }
 
@@ -236,6 +273,10 @@ const Interpreter = struct {
     diagnostic: *Diagnostic,
     programs: []Program,
     count: usize = 0,
+    descriptors: []boot.Descriptor,
+    descriptor_count: usize = 0,
+    /// the descriptor that +NODE selected
+    boot_node: ?usize = null,
 
     stack: [64]i32 = undefined,
     depth: usize = 0,
@@ -261,7 +302,11 @@ const Interpreter = struct {
     label_pool: [1024]Label = undefined,
     pool_len: u16 = 0,
 
-    fn run(self: *Interpreter) Error![]Program {
+    fn assembled(self: Interpreter) Assembled {
+        return .{ .programs = self.programs[0..self.count], .descriptors = self.descriptors[0..self.descriptor_count] };
+    }
+
+    fn run(self: *Interpreter) Error!void {
         while (try self.next()) |token| {
             if (eql(token, "EXIT") and !self.assembling) {
                 if (try self.endBlock()) continue else break;
@@ -270,7 +315,6 @@ const Interpreter = struct {
         }
         if (self.inline_word != null) return error.UnclosedInline;
         try self.checkSaved();
-        return self.programs[0..self.count];
     }
 
     /// fails if the bin has code or labels that were not saved
@@ -807,6 +851,89 @@ const Interpreter = struct {
                 const block = self.frames[self.frame_count - 1].block orelse return error.NoSuchBlock;
                 try self.push(@as(i32, @intCast(block)) +% offset);
             },
+            .@"+NODE" => try self.bootNode(try self.pop()),
+            .@"/RAM" => try self.loadRam(0, 0, 64, try self.pop()),
+            .@"/SOME" => {
+                const bin = try self.pop();
+                const len = try self.pop();
+                const destination = try self.pop();
+                try self.loadRam(try self.pop(), destination, len, bin);
+            },
+            .@"/PART" => {
+                const bin = try self.pop();
+                const len = try self.pop();
+                const address = try self.pop();
+                try self.loadRam(address, address, len, bin);
+            },
+            .@"/A" => (try self.bootDescriptor()).a = word18(try self.popDouble()),
+            .@"/B" => (try self.bootDescriptor()).b = word18(try self.popDouble()),
+            .@"/IO" => (try self.bootDescriptor()).io = word18(try self.popDouble()),
+            .@"/P" => {
+                const p = try self.pop();
+                if (p < 0 or p > 0x3ff) return error.NumberOutOfRange;
+                (try self.bootDescriptor()).p = @intCast(p);
+            },
+            .@"/STACK" => {
+                const d = try self.bootDescriptor();
+                d.stack_len = try self.popValues(&d.stack);
+            },
+            .@"/RSTACK" => {
+                const d = try self.bootDescriptor();
+                d.return_stack_len = try self.popValues(&d.return_stack);
+            },
+            .@"/RINF" => {
+                const d = try self.bootDescriptor();
+                d.return_stack = @splat(-1);
+                d.return_stack_len = d.return_stack.len;
+            },
+            .@"!ND" => {
+                const node_number = try self.pop();
+                try self.bootNode(node_number);
+                try self.loadRam(0, 0, 64, node_number);
+            },
+            .@"+ND" => {
+                const node_number = try self.pop();
+                try self.bootNode(node_number);
+                try self.loadRam(0, 0, 64, node_number);
+                const d = try self.bootDescriptor();
+                const p = try self.pop();
+                if (p < 0 or p > 0x3ff) return error.NumberOutOfRange;
+                d.p = @intCast(p);
+                d.b = word18(try self.popDouble());
+                d.a = word18(try self.popDouble());
+            },
+            .@"+wire" => {
+                // a wire from bin 1802, as in GreenArrays' small tools
+                try self.bootNode(try self.pop());
+                try self.loadRam(0, 0, 1, 1802);
+                const d = try self.bootDescriptor();
+                d.b = word18(try self.popDouble());
+                d.a = word18(try self.popDouble());
+                d.p = 0;
+                d.return_stack = @splat(-1);
+                d.return_stack_len = d.return_stack.len;
+            },
+            .ITS => {
+                const number_of_bin = try self.pop();
+                try self.push(try self.labelOf(number_of_bin, try self.name()));
+            },
+            .UP => try self.pushDouble(0x145),
+            .DOWN => try self.pushDouble(0x115),
+            .LEFT => try self.pushDouble(0x175),
+            .RIGHT => try self.pushDouble(0x1d5),
+            .IO => try self.pushDouble(0x15d),
+            .DATA => try self.pushDouble(0x141),
+            .LDATA => try self.pushDouble(0x171),
+            .NORTH, .SOUTH, .EAST, .WEST => {
+                const node_number = (try self.bootDescriptor()).node;
+                const odd = if (word == .EAST or word == .WEST) node_number % 2 == 1 else node_number / 100 % 2 == 1;
+                try self.pushDouble(switch (word) {
+                    .EAST => if (odd) 0x175 else 0x1d5,
+                    .WEST => if (odd) 0x1d5 else 0x175,
+                    .NORTH => if (odd) 0x145 else 0x115,
+                    else => if (odd) 0x115 else 0x145,
+                });
+            },
             .@"IF{" => if (try self.pop() == 0) self.tokens().skipPast('}'),
             .@"{ELSE}" => self.tokens().skipPast('}'),
             .@"}" => {},
@@ -815,6 +942,52 @@ const Interpreter = struct {
                 self.name_count = self.findName(forget_name) orelse return error.UnknownWord;
             },
         }
+    }
+
+    /// Selects the boot descriptor of a node, which starts at warm with B
+    /// addressing IO, as arrayForth 3's FRAME[ sets them
+    fn bootNode(self: *Interpreter, number_of_node: i32) Error!void {
+        if (number_of_node < 0 or number_of_node > 999999) return error.InvalidNode;
+        const node_number: u16 = @intCast(@rem(number_of_node, 10000));
+        for (self.descriptors[0..self.descriptor_count], 0..) |d, i| if (d.node == node_number) {
+            self.boot_node = i;
+            return;
+        };
+        if (self.descriptor_count == self.descriptors.len) return error.TooManyDescriptors;
+        self.descriptors[self.descriptor_count] = .{ .node = node_number, .b = Computer.io_address, .p = 0xa9 };
+        self.boot_node = self.descriptor_count;
+        self.descriptor_count += 1;
+    }
+
+    fn bootDescriptor(self: *Interpreter) Error!*boot.Descriptor {
+        return &self.descriptors[self.boot_node orelse return error.NoBootNode];
+    }
+
+    /// Adds a load of `len` words from address `source` of a saved bin into
+    /// RAM at `destination`. A load of all of RAM replaces any before it.
+    fn loadRam(self: *Interpreter, source: i32, destination: i32, len: i32, bin: i32) Error!void {
+        const d = try self.bootDescriptor();
+        if (len < 0 or source < 0 or destination < 0 or source + len > 64 or destination + len > 64) return error.NumberOutOfRange;
+        for (self.saved[0..self.saved_count]) |saved| {
+            if (saved.number == bin) break;
+        } else return error.NoSuchBin;
+        if (len == 64) d.load_count = 0;
+        if (d.load_count == d.loads.len) return error.TooManyLoads;
+        d.loads[d.load_count] = .{ .bin = @intCast(bin), .source = @intCast(source), .destination = @intCast(destination), .len = @intCast(len) };
+        d.load_count += 1;
+    }
+
+    /// Pops a count of up to `values.len` doubles and the doubles, the last
+    /// of which goes on top
+    fn popValues(self: *Interpreter, values: []Word) Error!u4 {
+        const n = try self.pop();
+        if (n < 1 or n > values.len) return error.NumberOutOfRange;
+        var i: usize = @intCast(n);
+        while (i > 0) {
+            i -= 1;
+            values[i] = word18(try self.popDouble());
+        }
+        return @intCast(n);
     }
 
     fn swap(self: *Interpreter) Error!void {
@@ -957,6 +1130,32 @@ const ForthWord = enum {
     @"IF{",
     @"{ELSE}",
     @"}",
+    @"+NODE",
+    @"/RAM",
+    @"/SOME",
+    @"/PART",
+    @"/A",
+    @"/B",
+    @"/IO",
+    @"/P",
+    @"/STACK",
+    @"/RSTACK",
+    @"/RINF",
+    @"!ND",
+    @"+ND",
+    @"+wire",
+    ITS,
+    UP,
+    DOWN,
+    LEFT,
+    RIGHT,
+    IO,
+    DATA,
+    LDATA,
+    NORTH,
+    SOUTH,
+    EAST,
+    WEST,
 };
 
 /// port and register addresses, which assemble literals
@@ -1173,8 +1372,10 @@ fn eql(a: []const u8, b: []const u8) bool {
 const assembler = @import("assembler.zig");
 const Diagnostic = assembler.Diagnostic;
 const Program = assembler.Program;
+const boot = @import("boot.zig");
 const Builder = @import("Builder.zig");
 const f18 = @import("f18.zig");
+const Computer = f18.Computer;
 const Instruction = f18.Instruction;
 const Slot = f18.Slot;
 const Word = f18.Word;
@@ -1288,11 +1489,11 @@ test "calls, tail calls and labels" {
 test "bins call each other with its" {
     var programs: [3]Program = undefined;
     var diagnostic: Diagnostic = .{};
-    const assembled = try assembleNodes(
+    const assembled = (try assembleNodes(
         \\ ASM[ # 1 NODE  # 4 org : a dup ; >BIN
         \\ # 2 NODE  # 1 its a ;  # 1 # its a alit >BIN
         \\ # 3 NODE  # 1600 BIN  # 1 its relay >BIN ]ASM
-    , &programs, &diagnostic);
+    , &programs, &.{}, &diagnostic)).programs;
     try std.testing.expectEqual(3, assembled.len);
     try std.testing.expectEqualSlices(Word, &.{
         jumpWord(.jump, .@";", .@";", 0, 4),
@@ -1306,10 +1507,10 @@ test "bins call each other with its" {
     try std.testing.expectEqual(jumpWord(.call, .@";", .@";", 0, 0xa1), assembled[2].ram[0]);
 
     // saving a bin again replaces it
-    const saved_twice = try assembleNodes("ASM[ # 1 NODE dup >BIN  # 1 NODE drop >BIN", &programs, &diagnostic);
+    const saved_twice = (try assembleNodes("ASM[ # 1 NODE dup >BIN  # 1 NODE drop >BIN", &programs, &.{}, &diagnostic)).programs;
     try std.testing.expectEqual(1, saved_twice.len);
     try std.testing.expectEqual(opcodes(.drop, .@";", .@";", .@";"), saved_twice[0].ram[0]);
-    try std.testing.expectError(error.UndefinedLabel, assembleNodes("ASM[ # 1 NODE  # 2 its nothing", &programs, &diagnostic));
+    try std.testing.expectError(error.UndefinedLabel, assembleNodes("ASM[ # 1 NODE  # 2 its nothing", &programs, &.{}, &diagnostic));
     try std.testing.expectEqualStrings("nothing", diagnostic.token);
 }
 
@@ -1391,10 +1592,10 @@ test "inline instruction words" {
 test "named literals and calls" {
     var programs: [2]Program = undefined;
     var diagnostic: Diagnostic = .{};
-    const assembled = try assembleNodes(
+    const assembled = (try assembleNodes(
         \\ ASM[ # 0 NODE  # east , # north ,  right  rdlu  # -d-- alit >BIN
         \\ # 101 NODE  # east , # north , >BIN ]ASM
-    , &programs, &diagnostic);
+    , &programs, &.{}, &diagnostic)).programs;
     try std.testing.expectEqualSlices(Word, &.{
         0x1d5,                                   0x115,
         // a call from slot 1 cannot reach a multiport
@@ -1468,7 +1669,7 @@ test "blocks" {
     });
     var programs: [2]Program = undefined;
     var diagnostic: Diagnostic = .{};
-    const assembled = try assembleBlocks(&disk, &.{0}, &programs, &diagnostic);
+    const assembled = (try assembleBlocks(&disk, &.{0}, &programs, &.{}, &diagnostic)).programs;
     try std.testing.expectEqual(1, assembled.len);
     try std.testing.expectEqualSlices(Word, &.{
         opcodes(.dup, .drop, .@".", .@"."), erased, opcodes(.over, .a, .@";", .@";"),
@@ -1477,8 +1678,8 @@ test "blocks" {
     try std.testing.expectEqualSlices(u32, &.{ 1, 0, 33 }, assembled[0].lines[0..3]);
 
     // blocks may be loaded in turn
-    try std.testing.expectEqual(1, (try assembleBlocks(&disk, &.{ 1, 0 }, &programs, &diagnostic)).len);
-    try std.testing.expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{4}, &programs, &diagnostic));
+    try std.testing.expectEqual(1, (try assembleBlocks(&disk, &.{ 1, 0 }, &programs, &.{}, &diagnostic)).programs.len);
+    try std.testing.expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{4}, &programs, &.{}, &diagnostic));
     try std.testing.expectEqual(0, diagnostic.line);
 }
 
@@ -1490,7 +1691,7 @@ test "loading from within ASM[" {
     });
     var programs: [1]Program = undefined;
     var diagnostic: Diagnostic = .{};
-    const assembled = try assembleBlocks(&disk, &.{0}, &programs, &diagnostic);
+    const assembled = (try assembleBlocks(&disk, &.{0}, &programs, &.{}, &diagnostic)).programs;
     try std.testing.expectEqual(opcodes(.drop, .dup, .@";", .@";"), assembled[0].ram[0]);
 }
 
@@ -1508,10 +1709,10 @@ test "block errors" {
     });
     var programs: [1]Program = undefined;
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.LoadTooDeep, assembleBlocks(&disk, &.{0}, &programs, &diagnostic));
-    try std.testing.expectError(error.UnknownWord, assembleBlocks(&disk, &.{1}, &programs, &diagnostic));
+    try std.testing.expectError(error.LoadTooDeep, assembleBlocks(&disk, &.{0}, &programs, &.{}, &diagnostic));
+    try std.testing.expectError(error.UnknownWord, assembleBlocks(&disk, &.{1}, &programs, &.{}, &diagnostic));
     try std.testing.expectEqual(16 + 3, diagnostic.line);
-    try std.testing.expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{ 2, 3 }, &programs, &diagnostic));
+    try std.testing.expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{ 2, 3 }, &programs, &.{}, &diagnostic));
     try std.testing.expectEqual(0, diagnostic.line);
     try expectError(error.NoSuchBlock, "1 LOAD");
     try expectError(error.NoSuchBlock, "1 FH");
@@ -1524,4 +1725,64 @@ test blockText {
     try std.testing.expectEqual(16 * 65, lines.len);
     try std.testing.expectEqualStrings("first ", lines[0..6]);
     try std.testing.expectEqualStrings(" \nsecond ", lines[63 .. 65 + 7]);
+}
+
+test "boot descriptors" {
+    var programs: [3]Program = undefined;
+    var descriptors: [3]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleNodes(
+        \\ ASM[ # 5 NODE  : main dup ; : run drop ; >BIN
+        \\ # 6 NODE  : go over ; >BIN
+        \\ # 7 NODE # 1600 BIN  a a ; >BIN ]ASM
+        \\ 5 +NODE  5 /RAM  1 2 3 1600 /SOME  4 1 1600 /PART
+        \\    RIGHT /A  x15. /IO  5 ITS run /P
+        \\    1. 2. NORTH 3 /STACK  /RINF
+        \\ 6 +NODE  1600 /RAM  EAST LEFT 6 ITS go 6 +ND
+        \\ 7 +NODE  5 +NODE  7. /B
+    , &programs, &descriptors, &diagnostic);
+    try std.testing.expectEqual(3, assembled.descriptors.len);
+
+    const five = assembled.descriptors[0];
+    try std.testing.expectEqual(5, five.node);
+    try std.testing.expectEqualSlices(boot.Descriptor.Load, &.{
+        .{ .bin = 5 },
+        .{ .bin = 1600, .source = 1, .destination = 2, .len = 3 },
+        .{ .bin = 1600, .source = 4, .destination = 4, .len = 1 },
+    }, five.loads[0..five.load_count]);
+    try std.testing.expectEqual(0x1d5, five.a);
+    // +NODE again goes back to the node's descriptor
+    try std.testing.expectEqual(7, five.b);
+    try std.testing.expectEqual(0x15, five.io);
+    try std.testing.expectEqual(1, five.p);
+    // the last value goes on top, and node 005's row is even
+    try std.testing.expectEqualSlices(Word, &.{ 1, 2, 0x115 }, five.stack[0..five.stack_len]);
+    try std.testing.expectEqualSlices(Word, &@as([9]Word, @splat(-1)), five.return_stack[0..five.return_stack_len]);
+
+    // +ND loads the node's own bin, replacing earlier loads of all of RAM,
+    // and sets A, B and P
+    const six = assembled.descriptors[1];
+    try std.testing.expectEqualSlices(boot.Descriptor.Load, &.{.{ .bin = 6 }}, six.loads[0..six.load_count]);
+    // east of an even column is right
+    try std.testing.expectEqual(0x1d5, six.a);
+    try std.testing.expectEqual(0x175, six.b);
+    try std.testing.expectEqual(0, six.p);
+
+    // nodes start at warm with B addressing IO, unless set otherwise
+    const seven = assembled.descriptors[2];
+    try std.testing.expectEqual(0xa9, seven.p);
+    try std.testing.expectEqual(0x15d, seven.b);
+    try std.testing.expectEqual(null, seven.a);
+}
+
+test "boot descriptor errors" {
+    var programs: [1]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.NoBootNode, assembleNodes("1 /P", &programs, &descriptors, &diagnostic));
+    try std.testing.expectError(error.NoSuchBin, assembleNodes("1 +NODE 1 /RAM", &programs, &descriptors, &diagnostic));
+    try std.testing.expectError(error.TooManyDescriptors, assembleNodes("1 +NODE 2 +NODE", &programs, &descriptors, &diagnostic));
+    try std.testing.expectError(error.TooManyLoads, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  0 1 1 /PART 0 1 1 /PART 0 1 1 /PART 0 1 1 /PART", &programs, &descriptors, &diagnostic));
+    try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  60 5 1 /PART", &programs, &descriptors, &diagnostic));
+    try std.testing.expectError(error.NumberOutOfRange, assembleNodes("1 +NODE  11 /STACK", &programs, &descriptors, &diagnostic));
 }

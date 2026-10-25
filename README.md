@@ -117,6 +117,17 @@ block that configures where its modules are:
 $ gasim --listing --load 1562 --load 2001 sF/pFDISK.blk
 ```
 
+arrayForth 3's boot descriptors, such as `107 +NODE 1614 /RAM DOWN /B`, say
+what to load into nodes and how to start them, with registers and stacks
+set. When a program has them, gasim sets up nodes as they say, directly or
+with `--boot`, instead of loading each bin into its own node. This loads
+the SRAM cluster with its descriptors, which are in the block after its
+load block:
+
+```
+$ gasim --load 2331 --load 2332 sF/pFDISK.blk
+```
+
 ### Terminal user interface
 
 The map shows every node: running nodes are green, nodes waiting on a port
