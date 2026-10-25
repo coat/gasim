@@ -35,6 +35,9 @@ breakpoints_len: u8 = 0,
 /// the first breakpoint a node reached since `run` started, or since it was
 /// last cleared
 hit: ?Breakpoint = null,
+/// where a line is written for each step that executes code. Tracing stops
+/// if writing fails.
+trace: ?*Io.Writer = null,
 
 /// the console, and the index of the node it is attached to
 console: ?struct { device: *Console, index: u16 } = null,
@@ -307,10 +310,17 @@ pub fn stepNode(self: *Chip, i: u16) void {
     var before: [4]Port.State = undefined;
     for (n.ports, &before) |link, *state| state.* = if (link.port) |p| p.state else .idle;
 
+    const fetching = n.state == .fetch;
     n.step();
     self.steps += 1;
     self.started = true;
     if (!n.suspended) self.wake(i);
+    // unless the node is still waiting for a word to execute
+    if (self.trace) |writer| if (!fetching or n.state != .fetch or !n.suspended) {
+        self.writeTrace(writer, i) catch {
+            self.trace = null;
+        };
+    };
     if (self.hit == null and !n.suspended and n.state == .fetch) self.hit = self.breakpointAt(i);
 
     for (n.ports, before, 0..) |link, state, d| {
@@ -325,6 +335,21 @@ fn breakpointAt(self: *const Chip, i: u16) ?Breakpoint {
     if (self.breakpoints_len == 0) return null;
     const here: Breakpoint = .init(i, @bitCast(self.nodes[i].p.address));
     return if (self.hasBreakpoint(here)) here else null;
+}
+
+/// Writes the node, the word it executed, where from, and its stacks after,
+/// such as `000 003 2c9b2 @+ for @+ !b  T 0000d S 00000 R 00000`
+fn writeTrace(self: *const Chip, writer: *Io.Writer, i: u16) Io.Writer.Error!void {
+    const n = &self.nodes[i];
+    const address: u9 = @bitCast(n.word_address);
+    try writer.print("{d:0>3} {x:0>3} {x:0>5} ", .{ self.layout.nodeNumber(i), address, @as(u18, @bitCast(n.i)) });
+    try disassembler.write(writer, n.i, address);
+    try writer.print("  T {x:0>5} S {x:0>5} R {x:0>5}{s}\n", .{
+        @as(u18, @bitCast(n.data_stack.t)),
+        @as(u18, @bitCast(n.data_stack.s)),
+        @as(u18, @bitCast(n.return_stack.t)),
+        if (n.suspended) "  waiting" else "",
+    });
 }
 
 pub fn hasBreakpoint(self: Chip, breakpoint: Breakpoint) bool {
@@ -706,6 +731,24 @@ test "stops at breakpoints" {
     try std.testing.expectError(error.TooManyBreakpoints, chip.toggleBreakpoint(.init(0, 0)));
 }
 
+test "traces each step" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble("5 dup drop left b! @b", &diagnostic));
+    var buffer: [512]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    chip.trace = &writer;
+
+    // literals are skipped, and the node waits on a port nothing writes to
+    while (chip.step()) {}
+    try std.testing.expectEqualStrings(
+        \\000 000 04def @p dup drop @p  T 00175 S 00005 R 00000
+        \\000 003 29fb2 b! @b . .  T 00005 S 00000 R 00000  waiting
+        \\
+    , writer.buffered());
+}
+
 test "stops when interrupted" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
     defer chip.deinit(std.testing.allocator);
@@ -730,6 +773,7 @@ test "stops when interrupted" {
 }
 
 const assembler = @import("assembler.zig");
+const disassembler = @import("disassembler.zig");
 const ga144 = @import("ga144.zig");
 const Console = @import("Console.zig");
 const f18 = @import("f18.zig");

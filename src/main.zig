@@ -17,6 +17,8 @@ const usage =
     \\  --break <node>:<address>   stop when the node is about to fetch the word
     \\                             at the address, in hex, such as 105:003. Can
     \\                             be given more than once.
+    \\  --trace                    with run, write a line to stderr for each
+    \\                             word a node executes
 ;
 
 const default_rom_path = "rom/ga144.txt";
@@ -52,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
     var path: ?[]const u8 = null;
     var rom_path: ?[]const u8 = null;
     var boot = false;
+    var trace = false;
     var breakpoints: [Chip.max_breakpoints]struct { node: u16, address: u9 } = undefined;
     var breakpoints_len: usize = 0;
     var i: usize = if (run_command) 2 else 1;
@@ -86,11 +89,14 @@ pub fn main(init: std.process.Init) !void {
             }
         } else if (std.mem.eql(u8, arg, "--boot")) {
             boot = true;
+        } else if (std.mem.eql(u8, arg, "--trace")) {
+            trace = true;
         } else if (path == null and !std.mem.startsWith(u8, arg, "-")) {
             path = arg;
         } else fatal(usage, .{});
     }
     const source_path = path orelse fatal(usage, .{});
+    if (trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
 
     // one spare byte tells a full buffer apart from a longer file
     var source_buffer: [max_source_len + 1]u8 = undefined;
@@ -166,6 +172,13 @@ pub fn main(init: std.process.Init) !void {
         .console_port = console_port,
     });
 
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_file_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    if (trace) chip.trace = &stderr_file_writer.interface;
+    // what was traced up to an error or a breakpoint. Exiting without
+    // returning skips this, so those paths flush first.
+    defer stderr_file_writer.interface.flush() catch {};
+
     interruptible = &console;
     if (have_sigint) posix.sigaction(.INT, &.{
         .handler = .{ .handler = handleInterrupt },
@@ -181,10 +194,14 @@ pub fn main(init: std.process.Init) !void {
     // stops a read blocked waiting for input that will no longer be taken
     reading.cancel(io) catch |err| switch (err) {
         error.Canceled => {},
-        error.ReadFailed => if (stdin_file_reader.err.? != error.Canceled)
-            fatal("stdin: {t}", .{stdin_file_reader.err.?}),
+        error.ReadFailed => if (stdin_file_reader.err.? != error.Canceled) {
+            stderr_file_writer.interface.flush() catch {};
+            fatal("stdin: {t}", .{stdin_file_reader.err.?});
+        },
     };
     if (chip.hit) |hit| {
+        // after what was traced up to it
+        stderr_file_writer.interface.flush() catch {};
         const n = chip.nodes[hit.index];
         std.log.info("node {d:0>3} reached {x:0>3}: T {x:0>5}  S {x:0>5}  R {x:0>5}  A {x:0>5}  B {x:0>3}", .{
             layout.nodeNumber(hit.index),
@@ -198,7 +215,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     // the conventional status for a program stopped by SIGINT
-    if (console.interrupted.load(.monotonic)) std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
+    if (console.interrupted.load(.monotonic)) {
+        stderr_file_writer.interface.flush() catch {};
+        std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
+    }
     // most likely the console is on a port the program does not use
     if (!console.used) std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
 }

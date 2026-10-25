@@ -49,6 +49,17 @@ Options:
 - `--break <node>:<address>`: stop when the node is about to fetch the word at
   the address, given in hex, and print its stacks and registers. Can be given
   more than once.
+- `--trace`: with `run`, write a line to stderr for each word a node executes:
+  the node, the word's address, the raw word, its opcodes, and T, S and R
+  after it.
+
+```
+$ gasim run --trace --break 000:004 examples/hello.ga
+000 000 04b12 @p b! @p .  T 00007 S 00000 R 00000
+...
+000 003 2bcba a! @+ >r .  T 00000 S 00000 R 0000d
+info: node 000 reached 004: T 00000  S 00000  R 0000d  A 00008  B 145
+```
 
 See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
 
