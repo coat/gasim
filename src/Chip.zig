@@ -426,6 +426,23 @@ pub fn load(self: *Chip, program: assembler.Program) error{NoSuchNode}!void {
     program.load(self.node(program.node) orelse return error.NoSuchNode);
 }
 
+/// Sets up a node as a boot descriptor says, without a boot stream: loads
+/// its RAM from `programs`, sets its registers, pushes onto its stacks and
+/// starts it at P. Set up nodes before stepping the chip.
+pub fn setUp(self: *Chip, descriptor: boot.Descriptor, programs: []const assembler.Program) error{ NoSuchNode, NoSuchBin }!void {
+    const n = self.node(descriptor.node) orelse return error.NoSuchNode;
+    for (descriptor.loads[0..descriptor.load_count]) |part| {
+        const program = boot.findBin(programs, part.bin) orelse return error.NoSuchBin;
+        @memcpy(n.mem[part.destination..][0..part.len], program.ram[part.source..][0..part.len]);
+    }
+    if (descriptor.io) |io| n.io = io;
+    if (descriptor.a) |a| n.a = a;
+    if (descriptor.b) |b| n.b = @truncate(@as(u18, @bitCast(b)));
+    for (descriptor.return_stack[0..descriptor.return_stack_len]) |value| n.return_stack.push(value);
+    for (descriptor.stack[0..descriptor.stack_len]) |value| n.data_stack.push(value);
+    n.p = @bitCast(descriptor.p);
+}
+
 /// Attaches a console to a port of a node that faces off the array
 pub fn attachConsole(self: *Chip, console: *Console, number: u16, direction: Direction) error{ NoSuchNode, PortConnected }!void {
     const i = self.layout.index(number) orelse return error.NoSuchNode;
@@ -1047,6 +1064,7 @@ test "stops when interrupted" {
 }
 
 const assembler = @import("assembler.zig");
+const boot = @import("boot.zig");
 const disassembler = @import("disassembler.zig");
 const ga144 = @import("ga144.zig");
 const Console = @import("Console.zig");

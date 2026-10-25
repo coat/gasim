@@ -213,6 +213,9 @@ pub fn main(init: std.process.Init) !void {
         loaded += 1;
     };
     const loadable = programs[0..loaded];
+    // each program is loaded from its bin and started at its entry
+    const descriptors = try arena.alloc(gasim.boot.Descriptor, loadable.len);
+    for (loadable, descriptors) |program, *descriptor| descriptor.* = .ofProgram(program);
 
     if (roms == null) for (loadable) |program| if (program.rom_word) |word|
         fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .blocks = blocks }, word.token });
@@ -238,14 +241,14 @@ pub fn main(init: std.process.Init) !void {
     if (boot) {
         if (console_node == 1 and console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
         if (roms == null) fatal("--boot needs a ROM, for node 001 to boot from (see --rom)", .{});
-        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, loadable));
-        feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, loadable, buffer) catch |err| switch (err) {
+        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors));
+        feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, descriptors, loadable, buffer) catch |err| switch (err) {
             error.NoSuchNode => fatal("--boot needs node 001, which is not in a {d}x{d} layout", .{ layout.rows, layout.columns }),
             error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
             else => |e| return e,
         };
         chip.attachFeeder(&feeder, 1, .up) catch fatal("--boot needs node 001's up port to face off the chip", .{});
-    } else for (loadable) |program| chip.load(program) catch unreachable;
+    } else for (descriptors) |descriptor| chip.setUp(descriptor, loadable) catch unreachable;
 
     var stdin_buffer: [1024]u8 = undefined;
     var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
