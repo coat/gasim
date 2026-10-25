@@ -152,6 +152,12 @@ R      0      0      0      0      0      0      0      0      0
  ok
 ```
 
+On a terminal, lines are edited with
+[isocline](https://github.com/daanx/isocline), with history and Tab
+completion of words and labels. isocline links libc into the `gasim`
+executable, which `zig build -Disocline=false` leaves out, along with the
+line editing.
+
 ### Terminal user interface
 
 The map shows every node: running nodes are green, nodes waiting on a port

@@ -316,7 +316,10 @@ pub fn main(init: std.process.Init) !void {
         error.PortConnected => fatal("console port {t} of node {d:0>3} is connected to another node", .{ console_port, console_node }),
     };
 
-    if (command == .repl) return repl.run(io, arena, &chip, session.?, &diagnostic, &repl_writer.interface);
+    if (command == .repl) return repl.run(io, arena, &chip, session.?, &diagnostic, &repl_writer.interface, .{
+        .edit = try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io),
+        .history = historyPath(io, arena, init.environ_map),
+    });
 
     if (command == .tui) return tui.run(io, init.gpa, init.environ_map, &chip, .{
         .source_path = source_path,
@@ -429,6 +432,19 @@ fn handleInterrupt(_: posix.SIG) callconv(.c) void {
         }, null);
         posix.raise(.INT) catch {};
     }
+}
+
+/// where the repl keeps its history: in gasim under XDG_STATE_HOME, or
+/// ~/.local/state
+fn historyPath(io: Io, arena: Allocator, environ: *const std.process.Environ.Map) ?[:0]const u8 {
+    const dir = if (environ.get("XDG_STATE_HOME")) |state|
+        std.fmt.allocPrint(arena, "{s}/gasim", .{state}) catch return null
+    else if (environ.get("HOME")) |home|
+        std.fmt.allocPrint(arena, "{s}/.local/state/gasim", .{home}) catch return null
+    else
+        return null;
+    Io.Dir.cwd().createDirPath(io, dir) catch return null;
+    return std.fmt.allocPrintSentinel(arena, "{s}/history", .{dir}, 0) catch null;
 }
 
 /// Interprets a program in a session: a .af file, or for blocks each block
