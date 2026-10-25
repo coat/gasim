@@ -11,6 +11,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // only the executable needs a terminal UI, not the gasim module
+    const vaxis = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "gasim",
         .root_module = b.createModule(.{
@@ -19,6 +25,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "gasim", .module = mod },
+                .{ .name = "vaxis", .module = vaxis.module("vaxis") },
             },
         }),
     });

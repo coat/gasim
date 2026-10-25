@@ -7,7 +7,12 @@
 
     .minimum_zig_version = "0.17.0",
 
-    .dependencies = .{},
+    .dependencies = .{
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis#bb94364ce00a59044322d3d403d08e83d841d9d4",
+            .hash = "vaxis-0.6.0-BWNV_IoaDQDXEsN4nhfsjQlgU3EfkQqJqTGkAW-vjAi0",
+        },
+    },
 
     .paths = .{
         "build.zig",

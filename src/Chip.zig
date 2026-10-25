@@ -23,6 +23,8 @@ queue: []u16,
 queue_head: usize = 0,
 queue_len: usize = 0,
 queued: []bool,
+/// how many times a node has been stepped
+steps: u64 = 0,
 
 /// the console, and the index of the node it is attached to
 console: ?struct { device: *Console, index: u16 } = null,
@@ -252,24 +254,29 @@ fn feed(self: *Chip) bool {
 pub fn step(self: *Chip) bool {
     if (self.queue_len == 0) return false;
     // nodes woken during this round run in the next one
-    for (0..self.queue_len) |_| {
-        const i = self.queue[self.queue_head];
-        self.queue_head = (self.queue_head + 1) % self.queue.len;
-        self.queue_len -= 1;
-        self.queued[i] = false;
-        self.stepNode(i);
-    }
+    for (0..self.queue_len) |_| self.stepNode(self.dequeue().?);
     return true;
+}
+
+/// takes the next node to step from the queue
+fn dequeue(self: *Chip) ?u16 {
+    if (self.queue_len == 0) return null;
+    const i = self.queue[self.queue_head];
+    self.queue_head = (self.queue_head + 1) % self.queue.len;
+    self.queue_len -= 1;
+    self.queued[i] = false;
+    return i;
 }
 
 /// Steps a node and wakes the neighbours on any port it changed, since a
 /// suspended node can only continue once one of its ports changes.
-fn stepNode(self: *Chip, i: u16) void {
+pub fn stepNode(self: *Chip, i: u16) void {
     const n = &self.nodes[i];
     var before: [4]Port.State = undefined;
     for (n.ports, &before) |link, *state| state.* = if (link.port) |p| p.state else .idle;
 
     n.step();
+    self.steps += 1;
     if (!n.suspended) self.wake(i);
 
     for (n.ports, before, 0..) |link, state, d| {
@@ -289,6 +296,37 @@ pub fn wake(self: *Chip, i: u16) void {
 
 /// rounds without console output after which pending output is flushed
 const flush_after_rounds = 1000;
+
+/// Gives the devices anything they have for their nodes, without waiting
+/// for input, then steps each runnable node once. Returns false when nothing
+/// happened: every node is waiting, and the devices have nothing for them.
+pub fn advance(self: *Chip) !bool {
+    const serviced = try self.service();
+    const stepped = self.step();
+    return stepped or serviced;
+}
+
+/// Gives the devices anything they have for their nodes, without waiting
+/// for input, then steps the next runnable node, returning its index. Returns
+/// null when every node is waiting.
+pub fn stepNext(self: *Chip) !?u16 {
+    _ = try self.service();
+    const i = self.dequeue() orelse return null;
+    self.stepNode(i);
+    return i;
+}
+
+/// Gives the devices anything they have for their nodes, without waiting
+/// for input. Returns false when they had nothing.
+pub fn service(self: *Chip) !bool {
+    var serviced = false;
+    if (self.console) |console| if (try console.device.service(false)) {
+        self.wake(console.index);
+        serviced = true;
+    };
+    if (self.feed()) serviced = true;
+    return serviced;
+}
 
 /// Runs until every node is suspended on something the console cannot
 /// complete, or the console is interrupted.
@@ -546,6 +584,40 @@ test "waits for input that has not arrived" {
     try chip.run();
     try typing.await(std.testing.io);
     try std.testing.expectEqualStrings("k", writer.buffered());
+}
+
+test advance {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble("up b! @b !b", &diagnostic));
+
+    var input_buffer: [1]u8 = undefined;
+    var input: Io.Queue(u8) = .init(&input_buffer);
+    var buffer: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    try chip.attachConsole(&console, 0, .up);
+
+    // the node settles waiting for input, without advance waiting for it
+    while (try chip.advance()) {}
+    try std.testing.expect(chip.nodes[0].suspended);
+
+    // input that arrives later is given to the node
+    try input.putOne(std.testing.io, 'x');
+    while (try chip.advance()) {}
+    try std.testing.expectEqualStrings("x", writer.buffered());
+}
+
+test stepNext {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 2 });
+    defer chip.deinit(std.testing.allocator);
+
+    // nodes run in turn, until both wait on their ports for code
+    try expectEqual(0, try chip.stepNext());
+    try expectEqual(1, try chip.stepNext());
+    try expectEqual(null, try chip.stepNext());
+    try expectEqual(2, chip.steps);
 }
 
 test "stops when interrupted" {
