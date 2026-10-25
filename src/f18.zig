@@ -6,7 +6,7 @@ pub const Word = i18;
 pub const Slot = u2;
 
 /// type used by the P register
-const ProgramCounter = packed struct(u10) {
+pub const ProgramCounter = packed struct(u10) {
     /// holds the address of the next word in the instruction stream
     address: Address,
     /// P9 has no effect on memory decoding; it simply enables the Extended Arithmetic Mode when set.
