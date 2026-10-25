@@ -5,3 +5,6 @@ result
 # Zig
 zig-out/
 .zig-cache/
+
+# ROM dumps are not redistributable yet
+/rom/
