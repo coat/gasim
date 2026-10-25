@@ -36,8 +36,27 @@ Options:
   (default `8x18`)
 - `--console <node>:<port>`: where the console is attached, on a port facing
   off the edge of the array (default `000:up`)
+- `--rom <file>`: ROM dump to load into the nodes (default `rom/ga144.txt`,
+  if it exists)
+- `--boot`: load programs with a boot stream through the SERDES port of node
+  001, as one GA144 boots another, instead of writing them straight into RAM.
+  This needs ROM.
 
 See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
+
+### ROM
+
+The GA144's ROM, copyright GreenArrays, Inc., is in
+[`rom/ga144.txt`](rom/ga144.txt) and loaded by default when gasim runs from
+this directory. See [`rom/README.md`](rom/README.md) for where it came from and
+its format.
+
+With ROM, each node gets the ROM of the GA144 node with the same number, and
+the boot nodes start in their boot code after reset, as on the real chip.
+Programs can also call ROM words such as `*.17` and `warm` by name.
+
+Without ROM, nodes without a program wait for code on their ports, and
+programs cannot call ROM words.
 
 ## Download
 
@@ -59,7 +78,7 @@ zig build -Doptimize=ReleaseFast
 
 - [x] Comm ports and console I/O
 - [x] Multi-node chip
-- [ ] ROM implementations
+- [x] ROM and booting
 - [ ] TUI
 - [ ] colorForth editor and compiler
 

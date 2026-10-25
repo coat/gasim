@@ -4,8 +4,8 @@
 //! Source is a sequence of whitespace separated words:
 //!
 //!     : name          define a label at the next instruction word
-//!     name            call a label, or jump to it when followed by ;
-//!     'name           push the address of a label
+//!     name            call a label or ROM word, or jump to it when followed by ;
+//!     'name           push the address of a label or ROM word
 //!     123 -1 0x7b     push a number (@p followed by the number)
 //!     123 ,           compile a number into memory as data
 //!     "text"          compile each byte of text into memory as data
@@ -34,6 +34,8 @@ pub const Program = struct {
     /// number of words used, from address 0
     len: u7,
     entry: Address,
+    /// where the program first calls a ROM word, which needs the node's ROM
+    rom_word: ?Diagnostic = null,
 
     /// Copies the program into the RAM of `node` and starts it at the entry
     pub fn load(self: Program, node: *Computer) void {
@@ -90,7 +92,7 @@ pub fn assembleNodes(source: []const u8, programs: []Program, diagnostic: *Diagn
     var count: usize = 0;
     var node: Directive = .{ .number = 0 };
     while (true) {
-        var assembler: Assembler = .{ .tokens = &tokens, .diagnostic = diagnostic };
+        var assembler: Assembler = .{ .tokens = &tokens, .diagnostic = diagnostic, .node = node.number };
         const next_node = try assembler.run();
         if (assembler.len > 0) {
             errdefer diagnostic.* = node.diagnostic;
@@ -163,6 +165,8 @@ const Control = union(enum) {
 const Assembler = struct {
     tokens: *Tokenizer,
     diagnostic: *Diagnostic,
+    /// number of the node being assembled, which decides its ROM words
+    node: u16,
 
     ram: [64]Word = @splat(0),
     /// next free address, up to 64
@@ -175,6 +179,7 @@ const Assembler = struct {
     instruction: Instruction = nops,
     /// the call that a following ; turns into a jump
     last_call: ?Location = null,
+    rom_word: ?Diagnostic = null,
 
     labels: [64]Label = undefined,
     label_count: u8 = 0,
@@ -220,6 +225,7 @@ const Assembler = struct {
                 .rom = false,
                 .local = if (self.find("main")) |main| self.labels[main].address orelse 0 else 0,
             },
+            .rom_word = self.rom_word,
         };
     }
 
@@ -314,6 +320,10 @@ const Assembler = struct {
         } else if (token[0] == '\'' and token.len > 1) {
             try self.emit(.@"@p");
             const word = try self.alloc();
+            if (self.romWord(token[1..])) |destination| {
+                self.ram[word] = destination;
+                return;
+            }
             const label = try self.reference(token[1..]);
             if (self.labels[label].address) |destination| {
                 self.ram[word] = destination;
@@ -336,8 +346,13 @@ const Assembler = struct {
                 self.here = @intCast(value);
             } else try self.literal(value);
         } else {
+            if (self.romWord(token)) |destination| {
+                self.last_call = try self.emitJump(.call, destination);
+                return;
+            }
             const label = try self.reference(token);
-            const location = try self.emitJump(.call, self.labels[label].address);
+            const known = self.labels[label].address;
+            const location = try self.emitJump(.call, if (known) |a| a else null);
             if (self.labels[label].address == null) {
                 try self.addFixup(.{ .slot = location.slot, .address = location.address, .label = label, .line = self.tokens.line });
             }
@@ -394,7 +409,7 @@ const Assembler = struct {
     /// Compiles an opcode whose destination field fills the rest of the
     /// instruction word, starting a new word if the destination is not
     /// reachable from the current slot. A null destination is patched later.
-    fn emitJump(self: *Assembler, opcode: Opcode, destination: ?u7) Error!Location {
+    fn emitJump(self: *Assembler, opcode: Opcode, destination: ?u10) Error!Location {
         if (self.word == null) try self.startWord();
         if (!self.reachable(destination)) {
             self.finishWord();
@@ -407,13 +422,16 @@ const Assembler = struct {
         return location;
     }
 
-    fn reachable(self: Assembler, destination: ?u7) bool {
+    /// Unknown destinations are labels, which are in RAM
+    fn reachable(self: Assembler, destination: ?u10) bool {
         return switch (self.slot) {
-            // slot 0 and 1 destinations reach all of RAM
-            0, 1 => true,
+            0 => true,
+            // slot 1 replaces the low 8 bits of P, reaching RAM and ROM but
+            // not Extended Arithmetic Mode
+            1 => if (destination) |d| d < 0x100 else true,
             // slot 2 replaces the low 3 bits of P, which has been incremented
             // past this word and its literals
-            2 => if (destination) |d| d >> 3 == self.here >> 3 else false,
+            2 => if (destination) |d| d < 0x100 and d >> 3 == self.here >> 3 else false,
             3 => false,
         };
     }
@@ -454,6 +472,13 @@ const Assembler = struct {
         return null;
     }
 
+    /// the address of a ROM word of the node, noting the first one used
+    fn romWord(self: *Assembler, name: []const u8) ?u10 {
+        const destination = ga144.romWord(self.node, name) orelse return null;
+        if (self.rom_word == null) self.rom_word = .{ .line = self.tokens.start_line, .token = name };
+        return destination;
+    }
+
     /// returns the label with `name`, adding it as undefined if needed
     fn reference(self: *Assembler, name: []const u8) Error!u8 {
         if (self.find(name)) |label| return label;
@@ -464,7 +489,7 @@ const Assembler = struct {
     }
 
     fn define(self: *Assembler, name: []const u8) Error!void {
-        if (reserved(name)) return error.ReservedLabel;
+        if (reserved(name) or ga144.romWord(self.node, name) != null) return error.ReservedLabel;
         self.finishWord();
         const label = &self.labels[try self.reference(name)];
         if (label.address != null) return error.DuplicateLabel;
@@ -631,6 +656,18 @@ test "label addresses" {
         Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
         2,
     });
+    // a label already defined
+    try expectAssembles(": data 'data", &.{
+        Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        0,
+    });
+}
+
+test "ex ends its instruction word" {
+    try expectAssembles("dup ex drop", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .ex, .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+    });
 }
 
 test "control structures" {
@@ -685,6 +722,7 @@ test "errors" {
     try expectError(error.UnterminatedComment, "( dup");
     try expectError(error.UnterminatedString, "\"dup");
     try expectError(error.NumberOutOfRange, "0x40000");
+    try expectError(error.NumberOutOfRange, "0x100000000");
     try expectError(error.NumberOutOfRange, "64 org");
     try expectError(error.ProgramTooLarge, "63 org 1 ,  2 ,");
     try expectError(error.UnmatchedControl, "then");
@@ -733,6 +771,7 @@ test "labels and then at the end of RAM" {
 }
 
 const f18 = @import("f18.zig");
+const ga144 = @import("ga144.zig");
 const Address = f18.Address;
 const Computer = f18.Computer;
 const Instruction = f18.Instruction;
@@ -780,4 +819,40 @@ test "node directive" {
     try expectError(error.InvalidNode, "node 10000");
     try expectError(error.InvalidNode, "node up");
     try expectError(error.ReservedLabel, ": node");
+}
+
+test "ROM words" {
+    // calls into ROM from slot 1, and a tail call to warm
+    try expectAssembles("dup *.17 warm ;", &.{
+        Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .call, .slot_2 = .@".", .slot_3 = 7 }, 1, 0xb0),
+        Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 0xa9),
+    });
+    // entering Extended Arithmetic Mode needs a slot 0 call
+    try expectAssembles("dup -u/mod", &.{
+        Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }),
+        Instruction.encodeJump(.{ .slot_0 = .call, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 0x2d6),
+    });
+
+    // ROM words depend on the node
+    var programs: [1]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleNodes("node 300 *.17", &programs, &diagnostic);
+    try expectEqual(0xcc, assembled[0].ram[0] & 0x3ff);
+    try std.testing.expectError(error.UndefinedLabel, assemble("node 708 *.17", &diagnostic));
+
+    // programs note where they first need ROM
+    try expectEqual(null, (try assemble(": x dup ; x", &diagnostic)).rom_word);
+    const rom_word = (try assemble("dup\n dup warm *.17", &diagnostic)).rom_word.?;
+    try expectEqual(2, rom_word.line);
+    try std.testing.expectEqualStrings("warm", rom_word.token);
+
+    // the address of a ROM word, such as a return to warm
+    try expectAssembles("'warm >r", &.{
+        Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@">r", .slot_2 = .@".", .slot_3 = 7 }),
+        0xa9,
+    });
+    try std.testing.expectEqualStrings("warm", (try assemble("'warm", &diagnostic)).rom_word.?.token);
+
+    try expectError(error.ReservedLabel, ": warm");
+    try expectError(error.ReservedLabel, ": *.17");
 }

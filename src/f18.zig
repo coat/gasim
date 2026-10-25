@@ -6,7 +6,7 @@ pub const Word = i18;
 pub const Slot = u2;
 
 /// type used by the P register
-const ProgramCounter = packed struct(u10) {
+pub const ProgramCounter = packed struct(u10) {
     /// holds the address of the next word in the instruction stream
     address: Address,
     /// P9 has no effect on memory decoding; it simply enables the Extended Arithmetic Mode when set.
@@ -141,6 +141,8 @@ pub const Computer = struct {
 
     /// address of the io register
     pub const io_address: u9 = 0x15d;
+    /// address of the data register of nodes with a parallel bus or SERDES
+    pub const data_address: u9 = 0x141;
     /// io register bits reporting whether the node at the other end of each
     /// port is reading (active low) or writing
     const handshake_bits: u18 = 0x1fe00;
@@ -166,6 +168,13 @@ pub const Computer = struct {
 
     /// right, down, left and up comm ports; unconnected ports are null
     ports: [4]port.Link,
+    /// io bits of the GPIO pins this node has, out of 17, 5, 3 and 1
+    pins: u18,
+    /// levels of the pins when the node is not driving them, such as from a
+    /// device. Pins are pulled low after reset.
+    pin_inputs: u18,
+    /// the data register, for nodes that have one
+    data: ?Word,
 
     state: State = .fetch,
     // keeps track of current slot to help address decoding
@@ -236,6 +245,7 @@ pub const Computer = struct {
 
         const raw: u9 = @bitCast(address);
         if (raw == io_address) return self.readIo();
+        if (raw == data_address) if (self.data) |data| return data;
         if (port.select(raw)) |ports| {
             if (self.readPorts(ports)) |word| return word;
         }
@@ -254,6 +264,10 @@ pub const Computer = struct {
         const raw: u9 = @bitCast(address);
         if (raw == io_address) {
             self.io = value;
+            return true;
+        }
+        if (raw == data_address and self.data != null) {
+            self.data = value;
             return true;
         }
         if (port.select(raw)) |ports| {
@@ -302,9 +316,20 @@ pub const Computer = struct {
     }
 
     /// Bits without I/O facilities read as the inverse of what was last
-    /// written. Handshake bits report the state of the far end of each port.
+    /// written. Handshake bits report the state of the far end of each port,
+    /// and pin bits the level of each GPIO pin.
     fn readIo(self: Computer) Word {
-        var value: u18 = ~@as(u18, @bitCast(self.io)) & ~handshake_bits;
+        const written: u18 = @bitCast(self.io);
+        var value: u18 = ~written & ~handshake_bits & ~self.pins;
+        // a pin's two control bits start at its io bit: 10 drives it low, 11
+        // high, and otherwise it follows its input
+        var pins = self.pins;
+        while (pins != 0) : (pins &= pins - 1) {
+            const bit = pins & -%pins;
+            const driven = written & bit != 0;
+            const high = if (driven) written & (bit >> 1) != 0 else self.pin_inputs & bit != 0;
+            if (high) value |= bit;
+        }
         for (self.ports, 0..) |link, i| {
             // Rr- is bit 16, Rw is bit 15, Dr- is bit 14 and so on
             const shift: u5 = @intCast(16 - 2 * i);
@@ -352,6 +377,9 @@ pub const Computer = struct {
 
         .mem = @splat(0),
         .ports = @splat(.{}),
+        .pins = 0,
+        .pin_inputs = 0,
+        .data = null,
 
         .state = .fetch,
         .slot = 0,
@@ -451,6 +479,12 @@ test "ProgramCounter toWord and fromWord keep P9" {
     try expectEqual(p, ProgramCounter.fromWord(p.toWord()));
     // bits above P9 are ignored
     try expectEqual(p, ProgramCounter.fromWord(@bitCast(@as(u18, 0x3feaa))));
+}
+
+test "jumps from slot 3 have no destination" {
+    var p: ProgramCounter = .reset;
+    p.jump(3, @bitCast(LongJump{ .destination = 0x155 }));
+    try expectEqual(ProgramCounter.reset, p);
 }
 
 test "short jump" {
@@ -893,6 +927,41 @@ test "io register reports port handshakes" {
     try expect(node.write(io, 0));
     value = @bitCast(node.read(io).?);
     try expectEqual(0x201ff, value & 0x201ff);
+}
+
+test "io register reads GPIO pin levels" {
+    var node: Computer = .reset;
+    node.pins = 1 << 17 | 1 << 1;
+    const io = Address.fromWord(Computer.io_address);
+
+    // pins are low after reset, while other bits read inverted
+    var value: u18 = @bitCast(node.read(io).?);
+    try expectEqual(0, value & (1 << 17 | 1 << 1));
+    try expectEqual(1 << 5, value & (1 << 5));
+
+    // following an input
+    node.pin_inputs = 1 << 17;
+    value = @bitCast(node.read(io).?);
+    try expectEqual(1 << 17, value & (1 << 17 | 1 << 1));
+
+    // driven high and low
+    try expect(node.write(io, @bitCast(@as(u18, 0b11 << 16 | 0b11))));
+    value = @bitCast(node.read(io).?);
+    try expectEqual(1 << 17 | 1 << 1, value & (1 << 17 | 1 << 1));
+    try expect(node.write(io, @bitCast(@as(u18, 0b10 << 16 | 0b10))));
+    value = @bitCast(node.read(io).?);
+    try expectEqual(0, value & (1 << 17 | 1 << 1));
+}
+
+test "data register" {
+    var node: Computer = .reset;
+    const data = Address.fromWord(Computer.data_address);
+    // absent, so it hangs
+    try expect(!node.write(data, 1));
+
+    node.data = 0;
+    try expect(node.write(data, @bitCast(@as(u18, 0x3fffe))));
+    try expectEqual(0x3fffe, @as(u18, @bitCast(node.read(data).?)));
 }
 
 test "undefined I/O addresses hang" {

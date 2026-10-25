@@ -9,6 +9,9 @@
 //! faces west, and odd columns are the reverse. On even rows down faces north
 //! and up faces south, and odd rows are the reverse. Ports facing off the edge
 //! of the array are unconnected unless a device is attached.
+//!
+//! Nodes are configured like the GA144 node of the same number, with its
+//! GPIO pins and, once loaded, its ROM. See `ga144`.
 
 layout: Layout,
 nodes: []Computer,
@@ -23,8 +26,29 @@ queued: []bool,
 
 /// the console, and the index of the node it is attached to
 console: ?struct { device: *Console, index: u16 } = null,
+/// words fed into a node, such as a boot stream
+feeder: ?struct { device: *Feeder, index: u16 } = null,
 
 const Chip = @This();
+
+/// Writes words to a node through a port, such as a boot stream
+pub const Feeder = struct {
+    port: Port = .{},
+    words: []const Word,
+    next: usize = 0,
+
+    /// the feeder's side of the port; the node uses the other one
+    const side: port.Side = .b;
+
+    /// Writes the next word if the node is reading. Returns false if there
+    /// is nothing to do.
+    pub fn service(self: *Feeder) bool {
+        if (self.next == self.words.len or !self.port.otherReading(side)) return false;
+        _ = self.port.write(side, self.words[self.next]);
+        self.next += 1;
+        return true;
+    }
+};
 
 pub const Layout = struct {
     rows: u8,
@@ -56,6 +80,26 @@ pub const Layout = struct {
     pub fn nodeNumber(self: Layout, i: u16) u16 {
         return i / self.columns * 100 + i % self.columns;
     }
+
+    /// the ports of a node that face its neighbours, where it waits for code
+    /// after reset
+    pub fn neighbourPorts(self: Layout, i: u16) port.Select {
+        var ports: port.Select = .empty;
+        for (std.enums.values(Direction)) |direction| ports.setPresent(direction, self.neighbour(i, direction) != null);
+        return ports;
+    }
+
+    /// index of the node on the other side of a port, if it is on the chip
+    pub fn neighbour(self: Layout, i: u16, direction: Direction) ?u16 {
+        const x = i % self.columns;
+        const y = i / self.columns;
+        return switch (facing(x, y, direction)) {
+            .north => if (y + 1 < self.rows) i + self.columns else null,
+            .south => if (y > 0) i - self.columns else null,
+            .east => if (x + 1 < self.columns) i + 1 else null,
+            .west => if (x > 0) i - 1 else null,
+        };
+    }
 };
 
 pub const Cardinal = enum { north, east, south, west };
@@ -80,8 +124,9 @@ pub fn facing(x: u16, y: u16, direction: Direction) Cardinal {
     };
 }
 
-/// Allocates and wires up the nodes. Nodes start waiting for code on all
-/// their ports, as after reset, until they are loaded with a program.
+/// Allocates and wires up the nodes. As after reset, nodes start with a
+/// multiport execute of their neighbours' ports, waiting for code, until
+/// they are loaded with ROM or a program.
 pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Chip {
     const count = layout.count();
     const nodes = try gpa.alloc(Computer, count);
@@ -98,9 +143,11 @@ pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Chip {
     @memset(ports, .{});
     @memset(queued, false);
     for (nodes, 0..) |*n, i| {
+        const number = layout.nodeNumber(@intCast(i));
         n.* = .reset;
-        // a multiport execute of every port
-        n.p.address = Address.fromWord(0x1a5);
+        n.pins = ga144.pins(number);
+        if (ga144.hasData(number)) n.data = 0;
+        n.p.address = Address.fromWord(port.multiport(layout.neighbourPorts(@intCast(i))));
         chip.wake(@intCast(i));
     }
 
@@ -141,6 +188,29 @@ pub fn node(self: Chip, number: u16) ?*Computer {
     return &self.nodes[self.layout.index(number) orelse return null];
 }
 
+/// Loads each node's ROM from a dump, by node number, and starts the boot
+/// nodes in ROM as after reset. Nodes missing from the dump get the ROM of a
+/// basic node, and wait for code on their ports as basic nodes do. Load ROM
+/// before programs, and before stepping the chip.
+pub fn loadRom(self: *Chip, roms: []const ga144.NodeRom) error{MissingRom}!void {
+    const basic = findRom(roms, ga144.basic_node);
+    for (self.nodes, 0..) |*n, i| {
+        const number = self.layout.nodeNumber(@intCast(i));
+        const own = findRom(roms, number);
+        const rom = own orelse basic orelse return error.MissingRom;
+        @memcpy(n.mem[64..], &rom.words);
+        // cold and warm are where they are only in the node's own ROM
+        if (own != null) if (ga144.resetAddress(number)) |address| {
+            n.p.address = Address.fromWord(address);
+        };
+    }
+}
+
+fn findRom(roms: []const ga144.NodeRom, number: u16) ?*const ga144.NodeRom {
+    for (roms) |*rom| if (rom.node == number) return rom;
+    return null;
+}
+
 /// Loads a program into its node. Load programs before stepping the chip.
 pub fn load(self: *Chip, program: assembler.Program) error{NoSuchNode}!void {
     program.load(self.node(program.node) orelse return error.NoSuchNode);
@@ -152,6 +222,29 @@ pub fn attachConsole(self: *Chip, console: *Console, number: u16, direction: Dir
     if (self.nodes[i].ports[@backingInt(direction)].port != null) return error.PortConnected;
     console.attach(&self.nodes[i], direction);
     self.console = .{ .device = console, .index = i };
+}
+
+/// Attaches a feeder to a port of a node that faces off the array. A node
+/// still waiting for code after reset waits on the feeder too, so attach it
+/// before stepping the chip.
+pub fn attachFeeder(self: *Chip, feeder: *Feeder, number: u16, direction: Direction) error{ NoSuchNode, PortConnected }!void {
+    const i = self.layout.index(number) orelse return error.NoSuchNode;
+    const n = &self.nodes[i];
+    const link = &n.ports[@backingInt(direction)];
+    if (link.port != null) return error.PortConnected;
+    link.* = .{ .port = &feeder.port, .side = Feeder.side.other() };
+    const ports = self.layout.neighbourPorts(i);
+    if (n.p.address == Address.fromWord(port.multiport(ports)))
+        n.p.address = Address.fromWord(port.multiport(ports.unionWith(.initOne(direction))));
+    self.feeder = .{ .device = feeder, .index = i };
+}
+
+/// feeds the next word, waking the node that takes it
+fn feed(self: *Chip) bool {
+    const feeder = self.feeder orelse return false;
+    if (!feeder.device.service()) return false;
+    self.wake(feeder.index);
+    return true;
 }
 
 /// Steps each runnable node once. Returns false when every node is
@@ -182,21 +275,8 @@ fn stepNode(self: *Chip, i: u16) void {
     for (n.ports, before, 0..) |link, state, d| {
         const p = link.port orelse continue;
         if (std.meta.eql(state, p.state)) continue;
-        if (self.neighbour(i, @fromBackingInt(@intCast(d)))) |other| self.wake(other);
+        if (self.layout.neighbour(i, @fromBackingInt(@intCast(d)))) |other| self.wake(other);
     }
-}
-
-/// the node on the other side of a port, if it is on the chip
-fn neighbour(self: Chip, i: u16, direction: Direction) ?u16 {
-    const columns = self.layout.columns;
-    const x = i % columns;
-    const y = i / columns;
-    return switch (facing(x, y, direction)) {
-        .north => if (y + 1 < self.layout.rows) i + columns else null,
-        .south => if (y > 0) i - columns else null,
-        .east => if (x + 1 < columns) i + 1 else null,
-        .west => if (x > 0) i - 1 else null,
-    };
 }
 
 /// queues a node to be stepped
@@ -214,7 +294,7 @@ const flush_after_rounds = 1000;
 /// complete, or the console is interrupted.
 pub fn run(self: *Chip) !void {
     const console = self.console orelse {
-        while (self.step()) {}
+        while (self.feed() or self.step()) {}
         return;
     };
     const output = console.device.output;
@@ -229,6 +309,7 @@ pub fn run(self: *Chip) !void {
         } else if (quiet_rounds == flush_after_rounds) {
             try output.flush();
         } else quiet_rounds += 1;
+        _ = self.feed();
         if (self.step()) continue;
         // with nothing else to do, wait for input
         if (!try console.device.service(true)) break;
@@ -265,14 +346,14 @@ test Layout {
     try std.testing.expectError(error.InvalidLayout, Layout.parse("101x4"));
     try std.testing.expectError(error.InvalidLayout, Layout.parse("4x"));
 
-    const ga144: Layout = .ga144;
-    try expectEqual(144, ga144.count());
-    try expectEqual(17, ga144.index(17));
-    try expectEqual(18, ga144.index(100));
-    try expectEqual(143, ga144.index(717));
-    try expectEqual(null, ga144.index(18));
-    try expectEqual(null, ga144.index(800));
-    try expectEqual(717, ga144.nodeNumber(143));
+    const layout: Layout = .ga144;
+    try expectEqual(144, layout.count());
+    try expectEqual(17, layout.index(17));
+    try expectEqual(18, layout.index(100));
+    try expectEqual(143, layout.index(717));
+    try expectEqual(null, layout.index(18));
+    try expectEqual(null, layout.index(800));
+    try expectEqual(717, layout.nodeNumber(143));
 }
 
 test "neighbours share port names" {
@@ -341,6 +422,56 @@ test "a node can send code to a neighbour" {
     try std.testing.expect(chip.node(1).?.suspended);
 }
 
+test "warm in ROM goes to the ports each node is wired to" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try ga144.testRom(&roms);
+
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    const reset_addresses = try std.testing.allocator.alloc(Address, chip.nodes.len);
+    defer std.testing.allocator.free(reset_addresses);
+    for (chip.nodes, reset_addresses) |n, *address| address.* = n.p.address;
+
+    try chip.loadRom(parsed);
+    for (chip.nodes, reset_addresses, 0..) |*n, reset_address, i| {
+        // warm is a slot 0 jump at x0a9
+        const warm = n.fetch(Address.fromWord(0xa9));
+        try expectEqual(Opcode.jump, Instruction.decode(warm).slot_0);
+        try expectEqual(@as(u9, @bitCast(reset_address)), @as(u9, @intCast(warm & 0x1ff)));
+        // boot nodes start at cold instead
+        const number = chip.layout.nodeNumber(@intCast(i));
+        if (ga144.resetAddress(number) == null) try expectEqual(reset_address, n.p.address);
+    }
+}
+
+test "boot nodes missing from a ROM dump wait for code" {
+    var roms: [1]ga144.NodeRom = .{.{ .node = ga144.basic_node, .words = @splat(0) }};
+
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    const reset_addresses = .{ chip.node(1).?.p.address, chip.node(200).?.p.address };
+    try chip.loadRom(&roms);
+    try expectEqual(reset_addresses[0], chip.node(1).?.p.address);
+    try expectEqual(reset_addresses[1], chip.node(200).?.p.address);
+}
+
+test "the chip settles after reset with ROM" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try ga144.testRom(&roms);
+
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    try chip.loadRom(parsed);
+
+    // with no pins driven, every node ends up waiting for code from a port
+    var rounds: usize = 0;
+    while (chip.step()) : (rounds += 1) try std.testing.expect(rounds < 1_000_000);
+    for (chip.nodes) |n| {
+        try std.testing.expect(n.suspended);
+        try std.testing.expect(n.p.address.io or n.state != .fetch);
+    }
+}
+
 test "output" {
     try expectOutput("up b! 72 !b 105 !b", "", "Hi");
 }
@@ -373,6 +504,50 @@ test attachConsole {
     try chip.attachConsole(&console, 1, .left);
 }
 
+test "init frees what it allocated when it runs out of memory" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn initChip(gpa: Allocator) !void {
+            var chip: Chip = try .init(gpa, .ga144);
+            chip.deinit(gpa);
+        }
+    }.initChip, .{});
+}
+
+test "output is flushed once it has been quiet for a while" {
+    // node 000 outputs, then stays busy for longer than the console waits
+    try expectOutput(
+        \\ up b! 1 !b 1999 for . next left b! @b
+    , "", "\x01");
+}
+
+test "waits for input that has not arrived" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble("up b! @b !b", &diagnostic));
+
+    var input_buffer: [1]u8 = undefined;
+    var input: Io.Queue(u8) = .init(&input_buffer);
+    var buffer: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    try chip.attachConsole(&console, 0, .up);
+
+    // input arrives once the chip is waiting for it
+    var typing = try std.testing.io.concurrent(struct {
+        fn typeKey(io: Io, queue: *Io.Queue(u8), c: *Console) !void {
+            while (!c.waiting.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
+            try queue.putOne(io, 'k');
+            queue.close(io);
+        }
+    }.typeKey, .{ std.testing.io, &input, &console });
+    defer typing.cancel(std.testing.io) catch {};
+
+    try chip.run();
+    try typing.await(std.testing.io);
+    try std.testing.expectEqualStrings("k", writer.buffered());
+}
+
 test "stops when interrupted" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
     defer chip.deinit(std.testing.allocator);
@@ -397,11 +572,14 @@ test "stops when interrupted" {
 }
 
 const assembler = @import("assembler.zig");
+const ga144 = @import("ga144.zig");
 const Console = @import("Console.zig");
 const f18 = @import("f18.zig");
 const Address = f18.Address;
 const Computer = f18.Computer;
 const Instruction = f18.Instruction;
+const Word = f18.Word;
+const Opcode = @import("opcodes.zig").Opcode;
 const port = @import("port.zig");
 const Direction = port.Direction;
 const Port = port.Port;
