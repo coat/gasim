@@ -19,6 +19,8 @@
 //!                       or treat the labels so far as the ROM's
 //!     >BIN              save the code, as the program for its node
 //!     # a org  here  ..  # n <sl  +cy -cy  : name  # n equ name
+//!                       where to assemble, such as RAM or ROM from x080,
+//!                       and labels
 //!     d ,  d lit  n alit
 //!     # nn its name     call a label of another bin, or its ROM
 //!     begin for next unext until -until again end while -while repeat
@@ -234,7 +236,7 @@ const Bin = struct {
     }
 
     fn fresh() Builder {
-        return .{ .ram = @splat(erased), .returns = true, .short_forward = true, .wrap = true };
+        return .{ .mem = @splat(erased), .returns = true, .short_forward = true, .wrap = true };
     }
 
     fn find(self: *const Bin, name: []const u8) ?u16 {
@@ -508,9 +510,9 @@ const Interpreter = struct {
             },
             .org => {
                 const address = try self.pop();
-                if (address < 0 or address & ~@as(i32, 0x27f) != 0) return error.NumberOutOfRange;
+                if (address < 0 or address & ~@as(i32, 0x2ff) != 0) return error.NumberOutOfRange;
                 const b = try self.builder();
-                try b.org(@intCast(address & 0x7f));
+                try b.org(@intCast(address & 0xff));
                 b.extended = address & 0x200 != 0;
             },
             .@"+cy", .@"-cy" => {
@@ -559,8 +561,13 @@ const Interpreter = struct {
                 try bin.builder.org(0);
             },
             .ERS => {
+                // erases RAM, but not ROM
                 const bin = try self.currentBin();
-                bin.builder = Bin.fresh();
+                var fresh = Bin.fresh();
+                fresh.mem[64..].* = bin.builder.mem[64..].*;
+                fresh.lines[64..].* = bin.builder.lines[64..].*;
+                fresh.rom_len = bin.builder.rom_len;
+                bin.builder = fresh;
                 bin.label_count = bin.rom_count;
                 if (bin.label_count < bin.rom_labels.len) bin.rom_labels = &.{};
             },
@@ -585,7 +592,7 @@ const Interpreter = struct {
             .@"]]" => {
                 var b = self.inline_word orelse return error.NotInline;
                 b.alignWord();
-                const value: Word = if (b.len == 0) @bitCast(@as(u18, 0x15555)) else b.ram[0];
+                const value: Word = if (b.len == 0) @bitCast(@as(u18, 0x15555)) else b.mem[0];
                 self.inline_word = null;
                 self.assembling = self.outer.assembling;
                 self.asm_context = self.outer.asm_context;
@@ -610,7 +617,7 @@ const Interpreter = struct {
             .again, .end => try self.back(.jump),
             .unext => {
                 const destination = try self.pop();
-                try (try self.builder()).unext(@intCast(destination & 0x3f));
+                try (try self.builder()).unext(@intCast(destination & 0x3ff));
             },
             .@"if" => try self.forward(.@"if"),
             .@"-if" => try self.forward(.@"-if"),
@@ -674,15 +681,15 @@ const Interpreter = struct {
     /// and slot
     fn forward(self: *Interpreter, opcode: Opcode) Error!void {
         const jump = try (try self.builder()).forward(opcode);
-        try self.push(@as(i32, jump.p) << 8 | @as(i32, jump.address) << 2 | jump.slot);
+        try self.push(@as(i32, jump.p) << 9 | @as(i32, jump.address) << 2 | jump.slot);
     }
 
     fn then(self: *Interpreter) Error!void {
         const handle: u32 = @bitCast(try self.pop());
-        if (handle >> 18 != 0) return error.UnmatchedControl;
+        if (handle >> 19 != 0) return error.UnmatchedControl;
         try (try self.builder()).then(.{
-            .p = @intCast(handle >> 8),
-            .address = @intCast(handle >> 2 & 0x3f),
+            .p = @intCast(handle >> 9),
+            .address = @intCast(handle >> 2 & 0x7f),
             .slot = @intCast(handle & 3),
         });
     }
@@ -708,9 +715,14 @@ const Interpreter = struct {
         const program: Program = .{
             .node = bin.node,
             .bin = if (bin.number == bin.node) null else bin.number,
-            .ram = bin.builder.ram,
+            .ram = bin.builder.mem[0..64].*,
             .len = bin.builder.len,
-            .lines = bin.builder.lines,
+            .lines = bin.builder.lines[0..64].*,
+            .rom = if (bin.builder.rom_len == 0) null else .{
+                .words = bin.builder.mem[64..].*,
+                .lines = bin.builder.lines[64..].*,
+                .len = bin.builder.rom_len,
+            },
             .entry = .{ .io = false, .rom = false, .local = main },
             .rom_word = bin.rom_word,
         };
@@ -1785,4 +1797,20 @@ test "boot descriptor errors" {
     try std.testing.expectError(error.TooManyLoads, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  0 1 1 /PART 0 1 1 /PART 0 1 1 /PART 0 1 1 /PART", &programs, &descriptors, &diagnostic));
     try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  60 5 1 /PART", &programs, &descriptors, &diagnostic));
     try std.testing.expectError(error.NumberOutOfRange, assembleNodes("1 +NODE  11 /STACK", &programs, &descriptors, &diagnostic));
+}
+
+test "assembling into ROM" {
+    var diagnostic: Diagnostic = .{};
+    // ERS erases RAM but not ROM, and code runs on past xbf to xc0, which
+    // is x080 again
+    const program = try assemble("ASM[ # 0 NODE -ROM  # xA9 org : warm dup ;  ERS  # xBF org  drop drop drop drop over  # x10 org a >BIN", &diagnostic);
+    const rom = program.rom.?;
+    try std.testing.expectEqual(64, rom.len);
+    try std.testing.expectEqual(opcodes(.drop, .over, .@".", .@"."), rom.words[0]);
+    try std.testing.expectEqual(erased, rom.words[1]);
+    try std.testing.expectEqual(opcodes(.dup, .@";", .@";", .@";"), rom.words[0x29]);
+    try std.testing.expectEqual(opcodes(.drop, .drop, .drop, .@"."), rom.words[0x3f]);
+    try std.testing.expectEqual(opcodes(.a, .@";", .@";", .@";"), program.ram[0x10]);
+    // a program with no ROM code has none
+    try std.testing.expectEqual(null, (try assemble("ASM[ # 0 NODE dup >BIN", &diagnostic)).rom);
 }

@@ -1,15 +1,19 @@
 //! Packs opcodes, literals and data into the instruction words of one node's
-//! RAM, and resolves references to labels once they are all defined. Front
-//! ends such as assembler.zig and arrayforth.zig turn source into calls to it.
+//! RAM, or its ROM, and resolves references to labels once they are all
+//! defined. Front ends such as assembler.zig and arrayforth.zig turn source
+//! into calls to it.
 
 const Builder = @This();
 
-ram: [64]Word = @splat(0),
+/// RAM, followed by ROM
+mem: [128]Word = @splat(0),
 /// the source line each word was assembled from, or 0 for an unused word
-lines: [64]u32 = @splat(0),
-/// next free address, up to 64, or up to x7f when wrapping
-here: u7 = 0,
+lines: [128]u32 = @splat(0),
+/// next free address, up to 64, or when wrapping any address in RAM or ROM
+here: u8 = 0,
+/// the number of words of RAM and of ROM used, from their first address
 len: u7 = 0,
+rom_len: u7 = 0,
 /// the source line being assembled
 line: usize = 1,
 /// P9 of the location counter, so that code assembled while it is set runs
@@ -19,8 +23,9 @@ extended: bool = false,
 /// Leave the unused slots of a word that ends with a return, ex or jump, or
 /// at the end of the code, as returns rather than nops, as arrayForth 3 does
 returns: bool = false,
-/// Let the location counter run on past the end of RAM as P does, through
-/// x40 to x7f, which address RAM from 0 again, and then around to 0
+/// Let the location counter run on past the end of RAM or ROM as P does,
+/// through x40 to x7f, which address RAM from 0 again, and then around to 0,
+/// or in ROM through xc0 to xff and around to x80. Allows ROM addresses.
 wrap: bool = false,
 /// Let forward jumps go in slot 2, whose 3 bit destination only reaches
 /// within the same 8 words, failing at `then` if it is too far
@@ -32,8 +37,8 @@ single_word: bool = false,
 /// it is executed from, or null if it is not known
 p: ?u10 = null,
 
-/// address of the instruction word being packed
-word: ?u6 = null,
+/// where in memory the instruction word being packed is
+word: ?u7 = null,
 /// the next slot to fill, 4 once all are filled
 slot: u3 = 0,
 instruction: Instruction = nops,
@@ -61,7 +66,8 @@ pub const Error = error{
 
 /// where a jump is, to patch its destination
 pub const Location = struct {
-    address: u6,
+    /// where in memory the jump is
+    address: u7,
     slot: Slot,
     /// P when the jump runs, past its word and any literals before it
     p: u10 = 0,
@@ -81,7 +87,7 @@ const Label = struct {
 const Fixup = struct {
     /// a jump in a slot, or a literal word
     slot: ?Slot,
-    address: u6,
+    address: u7,
     label: u8,
     line: usize,
 };
@@ -107,7 +113,7 @@ pub fn emit(self: *Builder, opcode: Opcode) Error!void {
 pub fn ret(self: *Builder) Error!void {
     const jump = self.last_call orelse return self.emit(.@";");
     self.last_call = null;
-    self.ram[jump.address] ^= switch (jump.slot) {
+    self.mem[jump.address] ^= switch (jump.slot) {
         0 => 1 << 13,
         1 => 1 << 8,
         else => 1 << 3,
@@ -134,7 +140,7 @@ pub fn callLabel(self: *Builder, name: []const u8) Error!void {
 /// Compiles @p followed by the value
 pub fn literal(self: *Builder, value: Word) Error!void {
     try self.emit(.@"@p");
-    self.ram[try self.alloc()] = value;
+    self.mem[try self.alloc()] = value;
 }
 
 /// Compiles @p followed by the address of a label, which may be defined later
@@ -143,7 +149,7 @@ pub fn literalLabel(self: *Builder, name: []const u8) Error!void {
     const word = try self.alloc();
     const label = try self.reference(name);
     if (self.labels[label].address) |destination| {
-        self.ram[word] = destination;
+        self.mem[word] = destination;
     } else try self.addFixup(.{ .slot = null, .address = word, .label = label, .line = self.line });
 }
 
@@ -151,14 +157,14 @@ pub fn literalLabel(self: *Builder, name: []const u8) Error!void {
 pub fn data(self: *Builder, value: Word) Error!void {
     self.last_call = null;
     self.finishWord(.nops);
-    self.ram[try self.alloc()] = value;
+    self.mem[try self.alloc()] = value;
 }
 
 /// Continues assembling at an address
 pub fn org(self: *Builder, destination: Word) Error!void {
     self.last_call = null;
     self.finishWord(.nops);
-    if (destination < 0 or destination >= @as(Word, if (self.wrap) 0x80 else 64)) return error.NumberOutOfRange;
+    if (destination < 0 or destination >= @as(Word, if (self.wrap) 0x100 else 64)) return error.NumberOutOfRange;
     self.here = @intCast(destination);
 }
 
@@ -186,7 +192,7 @@ pub fn define(self: *Builder, name: []const u8) Error!void {
     self.finishWord(.nops);
     const label = &self.labels[try self.reference(name)];
     if (label.address != null) return error.DuplicateLabel;
-    label.address = self.here;
+    label.address = @intCast(self.here);
 }
 
 /// the address of a defined label
@@ -194,8 +200,9 @@ pub fn labelAddress(self: Builder, name: []const u8) ?u7 {
     return self.labels[self.find(name) orelse return null].address;
 }
 
-/// Starts a new instruction word to jump back to, returning its address
-pub fn begin(self: *Builder) Error!u6 {
+/// Starts a new instruction word to jump back to, returning where it is in
+/// memory
+pub fn begin(self: *Builder) Error!u7 {
     self.last_call = null;
     self.finishWord(.nops);
     return self.address();
@@ -208,8 +215,8 @@ pub fn back(self: *Builder, opcode: Opcode, destination: u10) Error!void {
 }
 
 /// Compiles unext, which goes back to the start of its own instruction word
-pub fn unext(self: *Builder, destination: u6) Error!void {
-    if ((self.word orelse @as(u6, @truncate(self.here))) != destination) return error.UnextBodyTooLong;
+pub fn unext(self: *Builder, destination: u10) Error!void {
+    if ((self.word orelse index(self.here)) != index(@truncate(destination))) return error.UnextBodyTooLong;
     try self.emit(.unext);
 }
 
@@ -242,23 +249,31 @@ pub fn finish(self: *Builder, diagnostic: *Diagnostic) Error!void {
         if (fixup.slot) |slot| {
             self.patch(.{ .address = fixup.address, .slot = slot }, destination);
         } else {
-            self.ram[fixup.address] = destination;
+            self.mem[fixup.address] = destination;
         }
     }
 }
 
-/// where in RAM the next word is, which must exist
-fn address(self: *Builder) Error!u6 {
+/// where in memory the next word is, which must exist
+fn address(self: *Builder) Error!u7 {
     if (!self.wrap and self.here >= 64) return error.ProgramTooLarge;
-    return @truncate(self.here);
+    return index(self.here);
 }
 
-fn alloc(self: *Builder) Error!u6 {
+/// Where in memory an address is. Memory ignores bit 6 of the address.
+fn index(at: u8) u7 {
+    return @as(u7, @intFromBool(at & 0x80 != 0)) * 64 + @as(u6, @truncate(at));
+}
+
+fn alloc(self: *Builder) Error!u7 {
     if (self.single_word and self.len > 0) return error.InlineTooLong;
     const result = try self.address();
     self.lines[result] = @intCast(@min(self.line, std.math.maxInt(u32)));
-    self.here = if (self.wrap) self.here +% 1 else self.here + 1;
-    self.len = @max(self.len, @as(u7, result) + 1);
+    // P increments its low 7 bits
+    self.here = if (self.wrap) (self.here & 0x80) | ((self.here + 1) & 0x7f) else self.here + 1;
+    if (result < 64) {
+        self.len = @max(self.len, result + 1);
+    } else self.rom_len = @max(self.rom_len, result - 64 + 1);
     return result;
 }
 
@@ -280,7 +295,7 @@ const Fill = enum {
 fn finishWord(self: *Builder, fill: Fill) void {
     const word = self.word orelse return;
     if (fill == .nops) while (self.slot < 4) : (self.slot += 1) self.setSlot(.@".");
-    self.ram[word] = self.instruction.encode();
+    self.mem[word] = self.instruction.encode();
     self.word = null;
 }
 
@@ -306,7 +321,7 @@ fn emitJump(self: *Builder, opcode: Opcode, destination: ?u10) Error!Location {
     self.setSlot(opcode);
     const jump: Location = .{ .address = self.word.?, .slot = @intCast(self.slot), .p = self.pc() };
     const field = (destination orelse 0) & Instruction.destinationMask(jump.slot);
-    self.ram[jump.address] = self.instruction.encodeJump(jump.slot, @intCast(field));
+    self.mem[jump.address] = self.instruction.encodeJump(jump.slot, @intCast(field));
     self.word = null;
     return jump;
 }
@@ -342,7 +357,7 @@ fn lands(slot: Slot, p: u10, destination: u10) bool {
 
 fn patch(self: *Builder, jump: Location, destination: u10) void {
     const mask = Instruction.destinationMask(jump.slot);
-    const word = &self.ram[jump.address];
+    const word = &self.mem[jump.address];
     word.* = (word.* & ~mask) | (destination & mask);
 }
 

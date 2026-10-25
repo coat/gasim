@@ -57,6 +57,16 @@ pub const Program = struct {
     entry: Address,
     /// where the program first calls a ROM word, which needs the node's ROM
     rom_word: ?Diagnostic = null,
+    /// code assembled into ROM by arrayForth 3, as for checking a chip's ROM
+    rom: ?Rom = null,
+
+    pub const Rom = struct {
+        /// x080 to x0bf
+        words: [64]Word,
+        lines: [64]u32,
+        /// number of words used, from x080
+        len: u7,
+    };
 
     /// Copies the program into the RAM of `node` and starts it at the entry
     pub fn load(self: Program, node: *Computer) void {
@@ -151,7 +161,7 @@ const constants = [_]struct { []const u8, u9 }{
 
 const Control = union(enum) {
     /// address jumped back to by again, next and unext
-    begin: u6,
+    begin: u7,
     /// jump patched by then
     forward: Builder.Location,
 };
@@ -198,9 +208,9 @@ const Assembler = struct {
     fn program(self: Assembler, node: u16) Program {
         return .{
             .node = node,
-            .ram = self.builder.ram,
+            .ram = self.builder.mem[0..64].*,
             .len = self.builder.len,
-            .lines = self.builder.lines,
+            .lines = self.builder.lines[0..64].*,
             .entry = .{ .io = false, .rom = false, .local = self.builder.labelAddress("main") orelse 0 },
             .rom_word = self.rom_word,
         };
@@ -311,7 +321,7 @@ const Assembler = struct {
         self.control_count += 1;
     }
 
-    fn popBegin(self: *Assembler) Error!u6 {
+    fn popBegin(self: *Assembler) Error!u7 {
         if (self.control_count == 0 or self.control[self.control_count - 1] != .begin) {
             return error.UnmatchedControl;
         }
