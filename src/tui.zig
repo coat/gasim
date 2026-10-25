@@ -123,6 +123,8 @@ const Tui = struct {
     /// the first column and row of the map in view, counting rows from the
     /// north edge
     map_scroll: struct { x: u16 = 0, y: u16 = 0 } = .{},
+    /// how the map was last drawn, for the mouse
+    tiles: Tiles = .compact,
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
     message_buffer: [64]u8 = undefined,
@@ -552,8 +554,9 @@ const Tui = struct {
                 self.memory_cursor = row;
             };
             if (panel == .map) {
-                const column: u16 = @intCast(@divFloor(m.col - w.x_off, cell_width) + self.map_scroll.x);
-                const row: u16 = @intCast(m.row - w.y_off + self.map_scroll.y);
+                const t = self.tiles;
+                const column: u16 = @intCast(@divFloor(m.col - w.x_off, t.width + t.gap_x) + self.map_scroll.x);
+                const row: u16 = @intCast(@divFloor(m.row - w.y_off, t.height + t.gap_y) + self.map_scroll.y);
                 const layout = self.chip.layout;
                 if (column < layout.columns and row < layout.rows) self.select((layout.rows - 1 - row) * layout.columns + column);
             }
@@ -816,6 +819,8 @@ const Tui = struct {
     }
 
     fn drawMap(self: *Tui, win: vaxis.Window) void {
+        self.tiles = .fit(win, self.chip.layout);
+        if (self.tiles.height > 1) return self.drawTiles(win);
         const layout = self.chip.layout;
         const columns = @max(win.width / cell_width, 1);
         const rows = @max(win.height, 1);
@@ -840,6 +845,132 @@ const Tui = struct {
                 });
             }
         }
+    }
+
+    /// Draws every node as a tile of its state and registers, with arrows
+    /// between tiles showing what the ports between them are doing
+    fn drawTiles(self: *Tui, win: vaxis.Window) void {
+        const layout = self.chip.layout;
+        const t = self.tiles;
+        self.map_scroll = .{};
+        for (0..layout.rows) |y| for (0..layout.columns) |x| {
+            const i: u16 = @intCast(y * layout.columns + x);
+            // north at the top
+            const column: u16 = @intCast(x * (t.width + t.gap_x));
+            const row: u16 = @intCast((layout.rows - 1 - y) * (t.height + t.gap_y));
+            self.drawTile(win.child(.{ .x_off = column, .y_off = row, .width = t.width, .height = t.height }), i);
+            if (x + 1 < layout.columns) if (self.portArrow(i, .east)) |segment| {
+                _ = win.printSegment(segment, .{ .row_offset = row + t.height / 2, .col_offset = column + t.width + t.gap_x / 2, .wrap = .none });
+            };
+            if (y + 1 < layout.rows) if (self.portArrow(i, .north)) |segment| {
+                _ = win.printSegment(segment, .{ .row_offset = row - 1, .col_offset = column + t.width / 2, .wrap = .none });
+            };
+        };
+    }
+
+    /// Draws a node's number and what it is doing, coloured by it, then its
+    /// registers on as many lines as fit
+    fn drawTile(self: *Tui, win: vaxis.Window, i: u16) void {
+        const n = &self.chip.nodes[i];
+        const status = n.status();
+        var style = statusStyle(status);
+        if (i == self.selected) {
+            style.reverse = true;
+            win.child(.{ .height = 1 }).fill(.{ .style = style });
+        }
+        const header = self.print("{d:0>3} {s}", .{ self.chip.layout.nodeNumber(i), self.statusText(i, status) });
+        _ = win.printSegment(.{ .text = header, .style = style }, .{ .wrap = .none });
+
+        const items = [_][]const u8{
+            self.print("P{x}", .{@as(u10, @bitCast(n.p))}),
+            self.print("s{d}", .{n.slot}),
+            self.print("T{x}", .{@as(u18, @bitCast(n.data_stack.t))}),
+            self.print("S{x}", .{@as(u18, @bitCast(n.data_stack.s))}),
+            self.print("A{x}", .{@as(u18, @bitCast(n.a))}),
+            self.print("B{x}", .{n.b}),
+            self.print("io{x}", .{@as(u18, @bitCast(n.io))}),
+        };
+        // as many as fit on each line, in order
+        var line: u16 = 1;
+        var at: usize = 0;
+        while (line < win.height and at < items.len) : (line += 1) {
+            var len: usize = 0;
+            var end = at;
+            while (end < items.len and len + items[end].len + @intFromBool(end > at) <= win.width) : (end += 1) len += items[end].len + @intFromBool(end > at);
+            // an item too wide for a line is cut short
+            if (end == at) end += 1;
+            const text = std.mem.join(self.frame.allocator(), " ", items[at..end]) catch return;
+            _ = win.printSegment(.{ .text = text }, .{ .row_offset = line, .wrap = .none });
+            at = end;
+        }
+    }
+
+    /// what a node is doing, briefly: running, or waiting for code, to read
+    /// or to write, with arrows for the ports it waits on
+    fn statusText(self: *Tui, i: u16, status: Computer.Status) []const u8 {
+        const kind, const address = switch (status) {
+            .running => return "run",
+            .code => |a| .{ "code", a },
+            .reading => |a| .{ "rd", a },
+            .writing => |a| .{ "wr", a },
+        };
+        const ports = gasim.port.select(address) orelse return self.print("{s} {s}", .{ kind, disassembler.ioName(address) });
+        const layout = self.chip.layout;
+        var arrows: [4][]const u8 = undefined;
+        var count: usize = 0;
+        var it = ports.iterator();
+        while (it.next()) |direction| {
+            arrows[count] = arrow(Chip.facing(i % layout.columns, i / layout.columns, direction));
+            count += 1;
+        }
+        return self.print("{s} {s}", .{ kind, std.mem.join(self.frame.allocator(), "", arrows[0..count]) catch "" });
+    }
+
+    /// An arrow for the port between a node and its neighbour in a direction:
+    /// green for a word that went across in the last step, or that has been
+    /// handed over to be taken, yellow for a node waiting to read or write,
+    /// and dim for one waiting for code, pointing the way the word goes.
+    /// Nodes on both sides waiting to read, as after reset, get none, as no
+    /// word will go either way.
+    fn portArrow(self: *Tui, i: u16, cardinal: Chip.Cardinal) ?vaxis.Segment {
+        const layout = self.chip.layout;
+        const n = &self.chip.nodes[i];
+        const direction = Chip.portToward(i % layout.columns, i / layout.columns, cardinal);
+        const link = n.ports[@backingInt(direction)];
+        const p = link.port orelse return null;
+        const j = layout.neighbour(i, direction) orelse return null;
+        const facing_back = Chip.portToward(j % layout.columns, j / layout.columns, opposite(cardinal));
+        const other = &self.chip.nodes[j];
+
+        const moved: vaxis.Style = .{ .fg = .{ .index = 2 }, .bold = true };
+        const waiting: vaxis.Style = .{ .fg = .{ .index = 3 } };
+        const out: []const u8 = arrow(cardinal);
+        const in: []const u8 = arrow(opposite(cardinal));
+        if (n.transfers.written.contains(direction) or other.transfers.read.contains(facing_back)) return .{ .text = out, .style = moved };
+        if (n.transfers.read.contains(direction) or other.transfers.written.contains(facing_back)) return .{ .text = in, .style = moved };
+        return switch (p.state) {
+            .idle => null,
+            .reading => |side| reading: {
+                // the port remembers only the first of two readers
+                const also_reading = if (side == link.side) self.waitsToRead(j, facing_back) else self.waitsToRead(i, direction);
+                if (also_reading) break :reading null;
+                const reader = if (side == link.side) n else other;
+                break :reading .{ .text = if (side == link.side) in else out, .style = if (reader.status() == .code) .{ .dim = true } else waiting };
+            },
+            .writing => |w| .{ .text = if (w.side == link.side) out else in, .style = waiting },
+            .delivered => |d| .{ .text = if (d.side == link.side) in else out, .style = moved },
+            .taken => |side| .{ .text = if (side == link.side) out else in, .style = moved },
+        };
+    }
+
+    /// whether a node is waiting to read, or for code, on one of its ports
+    fn waitsToRead(self: *Tui, i: u16, direction: Direction) bool {
+        const address = switch (self.chip.nodes[i].status()) {
+            .code, .reading => |a| a,
+            .running, .writing => return false,
+        };
+        const ports = gasim.port.select(address) orelse return false;
+        return ports.contains(direction);
     }
 
     fn drawConsole(self: *Tui, win: vaxis.Window) void {
@@ -1155,6 +1286,45 @@ const Completions = struct {
     }
 };
 
+/// How the map draws nodes: as their numbers, or with more room, as tiles of
+/// their registers, with gaps between them for arrows
+const Tiles = struct {
+    width: u16,
+    height: u16,
+    /// columns and rows between tiles
+    gap_x: u16,
+    gap_y: u16,
+
+    const compact: Tiles = .{ .width = cell_width - 1, .height = 1, .gap_x = 1, .gap_y = 0 };
+
+    /// the largest tiles every node fits in `win` with, or compact ones
+    fn fit(win: vaxis.Window, layout: Chip.Layout) Tiles {
+        const width = win.width / layout.columns;
+        const height = win.height / layout.rows;
+        // with the arrows between tiles in the middle of their gaps
+        if (width < 11 or height < 3) return compact;
+        return .{ .width = @min(width - 3, 16), .height = @min(height - 1, 6), .gap_x = 3, .gap_y = 1 };
+    }
+};
+
+fn arrow(cardinal: Chip.Cardinal) []const u8 {
+    return switch (cardinal) {
+        .north => "↑",
+        .east => "→",
+        .south => "↓",
+        .west => "←",
+    };
+}
+
+fn opposite(cardinal: Chip.Cardinal) Chip.Cardinal {
+    return switch (cardinal) {
+        .north => .south,
+        .east => .west,
+        .south => .north,
+        .west => .east,
+    };
+}
+
 /// a TUI showing a GA144 sized chip loaded with `source`, for tests
 const TestTui = struct {
     chip: Chip,
@@ -1169,8 +1339,12 @@ const TestTui = struct {
     tui: Tui = undefined,
 
     fn init(self: *TestTui, source: []const u8) !void {
+        return self.initLayout(source, .ga144);
+    }
+
+    fn initLayout(self: *TestTui, source: []const u8, layout: Chip.Layout) !void {
         const gpa = std.testing.allocator;
-        self.chip = try .init(gpa, .ga144);
+        self.chip = try .init(gpa, layout);
         errdefer self.chip.deinit(gpa);
         var programs: [4]gasim.assembler.Program = undefined;
         var diagnostic: gasim.assembler.Diagnostic = .{};
@@ -1628,4 +1802,42 @@ test "a short screen leaves text panels no rows" {
     t.tui.shown.insert(.forth);
     // the console gets one row of the four below the map, inside its border
     for (8..14) |height| t.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = @intCast(height), .screen = &t.screen });
+}
+
+test "the map shows nodes as tiles when it has room" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.initLayout("", .{ .rows = 2, .columns = 3 });
+    defer t.deinit();
+    t.tui.focus = .map;
+    try t.press('f');
+    for (0..3) |_| try t.press('S');
+    const tiles = t.tui.tiles;
+    try std.testing.expectEqual(16, tiles.width);
+    try std.testing.expectEqual(6, tiles.height);
+
+    // node 000 is at the bottom left, inside the panel's border, with what
+    // it is doing and its registers
+    const row: u16 = 1 + tiles.height + tiles.gap_y;
+    try std.testing.expect(try t.shows(row, "000 code"));
+    try std.testing.expect(try t.shows(row + 1, "T0 S0"));
+
+    // nodes waiting for code from each other, as after reset, have no
+    // arrows between them
+    try std.testing.expectEqualStrings(" ", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
+    try std.testing.expectEqualStrings(" ", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
+
+    // arrows between tiles point the way words go between nodes
+    const chip = &t.chip;
+    chip.nodes[0].suspended = false;
+    const right = chip.nodes[0].ports[@backingInt(Chip.portToward(0, 0, .east))];
+    right.port.?.state = .{ .writing = .{ .side = right.side, .value = 1 } };
+    const up = chip.nodes[0].ports[@backingInt(Chip.portToward(0, 0, .north))];
+    up.port.?.state = .{ .reading = up.side.other() };
+    t.draw();
+    try std.testing.expectEqualStrings("→", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("↑", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
+
+    // and clicking a tile selects its node
+    try t.click(1 + tiles.width + tiles.gap_x + 2, 2, .press);
+    try std.testing.expectEqual(chip.layout.index(101).?, t.tui.selected);
 }

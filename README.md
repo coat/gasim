@@ -162,7 +162,11 @@ line editing.
 ### Terminal user interface
 
 A map panel shows all nodes. Running nodes are green, nodes waiting on a port
-yellow, and nodes waiting for code dim. The node panel shows the selected
+yellow, and nodes waiting for code dim. Given room, such as by filling the
+screen with `f`, it shows each node as a tile with what it is waiting on and
+its registers, and arrows between tiles show what the ports between nodes
+are doing: green for a word that went across, yellow for a node waiting to
+read or write, and dim for one waiting for code. The node panel shows the selected
 node's registers, stacks, and RAM and ROM around the word it is executing.
 
 | Key | |
