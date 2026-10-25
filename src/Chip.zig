@@ -247,10 +247,11 @@ pub fn expectOutput(source: []const u8, input: []const u8, expected: []const u8)
     var diagnostic: assembler.Diagnostic = .{};
     for (try assembler.assembleNodes(source, &programs, &diagnostic)) |program| try chip.load(program);
 
-    var reader: Io.Reader = .fixed(input);
+    var input_buffer: [256]u8 = undefined;
+    var input_queue = try Console.testInput(&input_buffer, input);
     var buffer: [256]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .input = &reader, .output = &writer };
+    var console: Console = .{ .io = std.testing.io, .input = &input_queue, .output = &writer };
     try chip.attachConsole(&console, 0, .up);
 
     try chip.run();
@@ -364,9 +365,9 @@ test attachConsole {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 2 });
     defer chip.deinit(std.testing.allocator);
 
-    var reader: Io.Reader = .fixed("");
+    var input: Io.Queue(u8) = .init(&.{});
     var writer: Io.Writer = .fixed(&.{});
-    var console: Console = .{ .input = &reader, .output = &writer };
+    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
     try std.testing.expectError(error.PortConnected, chip.attachConsole(&console, 0, .right));
     try std.testing.expectError(error.NoSuchNode, chip.attachConsole(&console, 100, .up));
     try chip.attachConsole(&console, 1, .left);
@@ -379,10 +380,10 @@ test "stops when interrupted" {
     var diagnostic: assembler.Diagnostic = .{};
     try chip.load(try assembler.assemble("up b! 1 !b begin again", &diagnostic));
 
-    var reader: Io.Reader = .fixed("");
+    var input = try Console.testInput(&.{}, "");
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .input = &reader, .output = &writer };
+    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
     try chip.attachConsole(&console, 0, .up);
 
     // run the program up to its endless loop

@@ -68,8 +68,11 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
 
+    var input_buffer: [1024]u8 = undefined;
+    var input: Io.Queue(u8) = .init(&input_buffer);
     var console: Console = .{
-        .input = &stdin_file_reader.interface,
+        .io = io,
+        .input = &input,
         .output = &stdout_file_writer.interface,
     };
     chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
@@ -84,7 +87,17 @@ pub fn main(init: std.process.Init) !void {
         .flags = 0,
     }, null);
 
+    // read stdin on its own thread, so the chip runs while it waits for input
+    var reading = io.concurrent(Console.readInput, .{ io, &stdin_file_reader.interface, &input }) catch |err|
+        fatal("cannot read input concurrently: {t}", .{err});
+    errdefer reading.cancel(io) catch {};
     try chip.run();
+    // stops a read blocked waiting for input that will no longer be taken
+    reading.cancel(io) catch |err| switch (err) {
+        error.Canceled => {},
+        error.ReadFailed => if (stdin_file_reader.err.? != error.Canceled)
+            fatal("stdin: {t}", .{stdin_file_reader.err.?}),
+    };
     // the conventional status for a program stopped by SIGINT
     if (console.interrupted.load(.monotonic)) std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
     // most likely the console is on a port the program does not use
