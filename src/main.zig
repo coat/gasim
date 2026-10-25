@@ -5,7 +5,8 @@ const usage =
     \\
     \\Opens the program in a terminal user interface. With run, or when stdin
     \\or stdout is not a terminal, runs it instead with the console on stdin
-    \\and stdout, until every node is waiting or reaches a breakpoint.
+    \\and stdout, until every node is waiting, or one reaches a breakpoint or
+    \\makes a watched transfer.
     \\
     \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
@@ -17,6 +18,10 @@ const usage =
     \\  --break <node>:<address>   stop when the node is about to fetch the word
     \\                             at the address, in hex, such as 105:003. Can
     \\                             be given more than once.
+    \\  --watch <node>:<port>[:read|:write]
+    \\                             stop when the node reads from or writes to the
+    \\                             port, such as 105:right:write. Can be given
+    \\                             more than once.
     \\  --trace                    with run, write a line to stderr for each
     \\                             word a node executes
 ;
@@ -57,10 +62,12 @@ pub fn main(init: std.process.Init) !void {
     var trace = false;
     var breakpoints: [Chip.max_breakpoints]struct { node: u16, address: u9 } = undefined;
     var breakpoints_len: usize = 0;
+    var watches: [Chip.max_watches]struct { node: u16, direction: Direction, read: bool, write: bool } = undefined;
+    var watches_len: usize = 0;
     var i: usize = if (run_command) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break")) {
+        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch")) {
             i += 1;
             if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
             const value = args[i];
@@ -77,6 +84,24 @@ pub fn main(init: std.process.Init) !void {
                         fatal("invalid breakpoint address '{s}', expected 000 to 1ff", .{value[colon + 1 ..]}),
                 };
                 breakpoints_len += 1;
+            } else if (std.mem.eql(u8, arg, "--watch")) {
+                var parts = std.mem.splitScalar(u8, value, ':');
+                const node = parts.first();
+                const direction = parts.next() orelse
+                    fatal("invalid watch '{s}', expected for example 105:right or 105:right:write", .{value});
+                const kind = parts.next();
+                if (parts.next() != null) fatal("invalid watch '{s}', expected for example 105:right or 105:right:write", .{value});
+                if (kind) |k| if (!std.mem.eql(u8, k, "read") and !std.mem.eql(u8, k, "write"))
+                    fatal("invalid watch '{s}', expected read or write after the port", .{value});
+                if (watches_len == watches.len) fatal("more than {d} watches", .{watches.len});
+                watches[watches_len] = .{
+                    .node = std.fmt.parseInt(u16, node, 10) catch fatal("invalid watch node '{s}'", .{node}),
+                    .direction = std.meta.stringToEnum(Direction, direction) orelse
+                        fatal("invalid watch port '{s}', expected right, down, left or up", .{direction}),
+                    .read = kind == null or std.mem.eql(u8, kind.?, "read"),
+                    .write = kind == null or std.mem.eql(u8, kind.?, "write"),
+                };
+                watches_len += 1;
             } else if (std.mem.eql(u8, arg, "--layout")) {
                 layout = Chip.Layout.parse(value) catch fatal("invalid layout '{s}', expected for example 8x18", .{value});
             } else {
@@ -126,7 +151,17 @@ pub fn main(init: std.process.Init) !void {
         const index = layout.index(b.node) orelse
             fatal("breakpoint node {d:0>3} is not in a {d}x{d} layout", .{ b.node, layout.rows, layout.columns });
         // the same breakpoint twice is still set
-        if (!chip.hasBreakpoint(.init(index, b.address))) _ = chip.toggleBreakpoint(.init(index, b.address)) catch unreachable;
+        chip.breakpoints.insert(.init(index, b.address)) catch unreachable;
+    }
+
+    for (watches[0..watches_len]) |w| {
+        const index = layout.index(w.node) orelse
+            fatal("watch node {d:0>3} is not in a {d}x{d} layout", .{ w.node, layout.rows, layout.columns });
+        for ([_]bool{ false, true }) |write| {
+            if (!(if (write) w.write else w.read)) continue;
+            chip.watches.insert(.{ .index = index, .direction = w.direction, .write = write }) catch
+                fatal("more than {d} watches", .{Chip.max_watches});
+        }
     }
 
     var feeder: Chip.Feeder = .{ .words = &.{} };
@@ -202,10 +237,10 @@ pub fn main(init: std.process.Init) !void {
     if (chip.hit) |hit| {
         // after what was traced up to it
         stderr_file_writer.interface.flush() catch {};
-        const n = chip.nodes[hit.index];
-        std.log.info("node {d:0>3} reached {x:0>3}: T {x:0>5}  S {x:0>5}  R {x:0>5}  A {x:0>5}  B {x:0>3}", .{
-            layout.nodeNumber(hit.index),
-            hit.address,
+        const n = &chip.nodes[hit.index()];
+        std.log.info("{f}", .{hit.describe(layout)});
+        std.log.info("P {x:0>3}  T {x:0>5}  S {x:0>5}  R {x:0>5}  A {x:0>5}  B {x:0>3}", .{
+            @as(u10, @bitCast(n.p)),
             @as(u18, @bitCast(n.data_stack.t)),
             @as(u18, @bitCast(n.data_stack.s)),
             @as(u18, @bitCast(n.return_stack.t)),

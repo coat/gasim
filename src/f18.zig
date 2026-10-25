@@ -132,6 +132,17 @@ pub const Instruction = packed struct(Word) {
 
 /// An F18A computer
 pub const Computer = struct {
+    pub const Transfers = struct {
+        read: port.Select = .empty,
+        written: port.Select = .empty,
+        value_read: Word = 0,
+        value_written: Word = 0,
+
+        pub fn any(self: Transfers) bool {
+            return self.read.count() > 0 or self.written.count() > 0;
+        }
+    };
+
     const State = enum {
         fetch,
         execution,
@@ -184,6 +195,10 @@ pub const Computer = struct {
     /// waiting in mid-instruction on a comm port. The pending operation is
     /// retried by the next call to `step`.
     suspended: bool,
+    /// the comm ports read from and written to by the last call to `step`,
+    /// and the last value each way. Reads include instruction words fetched
+    /// from a port.
+    transfers: Transfers = .{},
 
     execution_time: f32,
 
@@ -192,6 +207,7 @@ pub const Computer = struct {
     /// must wait on a comm port.
     pub fn step(self: *Computer) void {
         self.suspended = false;
+        self.transfers = .{};
         if (self.state == .fetch) {
             // instructions may be fetched from a port
             self.i = self.read(self.p.address) orelse return;
@@ -293,6 +309,8 @@ pub const Computer = struct {
             const link = self.ports[@backingInt(direction)];
             const p = link.port orelse continue;
             if (p.read(link.side)) |word| {
+                self.transfers.read.insert(direction);
+                self.transfers.value_read = word;
                 var others = ports.iterator();
                 while (others.next()) |other| {
                     const other_link = self.ports[@backingInt(other)];
@@ -312,7 +330,11 @@ pub const Computer = struct {
         while (it.next()) |direction| {
             const link = self.ports[@backingInt(direction)];
             const p = link.port orelse continue;
-            if (p.write(link.side, value)) written = true;
+            if (p.write(link.side, value)) {
+                written = true;
+                self.transfers.written.insert(direction);
+                self.transfers.value_written = value;
+            }
         }
         if (written) {
             it = ports.iterator();
@@ -836,15 +858,21 @@ test "computers communicate through a port" {
     try expect(sender.suspended);
     try expectEqual(42, sender.data_stack.t);
 
+    try expectEqual(port.Select.empty, sender.transfers.written);
+
     // the receiver takes the first word and waits for the second
     receiver.step();
     try expect(receiver.suspended);
     try expectEqual(42, receiver.data_stack.t);
+    try expectEqual(port.Select.initOne(.left), receiver.transfers.read);
+    try expectEqual(42, receiver.transfers.value_read);
 
     // the sender completes the first write and finishes its instruction word
     sender.step();
     try expect(!sender.suspended);
     try expectEqual(Address.fromWord(3), sender.p.address);
+    try expectEqual(port.Select.initOne(.right), sender.transfers.written);
+    try expectEqual(42, sender.transfers.value_written);
 
     // the receiver is not reading again until it resumes, so the sender waits
     sender.step();

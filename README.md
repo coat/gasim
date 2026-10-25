@@ -47,8 +47,13 @@ Options:
   001, as one GA144 boots another, instead of writing them straight into RAM.
   This needs ROM.
 - `--break <node>:<address>`: stop when the node is about to fetch the word at
-  the address, given in hex, and print its stacks and registers. Can be given
-  more than once.
+  the address, given in hex, and print its stacks and registers. Literals
+  are never fetched as instructions, so a breakpoint on one never stops. Can
+  be given more than once.
+- `--watch <node>:<port>[:read|:write]`: stop when the node reads from or
+  writes to the port, or only one of those, and print the value. Reads include
+  instruction words the node fetches from the port, such as a boot stream. Can
+  be given more than once.
 - `--trace`: with `run`, write a line to stderr for each word a node executes:
   the node, the word's address, the raw word, its opcodes, and T, S and R
   after it.
@@ -82,13 +87,15 @@ node's registers, stacks, and RAM and ROM around the word it is executing.
 | `<` `>` `-` `+` | resize the panels, as can dragging their borders |
 | `pgup` `pgdn` | page through memory, or scroll the console |
 | `b` | set or clear a breakpoint on the word in memory under the cursor |
+| `w` | watch the selected node's reads from a port, with `r` `d` `l` `u`, or its writes to one, with `R` `D` `L` `U`, or stop watching it |
 | `g` | follow the word the node is executing again |
 | `q`, `ctrl+c` | quit |
 
 Clicking a panel selects it, and clicking a node on the map selects it.
 Clicking a word in memory moves the cursor to it, and clicking to its left
 sets or clears a breakpoint, shown as a red dot. Running pauses when a node
-is about to fetch a word with a breakpoint, and selects that node.
+is about to fetch a word with a breakpoint, or makes a watched transfer,
+and selects that node.
 Borders between panels can be dragged, or on touch screens, which turn drags
 into scrolling, tapped and then tapped again where they should go. In
 the console, typed text is sent as input with `enter`, `ctrl+d` ends the

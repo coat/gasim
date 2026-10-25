@@ -30,7 +30,7 @@ const rounds_per_check = 256;
 /// width of a node in the map
 const cell_width = 4;
 /// rows of the node panel above its memory listing
-const node_header_rows = 13;
+const node_header_rows = 14;
 /// rows of the memory listing: a heading and 64 words each for RAM and ROM
 const memory_rows = 2 * 65;
 
@@ -92,6 +92,8 @@ const Tui = struct {
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
     message_buffer: [64]u8 = undefined,
+    /// the next key chooses a port of the selected node to watch
+    choosing_watch: bool = false,
 
     /// where panels were last drawn, for the mouse
     windows: std.EnumArray(Panel, ?vaxis.Window) = .initFill(null),
@@ -143,20 +145,21 @@ const Tui = struct {
                     self.settled = true;
                     return;
                 }
-                if (self.chip.hit != null) return self.stopAtBreakpoint();
+                if (self.chip.hit != null) return self.stop();
             }
             if (Io.Timestamp.now(self.io, .awake).compare(.gte, deadline)) return;
         }
     }
 
-    /// pauses at the breakpoint a node reached, showing the node
-    fn stopAtBreakpoint(self: *Tui) void {
+    /// pauses at the breakpoint a node reached, or the watched transfer it
+    /// made, showing the node
+    fn stop(self: *Tui) void {
         const hit = self.chip.hit orelse return;
         self.chip.hit = null;
         self.running = false;
-        self.select(hit.index);
+        self.select(hit.index());
         self.memory_scroll = null;
-        self.message = self.printLasting("node {d:0>3} reached {x:0>3}", .{ self.chip.layout.nodeNumber(hit.index), hit.address });
+        self.message = self.printLasting("{f}", .{hit.describe(self.chip.layout)});
     }
 
     /// Handles an event, returning false to quit
@@ -180,6 +183,11 @@ const Tui = struct {
 
     /// Handles keys for the panels and the chip, returning false to quit
     fn key(self: *Tui, k: vaxis.Key) !bool {
+        if (self.choosing_watch) {
+            self.choosing_watch = false;
+            self.chooseWatch(k);
+            return true;
+        }
         if (k.matches('q', .{})) return false;
         // matching text would take tab for shift+tab too
         if (k.codepoint == vaxis.Key.tab) self.cycleFocus(if (k.mods.shift) -1 else 1);
@@ -223,7 +231,7 @@ const Tui = struct {
             }
         }
 
-        if (self.chip.hit != null) self.stopAtBreakpoint();
+        if (self.chip.hit != null) self.stop();
 
         switch (self.focus) {
             .map => self.mapKey(k),
@@ -240,6 +248,10 @@ const Tui = struct {
                     if (self.cursorRow()) |row| {
                         self.toggleBreakpoint(row);
                     } else self.message = "move to a word in memory first";
+                }
+                if (k.matches('w', .{})) {
+                    self.choosing_watch = true;
+                    self.message = "watch reads from r d l u, or writes to R D L U";
                 }
             },
             .console => {},
@@ -418,10 +430,27 @@ const Tui = struct {
         if (row == 1 and first <= 1) self.memory_scroll = 0;
     }
 
+    /// sets or clears a watch on the port of the selected node a key names
+    fn chooseWatch(self: *Tui, k: vaxis.Key) void {
+        const text = k.text orelse return;
+        if (text.len != 1) return;
+        const direction: Direction = switch (std.ascii.toLower(text[0])) {
+            'r' => .right,
+            'd' => .down,
+            'l' => .left,
+            'u' => .up,
+            else => return,
+        };
+        _ = self.chip.watches.toggle(.{ .index = self.selected, .direction = direction, .write = std.ascii.isUpper(text[0]) }) catch {
+            self.message = "there are too many watches";
+        };
+    }
+
     fn toggleBreakpoint(self: *Tui, row: u16) void {
         const address = rowAddress(row) orelse return;
-        _ = self.chip.toggleBreakpoint(.init(self.selected, address)) catch {
+        _ = self.chip.breakpoints.toggle(.init(self.selected, address)) catch {
             self.message = "there are too many breakpoints";
+            return;
         };
     }
 
@@ -674,6 +703,7 @@ const Tui = struct {
         _ = win.printSegment(.{ .text = self.stack(&n.data_stack.stack, n.data_stack.index), .style = colors.dim }, .{ .row_offset = 8, .col_offset = 2, .wrap = .none });
         self.fields(win, 9, &.{.{ "R", self.hex(n.return_stack.t) }});
         _ = win.printSegment(.{ .text = self.stack(&n.return_stack.stack, n.return_stack.index), .style = colors.dim }, .{ .row_offset = 10, .col_offset = 2, .wrap = .none });
+        self.fields(win, 11, &.{.{ "watch", self.watches() }});
 
         if (win.height <= node_header_rows) return;
         const listing = win.child(.{ .y_off = node_header_rows - 1 });
@@ -711,7 +741,7 @@ const Tui = struct {
                 .text = if (value >= 0x100 and value < 0x200) self.print("literal {s}", .{ioName(@intCast(value))}) else self.print("literal {d}", .{word}),
                 .style = colors.literal,
             };
-            const is_breakpoint = self.chip.hasBreakpoint(.init(self.selected, address));
+            const is_breakpoint = self.chip.breakpoints.contains(.init(self.selected, address));
             var address_style = colors.address;
             if (self.focus == .node and r == (self.cursorRow() orelse memory_rows)) address_style.reverse = true;
             var segments = [_]vaxis.Segment{
@@ -740,7 +770,7 @@ const Tui = struct {
         const hints: []const Hint = switch (self.focus) {
             .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "arrows", "select" }, .{ "1-3", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
             .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "tab", "next" }, .{ "esc", "map" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "b", "breakpoint" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
         };
         var segments: [4 + 2 * 9]vaxis.Segment = undefined;
         var len: usize = 0;
@@ -758,6 +788,17 @@ const Tui = struct {
             len += 2;
         }
         _ = win.print(segments[0..len], .{ .wrap = .none });
+    }
+
+    /// the ports of the selected node that are watched, such as `reads
+    /// right, writes up`
+    fn watches(self: *Tui) []const u8 {
+        var text: []const u8 = "";
+        for (self.chip.watches.items()) |w| if (w.index == self.selected) {
+            const separator = if (text.len == 0) "" else ", ";
+            text = self.print("{s}{s}{s} {t}", .{ text, separator, if (w.write) "writes" else "reads", w.direction });
+        };
+        return if (text.len == 0) "none, w to add" else text;
     }
 
     fn disassemble(self: *Tui, word: Word, address: u9) []const u8 {
@@ -981,8 +1022,8 @@ test "draws the chip, console and selected node" {
     try std.testing.expect(try t.shows(1, "700 701"));
     try std.testing.expect(try t.shows(8, "000 001"));
     try std.testing.expect(try t.shows(10, "2 console 000:up"));
-    try std.testing.expect(try t.shows(13, "RAM"));
-    try std.testing.expect(try t.shows(14, ">000"));
+    try std.testing.expect(try t.shows(14, "RAM"));
+    try std.testing.expect(try t.shows(15, ">000"));
 
     // stepping follows the node that runs, and the console shows its output
     try t.press('s');
@@ -1141,17 +1182,17 @@ test "stops at breakpoints set in the memory listing" {
 
     // on the current word, and then the next one
     try t.press('b');
-    try std.testing.expect(t.tui.chip.hasBreakpoint(.init(0, 0)));
-    try std.testing.expect(try t.shows(14, "#>000"));
+    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(0, 0)));
+    try std.testing.expect(try t.shows(15, "#>000"));
     try t.press(vaxis.Key.down);
     try t.press('b');
-    try std.testing.expect(t.tui.chip.hasBreakpoint(.init(0, 1)));
+    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(0, 1)));
     // and cleared by clicking the left edge
     const left: u16 = @intCast(t.tui.memory_window.?.x_off);
-    try t.click(left, 15, .press);
-    try std.testing.expect(!t.tui.chip.hasBreakpoint(.init(0, 1)));
+    try t.click(left, 16, .press);
+    try std.testing.expect(!t.tui.chip.breakpoints.contains(.init(0, 1)));
     // clicking a word moves the cursor to it
-    try t.click(left + 4, 16, .press);
+    try t.click(left + 4, 17, .press);
     try std.testing.expectEqual(3, t.tui.memory_cursor);
 
     // running stops when the node loops back
@@ -1170,12 +1211,37 @@ test "breakpoints need a word in memory" {
     t.tui.select(1);
     try t.press('b');
     try std.testing.expectEqualStrings("move to a word in memory first", t.tui.message.?);
-    try std.testing.expectEqual(0, t.tui.chip.breakpoints_len);
+    try std.testing.expectEqual(0, t.tui.chip.breakpoints.len);
 
     // moving down starts at its first word
     try t.press('j');
     try t.press('b');
-    try std.testing.expect(t.tui.chip.hasBreakpoint(.init(1, 0)));
+    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(1, 0)));
+}
+
+test "stops at watched transfers" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("up b! 72 !b left b! @b");
+    defer t.deinit();
+    t.tui.focus = .node;
+    t.draw();
+    try std.testing.expect(try t.shows(12, "watch none"));
+
+    // writes to up, and reads from left
+    try t.press('w');
+    try t.press('U');
+    try t.press('w');
+    try t.press('l');
+    try std.testing.expect(try t.shows(12, "watch writes up, reads left"));
+    // another key leaves the watches as they were
+    try t.press('w');
+    try t.press('x');
+    try std.testing.expectEqual(2, t.tui.chip.watches.len);
+
+    // the console reads the write in the round after
+    t.tui.running = true;
+    try t.tui.run();
+    try std.testing.expectEqualStrings("node 000 wrote 00048 to up", t.tui.message.?);
 }
 
 test status {

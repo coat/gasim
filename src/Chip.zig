@@ -30,11 +30,12 @@ steps: u64 = 0,
 started: bool = false,
 
 /// where running stops, by node index
-breakpoints: [max_breakpoints]Breakpoint = undefined,
-breakpoints_len: u8 = 0,
-/// the first breakpoint a node reached since `run` started, or since it was
-/// last cleared
-hit: ?Breakpoint = null,
+breakpoints: SmallSet(Breakpoint, max_breakpoints) = .{},
+/// transfers through ports that stop running
+watches: SmallSet(Watch, max_watches) = .{},
+/// the first breakpoint a node reached, or watched transfer, since `run`
+/// started or it was last cleared
+hit: ?Stop = null,
 /// where a line is written for each step that executes code. Tracing stops
 /// if writing fails.
 trace: ?*Io.Writer = null,
@@ -47,6 +48,7 @@ feeder: ?struct { device: *Feeder, index: u16 } = null,
 const Chip = @This();
 
 pub const max_breakpoints = 32;
+pub const max_watches = 32;
 
 /// A node about to fetch the word at an address. RAM and ROM addresses that
 /// repeat the same word, such as x000 and x040, are the same breakpoint.
@@ -59,6 +61,91 @@ pub const Breakpoint = struct {
         return .{ .index = index, .address = if (address & 0x100 == 0) address & 0x1bf else address };
     }
 };
+
+/// A node completing a read from, or a write to, one of its ports
+pub const Watch = struct {
+    index: u16,
+    direction: Direction,
+    write: bool,
+};
+
+/// why running stopped
+pub const Stop = union(enum) {
+    breakpoint: Breakpoint,
+    /// with the value that was read or written
+    watch: struct { watch: Watch, value: Word },
+
+    pub fn index(self: Stop) u16 {
+        return switch (self) {
+            .breakpoint => |b| b.index,
+            .watch => |w| w.watch.index,
+        };
+    }
+
+    /// formats why running stopped, such as `node 000 reached 004` or `node
+    /// 001 read 00068 from right`
+    pub fn describe(self: Stop, layout: Layout) Description {
+        return .{ .stop = self, .layout = layout };
+    }
+
+    pub const Description = struct {
+        stop: Stop,
+        layout: Layout,
+
+        pub fn format(self: Description, writer: *Io.Writer) Io.Writer.Error!void {
+            const number = self.layout.nodeNumber(self.stop.index());
+            switch (self.stop) {
+                .breakpoint => |b| try writer.print("node {d:0>3} reached {x:0>3}", .{ number, b.address }),
+                .watch => |w| try writer.print("node {d:0>3} {s} {x:0>5} {s} {t}", .{
+                    number,
+                    if (w.watch.write) "wrote" else "read",
+                    @as(u18, @bitCast(w.value)),
+                    if (w.watch.write) "to" else "from",
+                    w.watch.direction,
+                }),
+            }
+        }
+    };
+};
+
+/// A set of up to `capacity` items, such as breakpoints, without allocating
+fn SmallSet(comptime T: type, comptime capacity: usize) type {
+    return struct {
+        buffer: [capacity]T = undefined,
+        len: u8 = 0,
+
+        const Self = @This();
+
+        pub fn items(self: *const Self) []const T {
+            return self.buffer[0..self.len];
+        }
+
+        pub fn contains(self: Self, item: T) bool {
+            for (self.items()) |i| if (std.meta.eql(i, item)) return true;
+            return false;
+        }
+
+        /// Adds an item unless it is there already
+        pub fn insert(self: *Self, item: T) error{Full}!void {
+            if (self.contains(item)) return;
+            if (self.len == capacity) return error.Full;
+            self.buffer[self.len] = item;
+            self.len += 1;
+        }
+
+        /// Adds an item, or removes it if it is there. Returns whether it
+        /// is there now.
+        pub fn toggle(self: *Self, item: T) error{Full}!bool {
+            for (self.buffer[0..self.len]) |*i| if (std.meta.eql(i.*, item)) {
+                i.* = self.buffer[self.len - 1];
+                self.len -= 1;
+                return false;
+            };
+            try self.insert(item);
+            return true;
+        }
+    };
+}
 
 /// Writes words to a node through a port, such as a boot stream
 pub const Feeder = struct {
@@ -311,30 +398,26 @@ pub fn stepNode(self: *Chip, i: u16) void {
     for (n.ports, &before) |link, *state| state.* = if (link.port) |p| p.state else .idle;
 
     const fetching = n.state == .fetch;
+    const retrying = n.suspended;
     n.step();
     self.steps += 1;
     self.started = true;
     if (!n.suspended) self.wake(i);
-    // unless the node is still waiting for a word to execute
-    if (self.trace) |writer| if (!fetching or n.state != .fetch or !n.suspended) {
+    // unless the node is still waiting for a word to execute, or still
+    // waiting on the same port
+    const waited = n.suspended and !n.transfers.any() and (retrying or (fetching and n.state == .fetch));
+    if (self.trace) |writer| if (!waited) {
         self.writeTrace(writer, i) catch {
             self.trace = null;
         };
     };
-    if (self.hit == null and !n.suspended and n.state == .fetch) self.hit = self.breakpointAt(i);
+    if (self.hit == null and self.breakpoints.len + self.watches.len > 0) self.hit = self.stopAt(i);
 
     for (n.ports, before, 0..) |link, state, d| {
         const p = link.port orelse continue;
         if (std.meta.eql(state, p.state)) continue;
         if (self.layout.neighbour(i, @fromBackingInt(@intCast(d)))) |other| self.wake(other);
     }
-}
-
-/// a breakpoint on the word a node is about to fetch
-fn breakpointAt(self: *const Chip, i: u16) ?Breakpoint {
-    if (self.breakpoints_len == 0) return null;
-    const here: Breakpoint = .init(i, @bitCast(self.nodes[i].p.address));
-    return if (self.hasBreakpoint(here)) here else null;
 }
 
 /// Writes the node, the word it executed, where from, and its stacks after,
@@ -352,23 +435,24 @@ fn writeTrace(self: *const Chip, writer: *Io.Writer, i: u16) Io.Writer.Error!voi
     });
 }
 
-pub fn hasBreakpoint(self: Chip, breakpoint: Breakpoint) bool {
-    for (self.breakpoints[0..self.breakpoints_len]) |b| if (std.meta.eql(b, breakpoint)) return true;
-    return false;
+/// a breakpoint the node has reached, or a watched transfer it made, in the
+/// step it just took
+fn stopAt(self: *const Chip, i: u16) ?Stop {
+    const n = &self.nodes[i];
+    if (!n.suspended and n.state == .fetch) if (self.breakpointAt(i)) |stop| return stop;
+    for (self.watches.items()) |w| if (w.index == i) {
+        const t = n.transfers;
+        if (if (w.write) t.written.contains(w.direction) else t.read.contains(w.direction))
+            return .{ .watch = .{ .watch = w, .value = if (w.write) t.value_written else t.value_read } };
+    };
+    return null;
 }
 
-/// Sets a breakpoint, or clears it if it is set. Returns whether it is set.
-pub fn toggleBreakpoint(self: *Chip, breakpoint: Breakpoint) error{TooManyBreakpoints}!bool {
-    const set = self.breakpoints[0..self.breakpoints_len];
-    for (set, 0..) |b, i| if (std.meta.eql(b, breakpoint)) {
-        set[i] = set[set.len - 1];
-        self.breakpoints_len -= 1;
-        return false;
-    };
-    if (set.len == max_breakpoints) return error.TooManyBreakpoints;
-    self.breakpoints[set.len] = breakpoint;
-    self.breakpoints_len += 1;
-    return true;
+/// a breakpoint on the word a node is about to fetch
+fn breakpointAt(self: *const Chip, i: u16) ?Stop {
+    if (self.breakpoints.len == 0) return null;
+    const here: Breakpoint = .init(i, @bitCast(self.nodes[i].p.address));
+    return if (self.breakpoints.contains(here)) .{ .breakpoint = here } else null;
 }
 
 /// queues a node to be stepped
@@ -414,8 +498,9 @@ pub fn service(self: *Chip) !bool {
 }
 
 /// Runs until every node is suspended on something the console cannot
-/// complete, a node reaches a breakpoint, or the console is interrupted. A
-/// breakpoint stops the run at the end of the round, leaving `hit` set.
+/// complete, a node reaches a breakpoint or makes a watched transfer, or the
+/// console is interrupted. Breakpoints and watches stop the run at the end of
+/// the round, leaving `hit` set.
 pub fn run(self: *Chip) !void {
     self.hit = null;
     const console = self.console orelse {
@@ -715,9 +800,9 @@ test "stops at breakpoints" {
     try chip.load(try assembler.assemble("begin dup drop again", &diagnostic));
 
     // x040 is the same word as x000, as RAM repeats. The node starts there.
-    try expectEqual(true, try chip.toggleBreakpoint(.init(0, 0x40)));
+    try expectEqual(true, try chip.breakpoints.toggle(.init(0, 0x40)));
     try chip.run();
-    try expectEqual(Breakpoint{ .index = 0, .address = 0 }, chip.hit);
+    try expectEqual(Stop{ .breakpoint = .{ .index = 0, .address = 0 } }, chip.hit);
     try expectEqual(0, chip.steps);
     // running again goes past it, and around the loop to it again
     const steps = chip.steps;
@@ -725,10 +810,43 @@ test "stops at breakpoints" {
     try std.testing.expect(chip.hit != null and chip.steps > steps);
 
     // clearing it, and filling them up
-    try expectEqual(false, try chip.toggleBreakpoint(.init(0, 0)));
-    try std.testing.expect(!chip.hasBreakpoint(.init(0, 0)));
-    for (0..max_breakpoints) |i| _ = try chip.toggleBreakpoint(.init(0, @intCast(0x80 + i)));
-    try std.testing.expectError(error.TooManyBreakpoints, chip.toggleBreakpoint(.init(0, 0)));
+    try expectEqual(false, try chip.breakpoints.toggle(.init(0, 0)));
+    try std.testing.expect(!chip.breakpoints.contains(.init(0, 0)));
+    for (0..max_breakpoints) |i| _ = try chip.breakpoints.toggle(.init(0, @intCast(0x80 + i)));
+    try std.testing.expectError(error.Full, chip.breakpoints.toggle(.init(0, 0)));
+    try std.testing.expectError(error.Full, chip.breakpoints.insert(.init(0, 0)));
+    // adding one that is there already
+    try chip.breakpoints.insert(.init(0, 0x80));
+    try expectEqual(max_breakpoints, chip.breakpoints.len);
+}
+
+test "stops at watched transfers" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 2 });
+    defer chip.deinit(std.testing.allocator);
+    var programs: [2]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    // node 000 writes 1, 2, 3 to node 001, which adds them up
+    for (try assembler.assembleNodes(
+        \\node 000 right b! 1 !b 2 !b 3 !b
+        \\node 001 right b! @b @b + @b +
+    , &programs, &diagnostic)) |program| try chip.load(program);
+
+    _ = try chip.watches.toggle(.{ .index = 1, .direction = .right, .write = false });
+    try chip.run();
+    try expectEqual(Stop{ .watch = .{ .watch = .{ .index = 1, .direction = .right, .write = false }, .value = 1 } }, chip.hit);
+    try chip.run();
+    try expectEqual(2, chip.hit.?.watch.value);
+
+    // writes are watched separately
+    chip.watches = .{};
+    _ = try chip.watches.toggle(.{ .index = 0, .direction = .right, .write = true });
+    try chip.run();
+    try expectEqual(3, chip.hit.?.watch.value);
+    try expectEqual(0, chip.hit.?.index());
+
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("node 000 wrote 00003 to right", try std.fmt.bufPrint(&buffer, "{f}", .{chip.hit.?.describe(chip.layout)}));
+    try std.testing.expectEqualStrings("node 000 reached 03f", try std.fmt.bufPrint(&buffer, "{f}", .{(Stop{ .breakpoint = .init(0, 0x3f) }).describe(chip.layout)}));
 }
 
 test "traces each step" {
@@ -745,6 +863,36 @@ test "traces each step" {
     try std.testing.expectEqualStrings(
         \\000 000 04def @p dup drop @p  T 00175 S 00005 R 00000
         \\000 003 29fb2 b! @b . .  T 00005 S 00000 R 00000  waiting
+        \\
+    , writer.buffered());
+}
+
+test "traces a node waiting on a port once" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 3 });
+    defer chip.deinit(std.testing.allocator);
+    var programs: [3]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    // node 000 waits forever on a port facing off the chip. Node 001 offers
+    // a word to both neighbours, and withdraws it from node 000 once node
+    // 002 takes it, which wakes node 000.
+    for (try assembler.assembleNodes(
+        \\node 000 left b! @b
+        \\node 001 r-l- b! 5 !b right b! @b
+        \\node 002 left b! @b @b
+    , &programs, &diagnostic)) |program| try chip.load(program);
+    var buffer: [1024]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    chip.trace = &writer;
+
+    while (chip.step()) {}
+    try std.testing.expectEqualStrings(
+        \\000 000 04b02 @p b! @b .  T 00000 S 00000 R 00000  waiting
+        \\001 000 04b12 @p b! @p .  T 00005 S 00000 R 00000
+        \\002 000 04b02 @p b! @b .  T 00000 S 00000 R 00000  waiting
+        \\001 003 09da2 !b @p b! .  T 00000 S 00000 R 00000
+        \\001 005 009b2 @b . . .  T 00000 S 00000 R 00000  waiting
+        \\002 000 04b02 @p b! @b .  T 00005 S 00000 R 00000
+        \\002 002 009b2 @b . . .  T 00005 S 00000 R 00000  waiting
         \\
     , writer.buffered());
 }
