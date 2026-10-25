@@ -396,7 +396,7 @@ const Tui = struct {
 
     /// the first row of the memory listing that centers the current word
     fn followedMemoryRow(self: Tui, page: u16) u16 {
-        const row = memoryRow(current(self.chip.nodes[self.selected])) orelse 0;
+        const row = memoryRow(self.chip.nodes[self.selected].current()) orelse 0;
         return @min(row -| page / 2, memory_rows -| page);
     }
 
@@ -577,7 +577,7 @@ const Tui = struct {
             .writing => |address| self.print("waiting to write {s}", .{ioName(address)}),
         }, .style = statusStyle(node_status) }, .{ .wrap = .none });
 
-        const word = current(n);
+        const word = n.current();
         self.fields(win, 2, &.{
             .{ "P", self.print("{x:0>3}", .{@as(u10, @bitCast(n.p))}) },
             .{ "slot", self.print("{d}", .{n.slot}) },
@@ -605,7 +605,7 @@ const Tui = struct {
     fn drawMemory(self: *Tui, win: vaxis.Window, n: Computer) void {
         const page = @max(win.height, 1);
         const first = @min(self.memory_scroll orelse self.followedMemoryRow(page), memory_rows -| page);
-        const here = memoryRow(current(n));
+        const here = memoryRow(n.current());
         const ram_literals = literals(n.mem[0..64]);
         const rom_literals = literals(n.mem[64..128]);
 
@@ -692,15 +692,6 @@ const Tui = struct {
         return text;
     }
 };
-
-/// The address of the instruction word a node is executing, which is the
-/// address before P in memory, or the port itself. Between words, it is the
-/// word to be fetched next.
-fn current(n: Computer) Address {
-    var address = n.p.address;
-    if (!address.io and n.state != .fetch) address.local -%= 1;
-    return address;
-}
 
 /// the row of an address in the memory listing, if it is in memory
 fn memoryRow(address: Address) ?u16 {
@@ -1067,18 +1058,6 @@ test status {
     n.slot = 1;
     n.a = 0x145;
     try std.testing.expectEqual(Status{ .writing = 0x145 }, status(n));
-}
-
-test current {
-    var n: Computer = .reset;
-    n.p.address = Address.fromWord(5);
-    // between words, the next word
-    try std.testing.expectEqual(Address.fromWord(5), current(n));
-    n.state = .execution;
-    try std.testing.expectEqual(Address.fromWord(4), current(n));
-    // from a port
-    n.p.address = Address.fromWord(0x1d5);
-    try std.testing.expectEqual(Address.fromWord(0x1d5), current(n));
 }
 
 test memoryRow {

@@ -157,6 +157,8 @@ pub const Computer = struct {
     b: u9,
     /// instruction words containing 1, 2, 3 or 4 opcodes for execution
     i: Word,
+    /// where I was fetched from
+    word_address: Address,
     /// top 64 words are RAM, bottom half are ROM
     mem: [128]Word,
     // 9 word stack
@@ -193,6 +195,7 @@ pub const Computer = struct {
         if (self.state == .fetch) {
             // instructions may be fetched from a port
             self.i = self.read(self.p.address) orelse return;
+            self.word_address = self.p.address;
             self.p.increment();
             self.slot = 0;
             self.state = .execution;
@@ -201,6 +204,12 @@ pub const Computer = struct {
             self.execute(Instruction.decode(self.i).getSlot(self.slot));
             if (self.suspended) return;
         }
+    }
+
+    /// The address of the instruction word being executed, or between words,
+    /// of the word to be fetched next
+    pub fn current(self: Computer) Address {
+        return if (self.state == .fetch) self.p.address else self.word_address;
     }
 
     pub fn execute(self: *Computer, opcode: Opcode) void {
@@ -369,6 +378,7 @@ pub const Computer = struct {
         .a = 0,
         .b = 0x15d,
         .i = 0,
+        .word_address = .reset,
 
         .return_stack = .empty,
         .data_stack = .empty,
@@ -600,6 +610,21 @@ test "fetch" {
     // ROM repeats
     rom_address = @bitCast(@as(u9, 0x0c0));
     try expectEqual(123, computer.fetch(rom_address));
+}
+
+test "current" {
+    var computer: Computer = .reset;
+    computer.p.address = Address.fromWord(5);
+    // between words, the next word
+    try expectEqual(Address.fromWord(5), computer.current());
+
+    // a word that reads a literal, past which P has moved
+    computer.mem[5] = Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@"!", .slot_2 = .@".", .slot_3 = 7 });
+    computer.a = 0x1d5;
+    computer.step();
+    try std.testing.expect(computer.suspended);
+    try expectEqual(Address.fromWord(7), computer.p.address);
+    try expectEqual(Address.fromWord(5), computer.current());
 }
 
 test "store" {
