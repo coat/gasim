@@ -21,6 +21,7 @@ test {
     _ = @import("arrayforth.zig");
     _ = @import("assembler.zig");
     _ = @import("boot.zig");
+    _ = @import("Builder.zig");
     _ = @import("Chip.zig");
     _ = @import("Console.zig");
     _ = @import("disassembler.zig");

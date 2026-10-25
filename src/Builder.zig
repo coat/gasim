@@ -62,6 +62,9 @@ pub const Error = error{
     UnextBodyTooLong,
     /// a then too far for its forward jump's destination field to reach
     UnreachableThen,
+    /// a label defined later, too far for the destination field of a jump
+    /// to it to reach
+    UnreachableLabel,
     /// a single instruction word with too many opcodes, or a literal
     InlineTooLong,
 };
@@ -89,6 +92,8 @@ const Label = struct {
 const Fixup = struct {
     /// a jump in a slot, or a literal word
     slot: ?Slot,
+    /// P when the jump runs
+    p: u10 = 0,
     address: u7,
     label: u8,
     line: usize,
@@ -134,7 +139,7 @@ pub fn callLabel(self: *Builder, name: []const u8) Error!void {
     const known = self.labels[label].address;
     const jump = try self.emitJump(.call, if (known) |a| a else null);
     if (self.labels[label].address == null) {
-        try self.addFixup(.{ .slot = jump.slot, .address = jump.address, .label = label, .line = self.line });
+        try self.addFixup(.{ .slot = jump.slot, .p = jump.p, .address = jump.address, .label = label, .line = self.line });
     }
     self.last_call = jump;
 }
@@ -250,6 +255,10 @@ pub fn finish(self: *Builder, diagnostic: *Diagnostic) Error!void {
             return error.UndefinedLabel;
         };
         if (fixup.slot) |slot| {
+            if (!lands(slot, fixup.p, destination)) {
+                diagnostic.* = .{ .line = fixup.line, .token = label.name };
+                return error.UnreachableLabel;
+            }
             self.patch(.{ .address = fixup.address, .slot = slot }, destination);
         } else {
             self.mem[fixup.address] = destination;
@@ -385,6 +394,27 @@ fn addFixup(self: *Builder, fixup: Fixup) Error!void {
     if (self.fixup_count == self.fixups.len) return error.TooManyLabels;
     self.fixups[self.fixup_count] = fixup;
     self.fixup_count += 1;
+}
+
+test "calls to labels defined later must reach them" {
+    var diagnostic: Diagnostic = .{};
+    // a call in slot 2 reaches only within the same 8 words
+    var builder: Builder = .{ .short_forward = true };
+    try builder.emit(.dup);
+    try builder.emit(.dup);
+    try builder.callLabel("far");
+    try builder.org(20);
+    try builder.define("far");
+    try std.testing.expectError(error.UnreachableLabel, builder.finish(&diagnostic));
+    try std.testing.expectEqualStrings("far", diagnostic.token);
+
+    builder = .{ .short_forward = true };
+    try builder.emit(.dup);
+    try builder.emit(.dup);
+    try builder.callLabel("near");
+    try builder.define("near");
+    try builder.finish(&diagnostic);
+    try std.testing.expectEqual(1, builder.mem[0] & Instruction.destinationMask(2));
 }
 
 const Diagnostic = @import("assembler.zig").Diagnostic;
