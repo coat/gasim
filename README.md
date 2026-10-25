@@ -10,14 +10,32 @@ chip](https://www.greenarraychips.com/home/documents/index.php#GA144).
 gasim examples/hello.ga
 ```
 
-This assembles the program into the RAM of a single F18A node and runs it
-until the node is waiting on something that cannot happen. A console is
-attached to the node's `up` port. Each word written to it is printed as a
-byte, and each read from it takes a byte from stdin:
+This assembles the program and runs it on a simulated 8x18 array of F18A
+nodes, like the GA144, until every node is waiting on something that cannot
+happen. Nodes without a program wait for code on all of their ports.
+
+A console is attached to the `up` port of node 000, which faces off the
+south edge of the chip. Each word written to it is printed as a byte, and
+each read from it takes a byte from stdin:
 
 ```bash
 echo "hello" | gasim examples/echo.ga
 ```
+
+Programs can span several nodes with the `node` directive. In
+`examples/upcase.ga`, node 000 passes input to its neighbour, node 001,
+which converts it to upper case:
+
+```bash
+echo "hello" | gasim examples/upcase.ga
+```
+
+Options:
+
+- `--layout <rows>x<columns>`: size of the array of nodes, up to 100x100
+  (default `8x18`)
+- `--console <node>:<port>`: where the console is attached, on a port facing
+  off the edge of the array (default `000:up`)
 
 See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
 
@@ -40,7 +58,7 @@ zig build -Doptimize=ReleaseFast
 ### TODO
 
 - [x] Comm ports and console I/O
-- [ ] Multi-node chip
+- [x] Multi-node chip
 - [ ] ROM implementations
 - [ ] TUI
 - [ ] colorForth editor and compiler
