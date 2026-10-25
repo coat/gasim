@@ -110,6 +110,113 @@ pub const Error = assembler.Error || error{
     TooManyDescriptors,
     /// more than three loads into one node's RAM
     TooManyLoads,
+    /// a word that acts on the chip, such as UPD, without a chip
+    NoChip,
+    /// a word that acts on the target node, such as UPD, before NODE
+    NoTarget,
+    /// the target node is running, rather than waiting for code from a port
+    NotWaitingForCode,
+    /// R@ or R! of a comm port, which would wait
+    PortAccess,
+} || Io.Writer.Error;
+
+/// An interpreter that keeps its stack, bins and labels from one source to
+/// the next, as at an interactive prompt, and can act on a chip with words
+/// of arrayForth 3's IDE (DB013 section 5.1.3):
+///
+///     nn NODE           select the target node, and the same as
+///                       i nn HOOK, where the path i does not matter
+///     UPD .STK          show the target's stacks
+///     ?RAM ?ROM  a n -ASM
+///                       show its RAM or ROM, or disassemble n words from a
+///     d LIT             push onto its data stack
+///     a R@  d a R!      read or write its memory or registers
+///     d RINS            have it execute an instruction word, from its port
+///     a CALL            have it jump to a, returning to its port
+///     a n nn BOOT       load n words from a in bin nn into its RAM at a
+///     RB! @B !B RA@ RA! @A !A @+ !+ R+ R+* R2* R2/ RINV RAND RXOR ROR
+///     RDROP RDUP ROVER  have it execute one opcode
+///     PATH -HOOK FOCUS VIRGIN
+///                       accepted, as gasim reaches every node directly
+///
+/// Words given to the target run as if called from the port it is waiting
+/// on, so they return to it, as `op ; ; ;` and code ending with `;` do. A
+/// target must be waiting for code from a port, as nodes are in warm.
+/// Numbers are shown in BASE by `.`, `U.`, `D.` and `.S`.
+pub const Session = struct {
+    interpreter: Interpreter,
+
+    pub const Options = struct {
+        /// where words such as . and UPD write
+        out: *Io.Writer,
+        /// the chip the IDE words act on
+        chip: ?*Chip = null,
+        /// blocks that LOAD and THRU can interpret
+        blocks: ?[]const u8 = null,
+    };
+
+    pub fn init(programs: []Program, descriptors: []boot.Descriptor, diagnostic: *Diagnostic, options: Options) Session {
+        return .{ .interpreter = .{
+            .diagnostic = diagnostic,
+            .programs = programs,
+            .descriptors = descriptors,
+            .blocks = options.blocks,
+            .out = options.out,
+            .chip = options.chip,
+            .interactive = true,
+        } };
+    }
+
+    /// Interprets `source`, which must last as long as the session, as
+    /// labels and names refer to it. After an error the stack is emptied and
+    /// interpreting goes back to outside ASM[, keeping bins and labels.
+    pub fn interpret(self: *Session, source: []const u8) Error!void {
+        const it = &self.interpreter;
+        it.frames[0] = .{ .tokens = .{ .source = source } };
+        it.frame_count = 1;
+        it.run() catch |err| {
+            it.depth = 0;
+            it.frame_count = 1;
+            it.assembling = false;
+            it.asm_context = false;
+            it.hash = false;
+            it.inline_word = null;
+            return err;
+        };
+    }
+
+    /// the bins saved, and the boot descriptors given, so far
+    pub fn assembled(self: Session) Assembled {
+        return self.interpreter.assembled();
+    }
+
+    /// the values on the stack, the top last
+    pub fn stack(self: *const Session) []const i32 {
+        return self.interpreter.stack[0..self.interpreter.depth];
+    }
+
+    /// the node the IDE words act on
+    pub fn target(self: Session) ?u16 {
+        return self.interpreter.target;
+    }
+
+    /// Calls `completer.add(word)` for each word the session knows that
+    /// starts with `prefix`: FORTH and ASM words, opcodes, named literals
+    /// and calls, the labels of the bin being assembled, and defined names
+    pub fn complete(self: *const Session, prefix: []const u8, completer: anytype) void {
+        const it = &self.interpreter;
+        inline for (.{ ForthWord, AsmWord, Opcode }) |Words| {
+            for (std.enums.values(Words)) |word| add(prefix, @tagName(word), completer);
+        }
+        for (named_literals.keys()) |word| add(prefix, word, completer);
+        for (named_calls.keys()) |word| add(prefix, word, completer);
+        if (it.bin) |*bin| for (bin.labels[0..bin.label_count]) |label| add(prefix, label.name, completer);
+        for (it.names[0..it.name_count]) |name| add(prefix, name.name, completer);
+    }
+
+    fn add(prefix: []const u8, word: []const u8, completer: anytype) void {
+        if (std.mem.startsWith(u8, word, prefix)) completer.add(word);
+    }
 };
 
 /// the programs saved in bins, and the boot descriptors for nodes
@@ -280,6 +387,9 @@ const Name = struct {
 
 const Number = union(enum) { single: i32, double: i64 };
 
+/// rounds the chip runs for a word given to the target to come back
+const remote_rounds = 1_000_000;
+
 const Interpreter = struct {
     /// the blocks being loaded, the first being the source
     frames: [16]Frame = undefined,
@@ -293,6 +403,14 @@ const Interpreter = struct {
     descriptor_count: usize = 0,
     /// the descriptor that +NODE selected
     boot_node: ?usize = null,
+    /// where words such as . and UPD write, if anywhere
+    out: ?*Io.Writer = null,
+    /// the chip that IDE words act on, and the node they target
+    chip: ?*Chip = null,
+    target: ?u16 = null,
+    /// keep bins and labels unsaved at the end of a source, as a session
+    /// goes on to the next
+    interactive: bool = false,
 
     stack: [64]i32 = undefined,
     depth: usize = 0,
@@ -329,6 +447,7 @@ const Interpreter = struct {
             }
             try self.interpret(token);
         }
+        if (self.interactive) return;
         if (self.inline_word != null) return error.UnclosedInline;
         try self.checkSaved();
     }
@@ -866,7 +985,94 @@ const Interpreter = struct {
             },
             .DNEGATE => try self.pushDouble(0 -% try self.popDouble()),
             .@"S>D" => try self.pushDouble(try self.pop()),
-            .@"." => _ = try self.pop(),
+            .@"." => {
+                const value = try self.pop();
+                if (self.out) |out| try self.printNumber(out, value, true);
+            },
+            .@"U." => {
+                const value: u32 = @bitCast(try self.pop());
+                if (self.out) |out| try self.printNumber(out, value, true);
+            },
+            .@"D." => {
+                const value = try self.popDouble();
+                if (self.out) |out| try self.printNumber(out, value, true);
+            },
+            .@".S" => if (self.out) |out| {
+                for (self.stack[0..self.depth]) |value| try self.printNumber(out, value, true);
+            },
+            .CR => if (self.out) |out| try out.writeByte('\n'),
+            .SPACE => if (self.out) |out| try out.writeByte(' '),
+            .NODE => try self.selectTarget(try self.pop()),
+            .HOOK => {
+                const node_number = try self.pop();
+                _ = try self.pop();
+                try self.selectTarget(node_number);
+            },
+            .PATH, .@"-HOOK" => _ = try self.pop(),
+            .FOCUS, .VIRGIN => _ = try self.targetNode(),
+            .UPD, .@".STK" => try self.showStacks(),
+            .@"?RAM" => try self.showMemory(0),
+            .@"?ROM" => try self.showMemory(0x80),
+            .@"-ASM" => {
+                const n = try self.pop();
+                try self.disassemble(try self.pop(), n);
+            },
+            .LIT => {
+                const value = word18(try self.popDouble());
+                (try self.targetNode()).data_stack.push(value);
+            },
+            .@"R@" => {
+                const address = try self.registerAddress(try self.pop());
+                const n = try self.targetNode();
+                try self.pushDouble(@as(u18, @bitCast(n.read(address).?)));
+            },
+            .@"R!" => {
+                const address = try self.registerAddress(try self.pop());
+                const value = word18(try self.popDouble());
+                _ = (try self.targetNode()).write(address, value);
+            },
+            .RINS => try self.remote(word18(try self.popDouble())),
+            .CALL => {
+                const address = try self.pop();
+                if (address < 0 or address > 0x3ff) return error.NumberOutOfRange;
+                try self.remote(Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }, 0, @intCast(address)));
+            },
+            .BOOT => {
+                const number_of_bin = try self.pop();
+                const n = try self.pop();
+                const address = try self.pop();
+                if (n < 0 or address < 0 or address + n > 64) return error.NumberOutOfRange;
+                const program = for (self.saved[0..self.saved_count], 0..) |saved, i| {
+                    if (saved.number == number_of_bin) break &self.programs[i];
+                } else return error.NoSuchBin;
+                const start: usize = @intCast(address);
+                const end: usize = @intCast(address + n);
+                @memcpy((try self.targetNode()).mem[start..end], program.ram[start..end]);
+            },
+            .@"RB!", .@"@B", .@"!B", .@"RA@", .@"RA!", .@"@A", .@"!A", .@"@+", .@"!+", .@"R+", .@"R+*", .@"R2*", .@"R2/", .RINV, .RAND, .RXOR, .ROR, .RDROP, .RDUP, .ROVER => {
+                const opcode: Opcode = switch (word) {
+                    .@"RB!" => .@"b!",
+                    .@"@B" => .@"@b",
+                    .@"!B" => .@"!b",
+                    .@"RA@" => .a,
+                    .@"RA!" => .@"a!",
+                    .@"@A" => .@"@",
+                    .@"!A" => .@"!",
+                    .@"@+" => .@"@+",
+                    .@"!+" => .@"!+",
+                    .@"R+" => .@"+",
+                    .@"R+*" => .@"+*",
+                    .@"R2*" => .@"2*",
+                    .@"R2/" => .@"2/",
+                    .RINV => .inv,
+                    .RAND => .@"and",
+                    .RXOR, .ROR => .xor,
+                    .RDROP => .drop,
+                    .RDUP => .dup,
+                    else => .over,
+                };
+                try self.remote(Instruction.encode(.{ .slot_0 = opcode, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }));
+            },
             .HEX => self.base = 16,
             .DECIMAL => self.base = 10,
             .CONSTANT => try self.define(.constant, try self.pop()),
@@ -1024,6 +1230,110 @@ const Interpreter = struct {
         return @intCast(n);
     }
 
+    fn printNumber(self: Interpreter, out: *Io.Writer, value: anytype, space: bool) Error!void {
+        try out.printInt(value, self.base, .upper, .{});
+        if (space) try out.writeByte(' ');
+    }
+
+    fn selectTarget(self: *Interpreter, number_of_node: i32) Error!void {
+        const chip = self.chip orelse return error.NoChip;
+        if (number_of_node < 0 or number_of_node > 999999) return error.InvalidNode;
+        const node_number: u16 = @intCast(@rem(number_of_node, 10000));
+        if (chip.layout.index(node_number) == null) return error.InvalidNode;
+        self.target = node_number;
+    }
+
+    fn targetNode(self: *Interpreter) Error!*Computer {
+        const chip = self.chip orelse return error.NoChip;
+        return chip.node(self.target orelse return error.NoTarget).?;
+    }
+
+    /// an address R@ and R! can use without waiting: memory, or the io and
+    /// data registers
+    fn registerAddress(self: *Interpreter, value: i32) Error!f18.Address {
+        _ = self;
+        if (value < 0 or value > 0x1ff) return error.NumberOutOfRange;
+        const address: f18.Address = .fromWord(@intCast(value));
+        if (address.io and value != Computer.io_address and value != Computer.data_address) return error.PortAccess;
+        return address;
+    }
+
+    /// Has the target execute an instruction word from its port, and runs
+    /// the chip until it is waiting for code again, or saying so if it is
+    /// still running
+    fn remote(self: *Interpreter, word: Word) Error!void {
+        const chip = self.chip orelse return error.NoChip;
+        const node_number = self.target orelse return error.NoTarget;
+        const i = chip.layout.index(node_number).?;
+        chip.execute(i, word) catch return error.NotWaitingForCode;
+        const waiting = chip.runUntilWaiting(i, remote_rounds) catch |err| switch (err) {
+            error.WriteFailed => return error.WriteFailed,
+            else => return error.NotWaitingForCode,
+        };
+        if (!waiting) if (self.out) |out| try out.print("node {d:0>3} is still running\n", .{node_number});
+    }
+
+    /// Writes the target's stacks as the IDE shows them: the deepest four of
+    /// the eight below S, then the shallower four, S and T, with the return
+    /// stack's top and the rest below
+    fn showStacks(self: *Interpreter) Error!void {
+        const n = try self.targetNode();
+        const out = self.out orelse return;
+        const data = n.data_stack;
+        // the next to be popped into S first
+        var below: [8]Word = undefined;
+        for (&below, 1..) |*value, depth| value.* = data.stack[data.index -% @as(u3, @intCast(depth % 8))];
+        // the deeper half circularly, as the IDE shows it
+        for ([_]usize{ 4, 5, 6, 7 }) |depth| try self.printWord(out, below[depth]);
+        try out.writeByte('\n');
+        for ([_]usize{ 3, 2, 1, 0 }) |depth| try self.printWord(out, below[depth]);
+        try self.printWord(out, data.s);
+        try self.printWord(out, data.t);
+        try out.writeAll("\nR");
+        try self.printWord(out, n.return_stack.t);
+        for (1..9) |depth| try self.printWord(out, n.return_stack.stack[n.return_stack.index -% @as(u3, @intCast(depth % 8))]);
+        try out.writeByte('\n');
+    }
+
+    fn printWord(self: Interpreter, out: *Io.Writer, word: Word) Error!void {
+        try out.writeByte(' ');
+        try out.printInt(@as(u18, @bitCast(word)), self.base, .upper, .{ .width = if (self.base == 16) 5 else 6, .fill = if (self.base == 16) '0' else ' ' });
+    }
+
+    /// Writes 64 words of the target's RAM or ROM, 8 to a line
+    fn showMemory(self: *Interpreter, first: u9) Error!void {
+        const n = try self.targetNode();
+        const out = self.out orelse return;
+        for (0..64) |i| {
+            if (i % 8 == 0) {
+                if (i > 0) try out.writeByte('\n');
+                try out.print("{x:0>3}", .{first + i});
+            }
+            try self.printWord(out, n.mem[(first & 0x80) / 2 + i]);
+        }
+        try out.writeByte('\n');
+    }
+
+    /// Writes a line for each of `count` words from `first` of the target's
+    /// memory, with its address, value and disassembly
+    fn disassemble(self: *Interpreter, first: i32, count: i32) Error!void {
+        const n = try self.targetNode();
+        const out = self.out orelse return;
+        if (first < 0 or first > 0xff or count < 0) return error.NumberOutOfRange;
+        const ram_literals = disassembler.literals(n.mem[0..64]);
+        const rom_literals = disassembler.literals(n.mem[64..128]);
+        for (0..@intCast(count)) |i| {
+            const address: u9 = @intCast((@as(usize, @intCast(first)) + i) & 0xff);
+            const word = n.mem[@as(usize, address & 0x80) / 2 + (address & 0x3f)];
+            try out.print("{x:0>3} {x:0>5}  ", .{ address, @as(u18, @bitCast(word)) });
+            const data = if (address & 0x80 != 0) rom_literals else ram_literals;
+            if (data & (@as(u64, 1) << @intCast(address & 0x3f)) != 0) {
+                try disassembler.writeLiteral(out, word);
+            } else try disassembler.write(out, word, address);
+            try out.writeByte('\n');
+        }
+    }
+
     fn swap(self: *Interpreter) Error!void {
         const b = try self.pop();
         const a = try self.pop();
@@ -1166,6 +1476,48 @@ const ForthWord = enum {
     @"}",
     @"{",
     ZAP,
+    @"U.",
+    @"D.",
+    @".S",
+    CR,
+    SPACE,
+    NODE,
+    HOOK,
+    PATH,
+    @"-HOOK",
+    FOCUS,
+    VIRGIN,
+    UPD,
+    @".STK",
+    @"?RAM",
+    @"?ROM",
+    @"-ASM",
+    LIT,
+    @"R@",
+    @"R!",
+    RINS,
+    CALL,
+    BOOT,
+    @"RB!",
+    @"@B",
+    @"!B",
+    @"RA@",
+    @"RA!",
+    @"@A",
+    @"!A",
+    @"@+",
+    @"!+",
+    @"R+",
+    @"R+*",
+    @"R2*",
+    @"R2/",
+    RINV,
+    RAND,
+    RXOR,
+    ROR,
+    RDROP,
+    RDUP,
+    ROVER,
     @"+NODE",
     @"/RAM",
     @"/SOME",
@@ -1410,6 +1762,8 @@ const Diagnostic = assembler.Diagnostic;
 const Program = assembler.Program;
 const boot = @import("boot.zig");
 const Builder = @import("Builder.zig");
+const Chip = @import("Chip.zig");
+const disassembler = @import("disassembler.zig");
 const f18 = @import("f18.zig");
 const Computer = f18.Computer;
 const Instruction = f18.Instruction;
@@ -1419,6 +1773,7 @@ const ga144 = @import("ga144.zig");
 const Opcode = @import("opcodes.zig").Opcode;
 
 const std = @import("std");
+const Io = std.Io;
 
 fn expectAssembles(source: []const u8, expected: []const Word) !void {
     var diagnostic: Diagnostic = .{};
@@ -1907,4 +2262,63 @@ test "assembling into ROM" {
     try std.testing.expectEqual(opcodes(.a, .@";", .@";", .@";"), program.ram[0x10]);
     // a program with no ROM code has none
     try std.testing.expectEqual(null, (try assemble("ASM[ # 0 NODE dup >BIN", &diagnostic)).rom);
+}
+
+test "a session acts on a chip, as the IDE does" {
+    const gpa = std.testing.allocator;
+    var chip: Chip = try .init(gpa, .ga144);
+    defer chip.deinit(gpa);
+    // node 000 waits for code on its left port, which faces off the chip
+    try chip.setUp(.{ .node = 0, .p = 0x175 }, &.{});
+    _ = try chip.runUntilWaiting(chip.layout.index(0).?, 10);
+
+    var programs: [2]Program = undefined;
+    var descriptors: [2]boot.Descriptor = undefined;
+    var buffer: [1024]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out, .chip = &chip });
+
+    try std.testing.expectError(error.NoTarget, session.interpret("UPD"));
+    // the stack is kept from one line to the next
+    try session.interpret("HEX 1 2");
+    try session.interpret("+ .");
+    try std.testing.expectEqualStrings("3 ", out.buffered());
+
+    // assemble code, load it into the target, and call it
+    try session.interpret("ASM[ # 0 NODE  : inc 1. + ; >BIN ]ASM");
+    try session.interpret("0 NODE  0 2 0 BOOT  5. LIT  0 CALL  RDUP");
+    out.end = 0;
+    try session.interpret("UPD");
+    try std.testing.expectStringEndsWith(out.buffered(), " 00006 00006\nR 00000 00000 00000 00000 00000 00000 00000 00000 00000\n");
+    out.end = 0;
+    try session.interpret("0 R@ D.  0 2 -ASM");
+    try std.testing.expectEqualStrings("4155 000 04155  @p + ;\n001 00001  literal 1\n", out.buffered());
+
+    // completion knows words, opcodes and labels
+    const Words = struct {
+        found: [8][]const u8 = undefined,
+        len: usize = 0,
+        fn add(self: *@This(), word: []const u8) void {
+            if (self.len < self.found.len) self.found[self.len] = word;
+            self.len += 1;
+        }
+    };
+    var words: Words = .{};
+    session.complete("@b", &words);
+    try std.testing.expectEqual(1, words.len);
+    try std.testing.expectEqualStrings("@b", words.found[0]);
+    words = .{};
+    // the bin's labels include its ROM's
+    session.complete("in", &words);
+    try std.testing.expectEqual(3, words.len);
+    try std.testing.expectEqualStrings("inv", words.found[0]);
+    try std.testing.expectEqualStrings("interp", words.found[1]);
+    try std.testing.expectEqualStrings("inc", words.found[2]);
+
+    // an error empties the stack and leaves ASM[
+    try std.testing.expectError(error.UnknownWord, session.interpret("1 2 ASM[ nothing"));
+    try std.testing.expectEqual(0, session.stack().len);
+    try session.interpret("1 2");
+    try std.testing.expectEqual(2, session.stack().len);
 }
