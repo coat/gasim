@@ -1041,7 +1041,7 @@ const Interpreter = struct {
                 const number_of_bin = try self.pop();
                 const n = try self.pop();
                 const address = try self.pop();
-                if (n < 0 or address < 0 or address + n > 64) return error.NumberOutOfRange;
+                if (!inRam(address, n)) return error.NumberOutOfRange;
                 const program = for (self.saved[0..self.saved_count], 0..) |saved, i| {
                     if (saved.number == number_of_bin) break &self.programs[i];
                 } else return error.NoSuchBin;
@@ -1207,7 +1207,7 @@ const Interpreter = struct {
     /// RAM at `destination`. A load of all of RAM replaces any before it.
     fn loadRam(self: *Interpreter, source: i32, destination: i32, len: i32, bin: i32) Error!void {
         const d = try self.bootDescriptor();
-        if (len < 0 or source < 0 or destination < 0 or source + len > 64 or destination + len > 64) return error.NumberOutOfRange;
+        if (!inRam(source, len) or !inRam(destination, len)) return error.NumberOutOfRange;
         for (self.saved[0..self.saved_count]) |saved| {
             if (saved.number == bin) break;
         } else return error.NoSuchBin;
@@ -1366,6 +1366,12 @@ const Interpreter = struct {
         return @bitCast(@as(u64, high) << 32 | low);
     }
 };
+
+/// whether `len` words from `address` are all in RAM, for values from the
+/// stack, which may be anything
+fn inRam(address: i32, len: i32) bool {
+    return address >= 0 and len >= 0 and address <= 64 and len <= 64 - address;
+}
 
 /// the low 18 bits of a value, as stored in F18 memory
 fn word18(value: i64) Word {
@@ -2176,6 +2182,9 @@ test "boot descriptor errors" {
     try std.testing.expectError(error.TooManyLoads, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  0 1 1 /PART 0 1 1 /PART 0 1 1 /PART 0 1 1 /PART", &programs, &descriptors, &diagnostic));
     try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  60 5 1 /PART", &programs, &descriptors, &diagnostic));
     try std.testing.expectError(error.NumberOutOfRange, assembleNodes("1 +NODE  11 /STACK", &programs, &descriptors, &diagnostic));
+    // values too large to add without overflowing
+    try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  2147483647 1 1 /PART", &programs, &descriptors, &diagnostic));
+    try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  1 2147483647 1 /PART", &programs, &descriptors, &diagnostic));
 }
 
 /// Reads arrayForth 3's disk from rom/, skipping the test if it is missing,
@@ -2291,6 +2300,7 @@ test "a session acts on a chip, as the IDE does" {
 
     // assemble code, load it into the target, and call it
     try session.interpret("ASM[ # 0 NODE  : inc 1. + ; >BIN ]ASM");
+    try std.testing.expectError(error.NumberOutOfRange, session.interpret("0 NODE  2147483647 2 0 BOOT"));
     try session.interpret("0 NODE  0 2 0 BOOT  5. LIT  0 CALL  RDUP");
     out.end = 0;
     try session.interpret("UPD");
