@@ -5,7 +5,13 @@ const usage =
     \\
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
     \\  --console <node>:<port>    where the console is attached (default 000:up)
+    \\  --rom <file>               ROM dump to load into the nodes
+    \\                             (default rom/ga144.txt, if it exists)
+    \\  --boot                     load programs with a boot stream through the
+    \\                             SERDES port of node 001, which needs ROM
 ;
+
+const default_rom_path = "rom/ga144.txt";
 
 const max_source_len = 64 * 1024;
 
@@ -22,14 +28,18 @@ pub fn main(init: std.process.Init) !void {
     var console_node: u16 = 0;
     var console_port: Direction = .up;
     var path: ?[]const u8 = null;
+    var rom_path: ?[]const u8 = null;
+    var boot = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console")) {
+        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom")) {
             i += 1;
             if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
             const value = args[i];
-            if (std.mem.eql(u8, arg, "--layout")) {
+            if (std.mem.eql(u8, arg, "--rom")) {
+                rom_path = value;
+            } else if (std.mem.eql(u8, arg, "--layout")) {
                 layout = Chip.Layout.parse(value) catch fatal("invalid layout '{s}', expected for example 8x18", .{value});
             } else {
                 const colon = std.mem.indexOfScalar(u8, value, ':') orelse
@@ -39,6 +49,8 @@ pub fn main(init: std.process.Init) !void {
                 console_port = std.meta.stringToEnum(Direction, value[colon + 1 ..]) orelse
                     fatal("invalid console port '{s}', expected right, down, left or up", .{value[colon + 1 ..]});
             }
+        } else if (std.mem.eql(u8, arg, "--boot")) {
+            boot = true;
         } else if (path == null and !std.mem.startsWith(u8, arg, "-")) {
             path = arg;
         } else fatal(usage, .{});
@@ -54,14 +66,33 @@ pub fn main(init: std.process.Init) !void {
     var chip: Chip = try .init(init.gpa, layout);
     defer chip.deinit(init.gpa);
 
+    const roms = readRom(io, arena, rom_path);
+    if (roms) |r| chip.loadRom(r) catch
+        fatal("{s}: has no ROM for node {d}, which nodes without their own ROM use", .{ rom_path orelse default_rom_path, ga144.basic_node });
+
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     var diagnostic: assembler.Diagnostic = .{};
     const programs = assembler.assembleNodes(source, program_buffer, &diagnostic) catch |err| switch (err) {
         error.TooManyNodes => fatal("{s}:{d}: more nodes than a {d}x{d} layout has at '{s}'", .{ source_path, diagnostic.line, layout.rows, layout.columns, diagnostic.token }),
         else => fatal("{s}:{d}: {t} at '{s}'", .{ source_path, diagnostic.line, err, diagnostic.token }),
     };
-    for (programs) |program| chip.load(program) catch
+    for (programs) |program| if (layout.index(program.node) == null)
         fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, program.node, layout.rows, layout.columns });
+    if (roms == null) for (programs) |program| if (program.rom_word) |word|
+        fatal("{s}:{d}: '{s}' is in ROM, which is not loaded (see --rom)", .{ source_path, word.line, word.token });
+
+    var feeder: Chip.Feeder = .{ .words = &.{} };
+    if (boot) {
+        if (console_node == 1 and console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
+        if (roms == null) fatal("--boot needs a ROM, for node 001 to boot from (see --rom)", .{});
+        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, programs));
+        feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, programs, buffer) catch |err| switch (err) {
+            error.NoSuchNode => fatal("--boot needs node 001, which is not in a {d}x{d} layout", .{ layout.rows, layout.columns }),
+            error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
+            else => |e| return e,
+        };
+        chip.attachFeeder(&feeder, 1, .up) catch fatal("--boot needs node 001's up port to face off the chip", .{});
+    } else for (programs) |program| chip.load(program) catch unreachable;
 
     var stdin_buffer: [1024]u8 = undefined;
     var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -104,6 +135,17 @@ pub fn main(init: std.process.Init) !void {
     if (!console.used) std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
 }
 
+/// Reads a ROM dump from `path`, or the default dump if there is one
+fn readRom(io: Io, arena: std.mem.Allocator, path: ?[]const u8) ?[]const ga144.NodeRom {
+    const text = Io.Dir.cwd().readFileAlloc(io, path orelse default_rom_path, arena, .limited(1024 * 1024)) catch |err| {
+        if (path == null and err == error.FileNotFound) return null;
+        fatal("{s}: {t}", .{ path orelse default_rom_path, err });
+    };
+    const roms = arena.alloc(ga144.NodeRom, 144) catch fatal("out of memory", .{});
+    return ga144.parseRom(text, roms) catch |err|
+        fatal("{s}: {t}", .{ path orelse default_rom_path, err });
+}
+
 /// Stops the console so its output is flushed. While it is blocked waiting
 /// for input there is nothing to flush, so ctrl+c terminates as usual, as it
 /// does when pressed a second time.
@@ -133,3 +175,4 @@ const assembler = gasim.assembler;
 const Chip = gasim.Chip;
 const Console = gasim.Console;
 const Direction = gasim.Direction;
+const ga144 = gasim.ga144;
