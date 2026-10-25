@@ -45,6 +45,9 @@
 pub const Program = struct {
     /// node number, yxx
     node: u16 = 0,
+    /// the bin arrayForth 3's BIN saved the program as, or null for the
+    /// node's own bin. Only programs in their node's own bin are loaded.
+    bin: ?u32 = null,
     ram: [64]Word,
     /// number of words used, from address 0
     len: u7,

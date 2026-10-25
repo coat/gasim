@@ -6,6 +6,7 @@ pub const Word = f18.Word;
 pub const Direction = port.Direction;
 pub const Port = port.Port;
 
+pub const arrayforth = @import("arrayforth.zig");
 pub const assembler = @import("assembler.zig");
 pub const boot = @import("boot.zig");
 pub const Chip = @import("Chip.zig");
@@ -17,6 +18,7 @@ const f18 = @import("f18.zig");
 pub const port = @import("port.zig");
 
 test {
+    _ = @import("arrayforth.zig");
     _ = @import("assembler.zig");
     _ = @import("boot.zig");
     _ = @import("Chip.zig");

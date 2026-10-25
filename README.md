@@ -93,6 +93,19 @@ node 000
 
 See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
 
+Files ending in `.af` are read as arrayForth 3 source, the F18 assembler
+syntax of GreenArrays' current tools, described in section 4.2 of DB013,
+the arrayForth 3 User's Manual. Code is assembled into bins between `ASM[`
+and `]ASM`, packed into the same object code arrayForth 3 makes. See
+[`src/arrayforth.zig`](src/arrayforth.zig) for what is supported. This is
+`examples/echo.ga` in arrayForth 3:
+
+```
+ASM[ # 0 NODE ERS  # 0 org
+: main  up b!  begin @b !b again
+>BIN ]ASM
+```
+
 ### Terminal user interface
 
 The map shows every node: running nodes are green, nodes waiting on a port

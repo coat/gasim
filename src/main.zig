@@ -1,9 +1,10 @@
 //! gasim
 
 const usage =
-    \\usage: gasim [run] [options] <program.ga>
+    \\usage: gasim [run] [options] <program.ga | program.af>
     \\
-    \\Opens the program in a terminal user interface. With run, or when stdin
+    \\Opens the program in a terminal user interface, reading .af files as
+    \\arrayForth 3 source. With run, or when stdin
     \\or stdout is not a terminal, runs it instead with the console on stdin
     \\and stdout, until every node is waiting, or one reaches a breakpoint or
     \\makes a watched transfer. With --listing, writes the assembled program
@@ -151,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     var diagnostic: assembler.Diagnostic = .{};
-    const programs = assembler.assembleNodes(source, program_buffer, &diagnostic) catch |err| switch (err) {
+    const programs = assemble(source_path, source, program_buffer, &diagnostic) catch |err| switch (err) {
         error.TooManyNodes => fatal("{s}:{d}: more nodes than a {d}x{d} layout has at '{s}'", .{ source_path, diagnostic.line, layout.rows, layout.columns, diagnostic.token }),
         else => fatal("{s}:{d}: {t} at '{s}'", .{ source_path, diagnostic.line, err, diagnostic.token }),
     };
@@ -163,13 +164,22 @@ pub fn main(init: std.process.Init) !void {
         const writer = &file_writer.interface;
         for (programs, 0..) |program, n| {
             if (n > 0) try writer.writeByte('\n');
+            if (program.bin) |bin| try writer.print("bin {d} ", .{bin});
             try writer.print("node {d:0>3}\n", .{program.node});
             try gasim.disassembler.listing(writer, program, source);
         }
         try writer.flush();
         return;
     }
-    if (roms == null) for (programs) |program| if (program.rom_word) |word|
+    // code saved in other bins than its node's is not loaded
+    var loaded: usize = 0;
+    for (programs) |program| if (program.bin == null) {
+        programs[loaded] = program;
+        loaded += 1;
+    };
+    const loadable = programs[0..loaded];
+
+    if (roms == null) for (loadable) |program| if (program.rom_word) |word|
         fatal("{s}:{d}: '{s}' is in ROM, which is not loaded (see --rom)", .{ source_path, word.line, word.token });
 
     for (breakpoints[0..breakpoints_len]) |b| {
@@ -193,14 +203,14 @@ pub fn main(init: std.process.Init) !void {
     if (boot) {
         if (console_node == 1 and console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
         if (roms == null) fatal("--boot needs a ROM, for node 001 to boot from (see --rom)", .{});
-        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, programs));
-        feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, programs, buffer) catch |err| switch (err) {
+        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, loadable));
+        feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, loadable, buffer) catch |err| switch (err) {
             error.NoSuchNode => fatal("--boot needs node 001, which is not in a {d}x{d} layout", .{ layout.rows, layout.columns }),
             error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
             else => |e| return e,
         };
         chip.attachFeeder(&feeder, 1, .up) catch fatal("--boot needs node 001's up port to face off the chip", .{});
-    } else for (programs) |program| chip.load(program) catch unreachable;
+    } else for (loadable) |program| chip.load(program) catch unreachable;
 
     var stdin_buffer: [1024]u8 = undefined;
     var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
@@ -336,6 +346,12 @@ fn handleInterrupt(_: posix.SIG) callconv(.c) void {
         }, null);
         posix.raise(.INT) catch {};
     }
+}
+
+/// Assembles source in gasim's syntax, or in arrayForth 3's for .af files
+fn assemble(path: []const u8, source: []const u8, programs: []assembler.Program, diagnostic: *assembler.Diagnostic) gasim.arrayforth.Error![]assembler.Program {
+    if (std.mem.endsWith(u8, path, ".af")) return gasim.arrayforth.assembleNodes(source, programs, diagnostic);
+    return assembler.assembleNodes(source, programs, diagnostic);
 }
 
 const have_sigint = builtin.os.tag != .windows and builtin.os.tag != .wasi;
