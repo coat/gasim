@@ -1,5 +1,5 @@
-//! A minimal assembler for the RAM of a single F18A node. It packs opcodes
-//! into instruction words
+//! A minimal assembler for the RAM of F18A nodes. It packs opcodes into
+//! instruction words
 //!
 //! Source is a sequence of whitespace separated words:
 //!
@@ -18,13 +18,18 @@
 //!     io right rdlu   push the address of the io register, a port or multiport
 //!     \ comment       comment to the end of the line
 //!     ( comment )     comment
+//!     node 708        assemble the following words for node 708
 //!
 //! along with the opcodes ; ex @p @+ @b @ !p !+ !b ! +* 2* 2/ inv + and xor
 //! drop dup r> over a . >r b! a!
 //!
-//! Execution starts at the label `main` if there is one, otherwise at 0.
+//! Words before the first node directive are for node 000. Each node has its
+//! own labels, and execution starts at its label `main` if there is one,
+//! otherwise at 0.
 
 pub const Program = struct {
+    /// node number, yxx
+    node: u16 = 0,
     ram: [64]Word,
     /// number of words used, from address 0
     len: u7,
@@ -63,21 +68,46 @@ pub const Error = error{
     ControlTooDeep,
     /// the body of a for unext loop must fit in one instruction word
     UnextBodyTooLong,
+    /// node without a number from 0 to 9999
+    InvalidNode,
+    DuplicateNode,
+    /// more nodes than the space given for their programs
+    TooManyNodes,
 };
 
+/// Assembles source for a single node, which is node 000 unless a node
+/// directive picks another. Code for more than one node is TooManyNodes.
 pub fn assemble(source: []const u8, diagnostic: *Diagnostic) Error!Program {
-    var assembler: Assembler = .{ .tokens = .{ .source = source }, .diagnostic = diagnostic };
-    try assembler.run();
-    return .{
-        .ram = assembler.ram,
-        .len = assembler.len,
-        .entry = .{
-            .io = false,
-            .rom = false,
-            .local = if (assembler.find("main")) |main| assembler.labels[main].address orelse 0 else 0,
-        },
-    };
+    var programs: [1]Program = undefined;
+    const assembled = try assembleNodes(source, &programs, diagnostic);
+    return if (assembled.len == 1) assembled[0] else .{ .ram = @splat(0), .len = 0, .entry = .{ .io = false, .rom = false, .local = 0 } };
 }
+
+/// Assembles source for any number of nodes into `programs`, returning the
+/// programs of the nodes that have code.
+pub fn assembleNodes(source: []const u8, programs: []Program, diagnostic: *Diagnostic) Error![]Program {
+    var tokens: Tokenizer = .{ .source = source };
+    var count: usize = 0;
+    var node: Directive = .{ .number = 0 };
+    while (true) {
+        var assembler: Assembler = .{ .tokens = &tokens, .diagnostic = diagnostic };
+        const next_node = try assembler.run();
+        if (assembler.len > 0) {
+            errdefer diagnostic.* = node.diagnostic;
+            for (programs[0..count]) |program| if (program.node == node.number) return error.DuplicateNode;
+            if (count == programs.len) return error.TooManyNodes;
+            programs[count] = assembler.program(node.number);
+            count += 1;
+        }
+        node = next_node orelse return programs[0..count];
+    }
+}
+
+/// a node directive, and where it is for errors about its node
+const Directive = struct {
+    number: u16,
+    diagnostic: Diagnostic = .{},
+};
 
 /// port and register addresses
 const constants = [_]struct { []const u8, u9 }{
@@ -131,7 +161,7 @@ const Control = union(enum) {
 };
 
 const Assembler = struct {
-    tokens: Tokenizer,
+    tokens: *Tokenizer,
     diagnostic: *Diagnostic,
 
     ram: [64]Word = @splat(0),
@@ -153,8 +183,48 @@ const Assembler = struct {
     control: [16]Control = undefined,
     control_count: u8 = 0,
 
-    fn run(self: *Assembler) Error!void {
-        while (try self.next()) |token| try self.compile(token);
+    /// Assembles one node's words, returning the directive for the next
+    /// node if one ended them.
+    fn run(self: *Assembler) Error!?Directive {
+        while (try self.next()) |token| {
+            if (eql(token, "node")) {
+                const start = self.tokens.start;
+                const line = self.tokens.start_line;
+                const next_node: Directive = .{
+                    .number = try self.nodeNumber(),
+                    .diagnostic = .{ .line = line, .token = self.tokens.source[start..self.tokens.index] },
+                };
+                try self.finish();
+                return next_node;
+            }
+            try self.compile(token);
+        }
+        try self.finish();
+        return null;
+    }
+
+    fn nodeNumber(self: *Assembler) Error!u16 {
+        const token = try self.next() orelse return error.InvalidNode;
+        const value = number(token) catch return error.InvalidNode;
+        if (value == null or value.? < 0 or value.? > 9999) return error.InvalidNode;
+        return @intCast(value.?);
+    }
+
+    fn program(self: Assembler, node: u16) Program {
+        return .{
+            .node = node,
+            .ram = self.ram,
+            .len = self.len,
+            .entry = .{
+                .io = false,
+                .rom = false,
+                .local = if (self.find("main")) |main| self.labels[main].address orelse 0 else 0,
+            },
+        };
+    }
+
+    /// resolves references once all of a node's words are assembled
+    fn finish(self: *Assembler) Error!void {
         self.finishWord();
 
         if (self.control_count != 0) {
@@ -177,13 +247,13 @@ const Assembler = struct {
     }
 
     fn next(self: *Assembler) Error!?[]const u8 {
-        const token = self.tokens.next() catch |err| return self.tokenError(self.tokens, err);
+        const token = self.tokens.next() catch |err| return self.tokenError(self.tokens.*, err);
         self.diagnostic.* = .{ .line = self.tokens.start_line, .token = token orelse return null };
         return token;
     }
 
     fn peek(self: *Assembler) Error!?[]const u8 {
-        var copy = self.tokens;
+        var copy = self.tokens.*;
         return copy.next() catch |err| self.tokenError(copy, err);
     }
 
@@ -414,7 +484,7 @@ fn constant(token: []const u8) ?Word {
 }
 
 /// words other than opcodes and constants that compile takes before labels
-const keywords = [_][]const u8{ ":", ",", "org", "begin", "again", "for", "then" };
+const keywords = [_][]const u8{ ":", ",", "org", "begin", "again", "for", "then", "node" };
 
 /// True for names that would compile as something other than a label
 fn reserved(name: []const u8) bool {
@@ -673,3 +743,41 @@ const Opcode = @import("opcodes.zig").Opcode;
 const std = @import("std");
 const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
+
+test "node directive" {
+    const source =
+        \\ dup
+        \\ node 101 : x ; : main x
+        \\ node 717 : x drop
+    ;
+    var programs: [3]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleNodes(source, &programs, &diagnostic);
+    try expectEqual(3, assembled.len);
+
+    try expectEqual(0, assembled[0].node);
+    try expectEqual(1, assembled[0].len);
+
+    // each node has its own labels
+    try expectEqual(101, assembled[1].node);
+    try expectEqual(1, assembled[1].entry.local);
+    try expectEqual(717, assembled[2].node);
+    try expectEqual(0, assembled[2].entry.local);
+
+    // nodes without code have no program
+    try expectEqual(1, (try assembleNodes("node 5 node 6 dup", &programs, &diagnostic)).len);
+
+    // errors about a node point at its directive
+    try std.testing.expectError(error.DuplicateNode, assembleNodes("dup\nnode 0 dup", &programs, &diagnostic));
+    try expectEqual(2, diagnostic.line);
+    try std.testing.expectEqualStrings("node 0", diagnostic.token);
+    try std.testing.expectError(error.TooManyNodes, assemble("dup node 1 dup", &diagnostic));
+    try std.testing.expectEqualStrings("node 1", diagnostic.token);
+    // a single node can be any node
+    try expectEqual(5, (try assemble("node 5 dup", &diagnostic)).node);
+    try std.testing.expectError(error.UndefinedLabel, assemble("node 1 : x node 2 x", &diagnostic));
+    try expectError(error.InvalidNode, "node");
+    try expectError(error.InvalidNode, "node 10000");
+    try expectError(error.InvalidNode, "node up");
+    try expectError(error.ReservedLabel, ": node");
+}
