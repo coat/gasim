@@ -1,12 +1,12 @@
 \ hello.ga - print a greeting
 \
-\ The console is attached to the up port. Each word written to it is output
-\ as a byte.
+\ The console is attached to the up port of node 000, which faces off the
+\ south edge of the chip. Each word written to it is output as a byte.
 
 : main
     up b!                  \ B addresses the console
     'message a!            \ A walks through the message
     @+ for @+ !b unext     \ the first word is the length - 1
-    down b! @b             \ nothing is connected to down, so wait forever
+    left b! @b             \ left faces off the west edge, so wait forever
 
 : message 13 , "Hello, world!" 10 ,

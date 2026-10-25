@@ -1,0 +1,23 @@
+\ upcase.ga - convert console input to upper case using two nodes
+\
+\ Node 000 passes each byte of input to node 001, which converts lower case
+\ letters to upper case and sends the result back to be output.
+\
+\ Port names alternate across the chip so that neighbours use the same name
+\ for the port between them: both nodes reach each other through right.
+
+node 000
+: main
+    right a!  up b!        \ A addresses node 001, B the console
+    begin @b ! @ !b again
+
+node 001
+: main
+    right b!
+    begin @b upcase !b again
+
+\ -if jumps to then unless T is negative, without dropping T
+: upcase ( c - C )
+    dup -97 + -if drop ; then      \ below a
+    -26 + -if drop -32 + ; then    \ a to z
+    drop ;
