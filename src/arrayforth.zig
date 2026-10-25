@@ -39,6 +39,17 @@
 //!                       control flow within a host word, FOR running n+1
 //!                       times with I counting down to 0, and DO with I
 //!                       counting up to before the limit
+//!     [ ... ] LITERAL   within a host word, interpret words, and compile the
+//!                       number they leave
+//!     VARIABLE name  2VARIABLE name  CREATE name  n ARRAY name  d 2CONSTANT name
+//!     HERE  n ALLOT  n ,  @ ! +! 2@ 2!  CELLS CELL+
+//!                       host memory, whose addresses count cells: ARRAY's
+//!                       name takes an index, and FORGET gives the memory
+//!                       after a name back
+//!     nnx nny nns nnc  nn-b b-nn
+//!                       arrayForth 3's chip configuration: the GA144's
+//!                       columns, rows and nodes, bins for four chips, and
+//!                       ccyyxx node numbers to linear ones and back
 //!     io right down left up data ldata warp center top side corner
 //!     east south west north
 //!                       named literals, the cardinal ones by node position
@@ -410,12 +421,14 @@ const SavedBin = struct {
 /// a word defined by NL, NDL, NC or CONSTANT
 const Name = struct {
     name: []const u8,
-    kind: enum { literal, double_literal, call, constant, definition },
+    kind: enum { literal, double_literal, call, constant, double_constant, address, array, definition },
     /// the value, or for a definition where its words start and how many
     /// there are, as `start | count << 16`
     value: i64,
     /// the words of definitions before this name, which forgetting it keeps
     mark: u16,
+    /// the host memory used before this name, which forgetting it keeps
+    here: u16,
 };
 
 /// a word of a definition, the line it was written on, and the name it
@@ -446,6 +459,8 @@ const DefinedWord = struct {
         /// the loop until the limit is reached
         loop: u16,
         plus_loop: u16,
+        /// pushes a number that LITERAL compiled
+        literal: i32,
     };
 };
 
@@ -505,8 +520,13 @@ const Interpreter = struct {
     /// the words of every definition
     defined: [2048]DefinedWord = undefined,
     defined_len: u16 = 0,
-    /// the definition being defined, from its : until its ;
-    compiling: ?struct { name: []const u8, start: u16, directive: Diagnostic } = null,
+    /// the definition being defined, from its : until its ;, and whether [
+    /// has it interpreting words instead until ]
+    compiling: ?struct { name: []const u8, start: u16, directive: Diagnostic, interpreting: bool = false } = null,
+    /// host memory, of cells, the first `here` of which are used by
+    /// VARIABLE, CREATE, ARRAY, ALLOT and ,
+    memory: [4096]i32 = undefined,
+    here: u16 = 0,
     /// branches being compiled, waiting for where they go, and where loops
     /// start
     control: [16]struct { word: ControlWord, at: u16 } = undefined,
@@ -525,10 +545,10 @@ const Interpreter = struct {
 
     fn run(self: *Interpreter) Error!void {
         while (try self.next()) |token| {
-            if (self.compiling != null) {
+            if (self.compiling) |compiling| if (!compiling.interpreting or eql(token, "]")) {
                 try self.compile(token);
                 continue;
-            }
+            };
             if (eql(token, "EXIT") and !self.assembling) {
                 if (try self.endBlock()) continue else break;
             }
@@ -616,6 +636,7 @@ const Interpreter = struct {
         switch (branch) {
             .jump => |to| return to,
             .jump_if_zero => |to| return if (try self.pop() == 0) to else null,
+            .literal => |value| try self.push(value),
             .@"for" => try self.startLoop(.{ .index = try self.pop(), .limit = 0 }),
             .next => |to| {
                 const loop = &self.loops[self.loop_len - 1];
@@ -763,7 +784,7 @@ const Interpreter = struct {
 
     fn addName(self: *Interpreter, new_name: []const u8, kind: @FieldType(Name, "kind"), value: i64) Error!void {
         if (self.name_count == self.names.len) return error.TooManyLabels;
-        self.names[self.name_count] = .{ .name = new_name, .kind = kind, .value = value, .mark = self.defined_len };
+        self.names[self.name_count] = .{ .name = new_name, .kind = kind, .value = value, .mark = self.defined_len, .here = self.here };
         self.name_count += 1;
     }
 
@@ -783,6 +804,19 @@ const Interpreter = struct {
         }
         for ([_][]const u8{ "{", "IF{", "{ELSE}", "}" }) |immediate| {
             if (eql(token, immediate)) return self.runForth(std.meta.stringToEnum(ForthWord, immediate).?);
+        }
+        // [ interprets words until ], as LITERAL compiles what they leave
+        if (eql(token, "[")) {
+            self.compiling.?.interpreting = true;
+            return;
+        }
+        if (eql(token, "]")) {
+            self.compiling.?.interpreting = false;
+            return;
+        }
+        if (eql(token, "LITERAL")) {
+            _ = try self.addBranch(.{ .literal = try self.pop() });
+            return;
         }
         if (std.meta.stringToEnum(ControlWord, token)) |word| return self.compileControl(word);
         _ = try self.addDefined(.{ .text = token, .line = self.diagnostic.line, .name = self.findName(token), .asm_context = self.asm_context });
@@ -878,7 +912,9 @@ const Interpreter = struct {
                 try self.pushDouble(word.value);
             } else try (try self.builder()).literal(word18(word.value)),
             .call => try self.callOrPush(@intCast(word.value & 0xffff), false),
-            .constant => try self.push(@intCast(word.value)),
+            .constant, .address => try self.push(@intCast(word.value)),
+            .double_constant => try self.pushDouble(word.value),
+            .array => try self.push(@as(i32, @intCast(word.value)) +% try self.pop()),
             .definition => try self.runDefinition(word.value),
         }
     }
@@ -1509,6 +1545,7 @@ const Interpreter = struct {
                 const forget_name = try self.name();
                 const i = self.findName(forget_name) orelse return error.UnknownWord;
                 self.defined_len = self.names[i].mark;
+                self.here = self.names[i].here;
                 self.name_count = i;
             },
             .@":" => {
@@ -1516,6 +1553,68 @@ const Interpreter = struct {
                 const new_name = try self.name();
                 self.compiling = .{ .name = new_name, .start = self.defined_len, .directive = directive };
                 self.control_len = 0;
+            },
+            .@"[", .@"]", .LITERAL => return error.CompileOnly,
+            .VARIABLE, .@"2VARIABLE", .CREATE => {
+                // named before its memory, which forgetting it gives back
+                try self.addName(try self.name(), .address, self.here);
+                try self.allot(switch (word) {
+                    .VARIABLE => 1,
+                    .@"2VARIABLE" => 2,
+                    else => 0,
+                });
+            },
+            .ARRAY => {
+                const count = try self.pop();
+                try self.addName(try self.name(), .array, self.here);
+                try self.allot(count);
+            },
+            .@"2CONSTANT" => try self.define(.double_constant, try self.popDouble()),
+            .ALLOT => try self.allot(try self.pop()),
+            .HERE => try self.push(self.here),
+            .@"," => {
+                const value = try self.pop();
+                const address = self.here;
+                try self.allot(1);
+                self.memory[address] = value;
+            },
+            .@"@" => try self.push((try self.cell(try self.pop())).*),
+            .@"!" => {
+                const address = try self.cell(try self.pop());
+                address.* = try self.pop();
+            },
+            .@"+!" => {
+                const address = try self.cell(try self.pop());
+                address.* +%= try self.pop();
+            },
+            .@"2@" => {
+                const address = try self.pop();
+                const high = (try self.cell(address)).*;
+                try self.push((try self.cell(address +% 1)).*);
+                try self.push(high);
+            },
+            .@"2!" => {
+                const address = try self.pop();
+                const high = try self.cell(address);
+                const low = try self.cell(address +% 1);
+                high.* = try self.pop();
+                low.* = try self.pop();
+            },
+            .CELLS => try self.push(try self.pop()),
+            .@"CELL+" => try self.push((try self.pop()) +% 1),
+            .nnx => try self.push(18),
+            .nny => try self.push(8),
+            .nns => try self.push(144),
+            .nnc => try self.push(4 * 144),
+            .@"nn-b" => {
+                const nn = try self.pop();
+                if (nn < 0) return error.InvalidNode;
+                try self.push(nnToBin(@intCast(nn)));
+            },
+            .@"b-nn" => {
+                const n = try self.pop();
+                if (n < 0) return error.InvalidNode;
+                try self.push(binToNn(@intCast(n)));
             },
             .I => try self.push(try self.loopIndex(0)),
             .J => try self.push(try self.loopIndex(1)),
@@ -1672,6 +1771,18 @@ const Interpreter = struct {
         }
     }
 
+    /// Uses `count` more cells of host memory
+    fn allot(self: *Interpreter, count: i32) Error!void {
+        if (count < 0 or count > self.memory.len - self.here) return error.NumberOutOfRange;
+        self.here += @intCast(count);
+    }
+
+    /// a cell of host memory that is in use
+    fn cell(self: *Interpreter, address: i32) Error!*i32 {
+        if (address < 0 or address >= self.here) return error.NumberOutOfRange;
+        return &self.memory[@intCast(address)];
+    }
+
     fn swap(self: *Interpreter) Error!void {
         const b = try self.pop();
         const a = try self.pop();
@@ -1724,6 +1835,25 @@ fn cardinal(node: u16, direction: Cardinal) u18 {
 /// stack, which may be anything
 fn inRam(address: i32, len: i32) bool {
     return address >= 0 and len >= 0 and address <= 64 and len <= 64 - address;
+}
+
+/// The linear number of a node in ccyyxx form, counting the nodes of chip
+/// cc after those of the chips before it, as arrayForth 3 numbers bins
+fn nnToBin(nn: u32) i32 {
+    const chip = nn / 10000;
+    const y = nn / 100 % 100;
+    const x = nn % 100;
+    return @intCast((chip * 144 + y * 18 + x) % (4 * 144));
+}
+
+/// The ccyyxx form of a linear node number, as arrayForth 3's b-nn has it:
+/// the second chip is 1, and the third and fourth are numbered from 16 and
+/// 24, as GreenArrays' bins for them are
+fn binToNn(n: u32) i32 {
+    var chip = n / 144;
+    if (chip == 1) chip = 10000 else if (chip == 2 or chip == 3) chip *= 800;
+    const node = n % 144;
+    return @intCast(chip + node / 18 * 100 + node % 18);
 }
 
 /// a Forth flag: -1 for true, 0 for false
@@ -1852,6 +1982,30 @@ const ForthWord = enum {
     @"0=",
     @"0<",
     NOT,
+    @"[",
+    @"]",
+    LITERAL,
+    VARIABLE,
+    @"2VARIABLE",
+    CREATE,
+    ARRAY,
+    @"2CONSTANT",
+    ALLOT,
+    HERE,
+    @",",
+    @"@",
+    @"!",
+    @"+!",
+    @"2@",
+    @"2!",
+    CELLS,
+    @"CELL+",
+    nnx,
+    nny,
+    nns,
+    nnc,
+    @"nn-b",
+    @"b-nn",
     LOAD,
     THRU,
     FH,
@@ -2849,4 +3003,43 @@ test "host control flow" {
 test "host definitions keep the words they were compiled with" {
     // 2* is the host's, though six runs within ASM[, where 2* is an opcode
     try expectAssembles(": six 3 2* ;  ASM[ # 0 NODE  six S>D lit >BIN", &.{ opcodes(.@"@p", .@";", .@";", .@";"), 6 });
+}
+
+test "host memory" {
+    var programs: [1]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+
+    try session.interpret("VARIABLE x  5 x !  x @ .  3 x +!  x @ .");
+    // addresses count cells
+    try session.interpret("CREATE table 1 , 2 , 3 ,  table 1 + @ .  table 2 CELLS + @ .");
+    try session.interpret("4 ARRAY a  7 2 a !  2 a @ .");
+    try session.interpret("2VARIABLE d  12. d 2!  d 2@ D.  1. 2CONSTANT one  one D.");
+    try session.interpret("HERE 10 ALLOT HERE SWAP - .");
+    // [ ] interprets within a definition, for LITERAL to compile
+    try session.interpret(": seven [ 3 4 + ] LITERAL ;  seven .");
+    try std.testing.expectEqualStrings("5 8 2 3 7 12 1 10 7 ", out.buffered());
+
+    // forgetting a name gives back the memory after it
+    out.end = 0;
+    try session.interpret("HERE VARIABLE v 9 ALLOT FORGET v HERE = .");
+    try std.testing.expectEqualStrings("-1 ", out.buffered());
+
+    try std.testing.expectError(error.NumberOutOfRange, session.interpret("HERE @"));
+    try std.testing.expectError(error.NumberOutOfRange, session.interpret("-1 ALLOT"));
+    try std.testing.expectError(error.CompileOnly, session.interpret("1 LITERAL"));
+}
+
+test "chip configuration words" {
+    var programs: [1]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+    try session.interpret("nnx . nny . nns . nnc .  708 nn-b .  134 b-nn .  10005 nn-b .  149 b-nn .  1601 nn-b .  289 b-nn .");
+    try std.testing.expectEqualStrings("18 8 144 576 134 708 149 10005 289 1601 ", out.buffered());
 }
