@@ -80,8 +80,9 @@ pub fn facing(x: u16, y: u16, direction: Direction) Cardinal {
     };
 }
 
-/// Allocates and wires up the nodes. Nodes start waiting for code on all
-/// their ports, as after reset, until they are loaded with a program.
+/// Allocates and wires up the nodes. As after reset, nodes start with a
+/// multiport execute of their neighbours' ports, waiting for code, until
+/// they are loaded with a program.
 pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Chip {
     const count = layout.count();
     const nodes = try gpa.alloc(Computer, count);
@@ -99,8 +100,6 @@ pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Chip {
     @memset(queued, false);
     for (nodes, 0..) |*n, i| {
         n.* = .reset;
-        // a multiport execute of every port
-        n.p.address = Address.fromWord(0x1a5);
         chip.wake(@intCast(i));
     }
 
@@ -120,6 +119,12 @@ pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Chip {
         }
     }
     std.debug.assert(next_port == ports.len);
+
+    for (nodes) |*n| {
+        var connected: port.Select = .empty;
+        for (n.ports, 0..) |link, d| connected.setPresent(@fromBackingInt(@intCast(d)), link.port != null);
+        n.p.address = Address.fromWord(port.multiport(connected));
+    }
     return chip;
 }
 

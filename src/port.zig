@@ -43,6 +43,16 @@ pub fn select(address: u9) ?Select {
     return ports;
 }
 
+/// The (multiport) I/O address that selects `ports`, the inverse of `select`
+pub fn multiport(ports: Select) u9 {
+    var address: u9 = 0x105;
+    if (ports.contains(.right)) address |= 0x80;
+    if (!ports.contains(.down)) address |= 0x40;
+    if (ports.contains(.left)) address |= 0x20;
+    if (!ports.contains(.up)) address |= 0x10;
+    return address;
+}
+
 pub const Port = struct {
     state: State = .idle,
 
@@ -146,6 +156,16 @@ test select {
     // io register and RAM
     try expectEqual(null, select(0x15d));
     try expectEqual(null, select(0x005));
+}
+
+test multiport {
+    try expectEqual(0x1a5, multiport(.full));
+    try expectEqual(0x195, multiport(.initMany(&.{ .right, .down })));
+    for (0..16) |bits| {
+        var ports: Select = .empty;
+        for (0..4) |d| ports.setPresent(@fromBackingInt(@intCast(d)), bits & (@as(usize, 1) << @intCast(d)) != 0);
+        try expectEqual(ports, select(multiport(ports)).?);
+    }
 }
 
 test "reader arrives first" {
