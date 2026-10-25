@@ -202,6 +202,31 @@ pub const Computer = struct {
 
     execution_time: f32,
 
+    pub const Status = union(enum) {
+        running,
+        /// executing from a port, waiting for code
+        code: u9,
+        reading: u9,
+        writing: u9,
+    };
+
+    /// what the computer is doing, and if it is waiting, the address it
+    /// waits on
+    pub fn status(self: Computer) Status {
+        if (!self.suspended) return .running;
+        if (self.state == .fetch) return .{ .code = @bitCast(self.p.address) };
+        const opcode = Instruction.decode(self.i).getSlot(self.slot);
+        const address: u9 = switch (opcode) {
+            .@"@p", .@"!p" => @bitCast(self.p.address),
+            .@"@b", .@"!b" => self.b,
+            else => @intCast(@as(u18, @bitCast(self.a)) & 0x1ff),
+        };
+        return switch (opcode) {
+            .@"@p", .@"@+", .@"@b", .@"@" => .{ .reading = address },
+            else => .{ .writing = address },
+        };
+    }
+
     /// Executes the rest of the current instruction word, fetching a new one
     /// first if needed. Returns early with `suspended` set when an opcode
     /// must wait on a comm port.
@@ -1049,3 +1074,22 @@ const std = @import("std");
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectApproxEqAbs = std.testing.expectApproxEqAbs;
+
+test "status" {
+    var n: Computer = .reset;
+    try std.testing.expectEqual(Computer.Status.running, n.status());
+
+    // fetching from a multiport
+    n.p.address = Address.fromWord(0x1a5);
+    n.suspended = true;
+    try std.testing.expectEqual(Computer.Status{ .code = 0x1a5 }, n.status());
+
+    // reading through B, and writing through A
+    n.state = .execution;
+    n.i = Instruction.encode(.{ .slot_0 = .@"@b", .slot_1 = .@"!", .slot_2 = .@".", .slot_3 = 7 });
+    n.b = 0x1d5;
+    try std.testing.expectEqual(Computer.Status{ .reading = 0x1d5 }, n.status());
+    n.slot = 1;
+    n.a = 0x145;
+    try std.testing.expectEqual(Computer.Status{ .writing = 0x145 }, n.status());
+}

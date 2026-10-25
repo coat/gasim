@@ -25,6 +25,8 @@ const usage =
     \\                             more than once.
     \\  --trace                    with run, write a line to stderr for each
     \\                             word a node executes
+    \\  --why                      with run, say what each node is waiting on
+    \\                             once every node is waiting
     \\  --listing                  write each node's words with their
     \\                             disassembly and source lines to stdout,
     \\                             instead of running
@@ -64,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
     var rom_path: ?[]const u8 = null;
     var boot = false;
     var trace = false;
+    var why = false;
     var listing = false;
     var breakpoints: [Chip.max_breakpoints]struct { node: u16, address: u9 } = undefined;
     var breakpoints_len: usize = 0;
@@ -121,6 +124,8 @@ pub fn main(init: std.process.Init) !void {
             boot = true;
         } else if (std.mem.eql(u8, arg, "--trace")) {
             trace = true;
+        } else if (std.mem.eql(u8, arg, "--why")) {
+            why = true;
         } else if (std.mem.eql(u8, arg, "--listing")) {
             listing = true;
         } else if (path == null and !std.mem.startsWith(u8, arg, "-")) {
@@ -129,6 +134,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const source_path = path orelse fatal(usage, .{});
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
+    if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
 
     // one spare byte tells a full buffer apart from a longer file
     var source_buffer: [max_source_len + 1]u8 = undefined;
@@ -273,8 +279,37 @@ pub fn main(init: std.process.Init) !void {
         stderr_file_writer.interface.flush() catch {};
         std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
     }
+    if (why) logWaiting(chip);
     // most likely the console is on a port the program does not use
     if (!console.used) std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
+}
+
+/// Logs what each node is waiting on, such as `node 001 waiting to read
+/// right`. Nodes waiting on several ports for code, or in ROM, as they do
+/// after reset, are counted rather than listed.
+fn logWaiting(chip: Chip) void {
+    var idle: usize = 0;
+    for (chip.nodes, 0..) |n, i| {
+        const number = chip.layout.nodeNumber(@intCast(i));
+        const status = n.status();
+        switch (status) {
+            .running => std.log.info("node {d:0>3} running", .{number}),
+            inline .code, .reading, .writing => |address, waiting| {
+                const ports = gasim.port.select(address) orelse gasim.port.Select.empty;
+                if (ports.count() > 1 and (waiting == .code or n.word_address.rom)) {
+                    idle += 1;
+                    continue;
+                }
+                std.log.info("node {d:0>3} waiting {s} {s}", .{ number, switch (waiting) {
+                    .code => "for code from",
+                    .reading => "to read",
+                    .writing => "to write",
+                    else => unreachable,
+                }, ioName(address) });
+            },
+        }
+    }
+    if (idle > 0) std.log.info("{d} {s} waiting on several ports, as after reset", .{ idle, if (idle == 1) "node" else "nodes" });
 }
 
 /// Reads a ROM dump from `path`, or the default dump if there is one
@@ -318,6 +353,7 @@ const Chip = gasim.Chip;
 const Console = gasim.Console;
 const Direction = gasim.Direction;
 const ga144 = gasim.ga144;
+const ioName = gasim.disassembler.ioName;
 const tui = @import("tui.zig");
 const vaxis = @import("vaxis");
 

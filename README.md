@@ -67,6 +67,18 @@ info: node 000 reached 004
 info: P 004  T 00000  S 00000  R 0000d  A 00008  B 145
 ```
 
+- `--why`: with `run`, once every node is waiting, say what each one is
+  waiting on. Nodes waiting on several ports, as they do after reset, are
+  only counted.
+
+```
+$ echo hi | gasim run --why examples/upcase.ga
+HI
+info: node 000 waiting to read up
+info: node 001 waiting to read right
+info: 142 nodes waiting on several ports, as after reset
+```
+
 - `--listing`: instead of running, write each node's words: the address, the
   raw word, its opcodes or literal value, and the source line it came from.
 

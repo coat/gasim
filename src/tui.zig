@@ -593,7 +593,7 @@ const Tui = struct {
             const y = layout.rows - 1 - r;
             for (self.map_scroll.x..@min(layout.columns, self.map_scroll.x + columns)) |c| {
                 const i: u16 = @intCast(y * layout.columns + c);
-                var style = statusStyle(status(self.chip.nodes[i]));
+                var style = statusStyle(self.chip.nodes[i].status());
                 if (i == self.selected) style.reverse = true;
                 _ = win.printSegment(.{ .text = self.print("{d:0>3}", .{layout.nodeNumber(i)}), .style = style }, .{
                     .row_offset = @intCast(r - self.map_scroll.y),
@@ -678,7 +678,7 @@ const Tui = struct {
 
     fn drawNode(self: *Tui, win: vaxis.Window) void {
         const n = self.chip.nodes[self.selected];
-        const node_status = status(n);
+        const node_status = n.status();
         _ = win.printSegment(.{ .text = switch (node_status) {
             .running => "running",
             .code => |address| self.print("waiting for code from {s}", .{disassembler.ioName(address)}),
@@ -835,31 +835,7 @@ fn memoryRow(address: Address) ?u16 {
     return if (address.rom) 65 + 1 + i else 1 + i;
 }
 
-const Status = union(enum) {
-    running,
-    /// executing from a port, waiting for code
-    code: u9,
-    reading: u9,
-    writing: u9,
-};
-
-/// what a node is doing, and if it is waiting, the address it waits on
-fn status(n: Computer) Status {
-    if (!n.suspended) return .running;
-    if (n.state == .fetch) return .{ .code = @bitCast(n.p.address) };
-    const opcode = Instruction.decode(n.i).getSlot(n.slot);
-    const address: u9 = switch (opcode) {
-        .@"@p", .@"!p" => @bitCast(n.p.address),
-        .@"@b", .@"!b" => n.b,
-        else => @intCast(@as(u18, @bitCast(n.a)) & 0x1ff),
-    };
-    return switch (opcode) {
-        .@"@p", .@"@+", .@"@b", .@"@" => .{ .reading = address },
-        else => .{ .writing = address },
-    };
-}
-
-fn statusStyle(s: Status) vaxis.Style {
+fn statusStyle(s: Computer.Status) vaxis.Style {
     return switch (s) {
         .running => .{ .fg = .{ .index = 2 }, .bold = true },
         .code => .{ .dim = true },
@@ -1195,25 +1171,6 @@ test "stops at watched transfers" {
     t.tui.running = true;
     try t.tui.run();
     try std.testing.expectEqualStrings("node 000 wrote 00048 to up", t.tui.message.?);
-}
-
-test status {
-    var n: Computer = .reset;
-    try std.testing.expectEqual(Status.running, status(n));
-
-    // fetching from a multiport
-    n.p.address = Address.fromWord(0x1a5);
-    n.suspended = true;
-    try std.testing.expectEqual(Status{ .code = 0x1a5 }, status(n));
-
-    // reading through B, and writing through A
-    n.state = .execution;
-    n.i = Instruction.encode(.{ .slot_0 = .@"@b", .slot_1 = .@"!", .slot_2 = .@".", .slot_3 = 7 });
-    n.b = 0x1d5;
-    try std.testing.expectEqual(Status{ .reading = 0x1d5 }, status(n));
-    n.slot = 1;
-    n.a = 0x145;
-    try std.testing.expectEqual(Status{ .writing = 0x145 }, status(n));
 }
 
 test memoryRow {
