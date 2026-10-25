@@ -1199,8 +1199,10 @@ test "inline instruction words" {
         opcodes(.@";", .@";", .@";", .@";"),
         jumpWord(.@"@p", .@"!", .call, 2, 0),
     });
-    // without =P, P is not known for a short jump
+    // without =P, P is not known for a short jump, but a slot 1 jump only
+    // keeps P9
     try expectError(error.InlineTooLong, "ASM[ # 0 NODE  A[ @p ! # x10 call ]]");
+    try expectAssembles("ASM[ # 0 NODE  A[ @p # x10 call ]] , >BIN", &.{jumpWord(.@"@p", .call, .@";", 1, 0x10)});
     try expectError(error.InlineTooLong, "ASM[ # 0 NODE  A[ dup 5. ]]");
     try expectError(error.NestedInline, "A[ A[");
     try expectError(error.UnclosedInline, "A[ dup");

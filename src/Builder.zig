@@ -319,16 +319,18 @@ fn pc(self: Builder) u10 {
 
 /// Whether a jump from the current slot reaches the destination, or for an
 /// unknown destination, whether it may go there to be patched later.
-/// Unknown destinations are forward in RAM.
+/// Unknown destinations are forward in RAM. When P is not known, a slot 1
+/// jump still reaches below x100, as it keeps only P9, which is assumed
+/// clear.
 fn reachable(self: Builder, destination: ?u10) bool {
-    return switch (self.slot) {
-        0 => true,
-        1, 2 => if (destination) |d|
-            (!self.single_word or self.p != null) and lands(@intCast(self.slot), self.pc(), d)
-        else
-            self.slot == 1 or self.short_forward,
-        else => false,
+    const slot: Slot = switch (self.slot) {
+        0 => return true,
+        1, 2 => @intCast(self.slot),
+        else => return false,
     };
+    const d = destination orelse return slot == 1 or self.short_forward;
+    if (self.single_word and self.p == null) return slot == 1 and lands(slot, 0, d);
+    return lands(slot, self.pc(), d);
 }
 
 /// whether a jump in `slot` taken with P at `p` can go to the destination
