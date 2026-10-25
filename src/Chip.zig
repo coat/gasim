@@ -443,6 +443,45 @@ pub fn setUp(self: *Chip, descriptor: boot.Descriptor, programs: []const assembl
     n.p = @bitCast(descriptor.p);
 }
 
+/// Has a node that is waiting for code from a port execute an instruction
+/// word instead, as arrayForth 3's IDE gives words to a node through a port.
+/// The node stops waiting on the port, and runs the word as if called from
+/// it, with the port's address pushed onto the return stack: a return goes
+/// back to the port, as does running off the end of the word, to wait for
+/// code again. So `op ; ; ;` runs an opcode, and a jump runs code that
+/// returns to the port.
+pub fn execute(self: *Chip, i: u16, word: Word) error{NotWaitingForCode}!void {
+    const n = &self.nodes[i];
+    if (n.status() != .code) return error.NotWaitingForCode;
+    const ports = port.select(@bitCast(n.p.address)) orelse return error.NotWaitingForCode;
+    var it = ports.iterator();
+    while (it.next()) |direction| {
+        const link = n.ports[@backingInt(direction)];
+        const p = link.port orelse continue;
+        // a word already on its way is code the node will run first
+        if (p.state == .delivered) return error.NotWaitingForCode;
+        p.cancelRead(link.side);
+    }
+    n.return_stack.push(n.p.toWord());
+    n.i = word;
+    n.word_address = n.p.address;
+    n.slot = 0;
+    n.state = .execution;
+    n.suspended = false;
+    self.wake(i);
+}
+
+/// Steps the chip until node `i` waits for code from a port, for at most
+/// `limit` rounds. Returns false if it did not, because it was still
+/// running or every node was waiting on something else.
+pub fn runUntilWaiting(self: *Chip, i: u16, limit: usize) !bool {
+    for (0..limit) |_| {
+        if (self.nodes[i].status() == .code) return true;
+        if (!try self.advance()) break;
+    }
+    return self.nodes[i].status() == .code;
+}
+
 /// Attaches a console to a port of a node that faces off the array
 pub fn attachConsole(self: *Chip, console: *Console, number: u16, direction: Direction) error{ NoSuchNode, PortConnected }!void {
     const i = self.layout.index(number) orelse return error.NoSuchNode;
@@ -1038,6 +1077,40 @@ test "traces a node waiting on a port once" {
         \\002 002 009b2 @b . . .  T 00005 S 00000 R 00000  waiting
         \\
     , writer.buffered());
+}
+
+test "executes words from a port, as the IDE does" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    const program = try assembler.assemble(": inc 1 + ; : spin begin again", &diagnostic);
+    // node 000 executes from its left port, which faces off the chip
+    var descriptor: boot.Descriptor = .ofProgram(program);
+    descriptor.p = 0x175;
+    try chip.setUp(descriptor, &.{program});
+    const i = chip.layout.index(0).?;
+    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+
+    // code jumped to returns to the port, where the node waits for code
+    // again, with its return stack as it was
+    chip.nodes[i].data_stack.push(5);
+    chip.nodes[i].return_stack.push(9);
+    try chip.execute(i, Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }, 0, 0));
+    try std.testing.expect(try chip.runUntilWaiting(i, 100));
+    try std.testing.expectEqual(6, chip.nodes[i].data_stack.t);
+    try std.testing.expectEqual(9, chip.nodes[i].return_stack.t);
+    try std.testing.expectEqual(0x175, @as(u9, @bitCast(chip.nodes[i].p.address)));
+
+    // as does an opcode followed by returns
+    try chip.execute(i, Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }));
+    try std.testing.expect(try chip.runUntilWaiting(i, 100));
+    try std.testing.expectEqual(6, chip.nodes[i].data_stack.s);
+    try std.testing.expectEqual(9, chip.nodes[i].return_stack.t);
+
+    // code that does not come back leaves the node running
+    try chip.execute(i, Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }, 0, 2));
+    try std.testing.expect(!try chip.runUntilWaiting(i, 100));
+    try std.testing.expectError(error.NotWaitingForCode, chip.execute(i, 0));
 }
 
 test "stops when interrupted" {
