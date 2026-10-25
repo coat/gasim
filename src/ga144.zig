@@ -72,9 +72,14 @@ pub fn romWords(rom_type: RomType) []const RomWord {
 
 /// address of a named ROM word in a node
 pub fn romWord(node: u16, name: []const u8) ?u10 {
-    for (romWords(romType(node))) |word| if (std.mem.eql(u8, word[0], name)) return word[1];
-    return null;
+    return rom_word_maps.get(romType(node)).get(name);
 }
+
+const rom_word_maps = maps: {
+    var maps: std.EnumArray(RomType, std.StaticStringMap(u10)) = undefined;
+    for (std.enums.values(RomType)) |rom_type| maps.set(rom_type, .initComptime(romWords(rom_type)));
+    break :maps maps;
+};
 
 /// Boot nodes start at cold, in ROM, after reset. Node 200 starts at warm.
 /// Every other node starts with a multiport execute of its neighbours' ports.
