@@ -46,15 +46,14 @@ See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
 
 ### ROM
 
-The GA144's ROM is not included. With a ROM dump, each node gets the ROM of
-the GA144 node with the same number, and the boot nodes start in their boot
-code after reset, as on the real chip. Programs can also call ROM words such
-as `*.17` and `warm` by name.
+The GA144's ROM, copyright GreenArrays, Inc., is in
+[`rom/ga144.txt`](rom/ga144.txt) and loaded by default when gasim runs from
+this directory. See [`rom/README.md`](rom/README.md) for where it came from and
+its format.
 
-A dump is a text file with, for each node, its number on a line followed by
-its 64 ROM words in decimal, one per line. One read from a real chip is
-`raw-rom-dump.txt` in [mschuldt/ga144-sim](https://github.com/mschuldt/ga144-sim).
-Save it as `rom/ga144.txt` to load it by default.
+With ROM, each node gets the ROM of the GA144 node with the same number, and
+the boot nodes start in their boot code after reset, as on the real chip.
+Programs can also call ROM words such as `*.17` and `warm` by name.
 
 Without ROM, nodes without a program wait for code on their ports, and
 programs cannot call ROM words.
