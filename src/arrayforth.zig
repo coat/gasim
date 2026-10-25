@@ -116,7 +116,8 @@ pub const Error = assembler.Error || error{
     NoTarget,
     /// the target node is running, rather than waiting for code from a port
     NotWaitingForCode,
-    /// R@ or R! of a comm port, which would wait
+    /// R@ or R! of a comm port, or of a data register the node does not
+    /// have, which would wait
     PortAccess,
 } || Io.Writer.Error;
 
@@ -1022,14 +1023,14 @@ const Interpreter = struct {
                 (try self.targetNode()).data_stack.push(value);
             },
             .@"R@" => {
-                const address = try self.registerAddress(try self.pop());
                 const n = try self.targetNode();
+                const address = try registerAddress(n, try self.pop());
                 try self.pushDouble(@as(u18, @bitCast(n.read(address).?)));
             },
             .@"R!" => {
-                const address = try self.registerAddress(try self.pop());
-                const value = word18(try self.popDouble());
-                _ = (try self.targetNode()).write(address, value);
+                const n = try self.targetNode();
+                const address = try registerAddress(n, try self.pop());
+                _ = n.write(address, word18(try self.popDouble()));
             },
             .RINS => try self.remote(word18(try self.popDouble())),
             .CALL => {
@@ -1248,14 +1249,14 @@ const Interpreter = struct {
         return chip.node(self.target orelse return error.NoTarget).?;
     }
 
-    /// an address R@ and R! can use without waiting: memory, or the io and
-    /// data registers
-    fn registerAddress(self: *Interpreter, value: i32) Error!f18.Address {
-        _ = self;
+    /// an address of node `n` that R@ and R! can use without waiting:
+    /// memory, the io register, or the data register of a node with one
+    fn registerAddress(n: *const Computer, value: i32) Error!f18.Address {
         if (value < 0 or value > 0x1ff) return error.NumberOutOfRange;
         const address: f18.Address = .fromWord(@intCast(value));
-        if (address.io and value != Computer.io_address and value != Computer.data_address) return error.PortAccess;
-        return address;
+        if (!address.io or value == Computer.io_address) return address;
+        if (value == Computer.data_address and n.data != null) return address;
+        return error.PortAccess;
     }
 
     /// Has the target execute an instruction word from its port, and runs
@@ -2307,6 +2308,11 @@ test "a session acts on a chip, as the IDE does" {
     try std.testing.expectStringEndsWith(out.buffered(), " 00006 00006\nR 00000 00000 00000 00000 00000 00000 00000 00000 00000\n");
     out.end = 0;
     try session.interpret("0 R@ D.  0 2 -ASM");
+    // node 000 has no data register, so x141 is not one
+    try std.testing.expectError(error.PortAccess, session.interpret("x141 R@"));
+    try std.testing.expectError(error.PortAccess, session.interpret("5. x141 R!"));
+    // and the node still waits for code, rather than on x141
+    try std.testing.expectEqual(.code, std.meta.activeTag(chip.nodes[chip.layout.index(0).?].status()));
     try std.testing.expectEqualStrings("4155 000 04155  @p + ;\n001 00001  literal 1\n", out.buffered());
 
     // completion knows words, opcodes and labels
