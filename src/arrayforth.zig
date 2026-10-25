@@ -30,6 +30,10 @@
 //!     n NL name  d NDL name  n NC name  n CONSTANT name  FORGET name
 //!                       define a named literal, double literal, call or
 //!                       constant, or forget names back to one
+//!     : name ... ;      outside ASM[, define a host word, which runs its
+//!                       words as compiled host code: numbers go on the
+//!                       stack, names mean what they meant when it was
+//!                       defined, and EXIT returns from it
 //!     io right down left up data ldata warp center top side corner
 //!     east south west north
 //!                       named literals, the cardinal ones by node position
@@ -100,8 +104,12 @@ pub const Error = assembler.Error || error{
     NotInline,
     /// a block LOAD or THRU cannot find, or FH outside a block
     NoSuchBlock,
-    /// blocks loading blocks too deeply
+    /// blocks loading blocks, or definitions running definitions, too deeply
     LoadTooDeep,
+    /// a definition without its ;
+    UnclosedDefinition,
+    /// definitions with more words, in all, than there is space for
+    DefinitionsTooLong,
     /// a boot descriptor that loads a bin that has not been saved
     NoSuchBin,
     /// a boot descriptor such as /P before +NODE
@@ -182,6 +190,7 @@ pub const Session = struct {
             it.asm_context = false;
             it.hash = false;
             it.inline_word = null;
+            it.compiling = null;
             return err;
         };
     }
@@ -294,6 +303,8 @@ pub fn blockText(blocks: []const u8, text: []u8) []u8 {
 /// a block being loaded, or the whole source when it is text
 const Frame = struct {
     tokens: Tokenizer,
+    /// the words of a definition being run, instead of tokens
+    definition: ?struct { at: u16, end: u16 } = null,
     /// the block being interpreted, and the last of the blocks THRU loads
     block: ?u32 = null,
     last: u32 = 0,
@@ -387,8 +398,20 @@ const SavedBin = struct {
 /// a word defined by NL, NDL, NC or CONSTANT
 const Name = struct {
     name: []const u8,
-    kind: enum { literal, double_literal, call, constant },
+    kind: enum { literal, double_literal, call, constant, definition },
+    /// the value, or for a definition where its words start and how many
+    /// there are, as `start | count << 16`
     value: i64,
+    /// the words of definitions before this name, which forgetting it keeps
+    mark: u16,
+};
+
+/// a word of a definition, the line it was written on, and the name it
+/// meant when it was defined, as Forth binds names as it compiles them
+const DefinedWord = struct {
+    text: []const u8,
+    line: usize,
+    name: ?u8 = null,
 };
 
 const Number = union(enum) { single: i32, double: i64 };
@@ -437,6 +460,11 @@ const Interpreter = struct {
 
     names: [64]Name = undefined,
     name_count: u8 = 0,
+    /// the words of every definition
+    defined: [2048]DefinedWord = undefined,
+    defined_len: u16 = 0,
+    /// the definition being defined, from its : until its ;
+    compiling: ?struct { name: []const u8, start: u16, directive: Diagnostic } = null,
     saved: [576]SavedBin = undefined,
     saved_count: u16 = 0,
     label_pool: [1024]Label = undefined,
@@ -448,12 +476,27 @@ const Interpreter = struct {
 
     fn run(self: *Interpreter) Error!void {
         while (try self.next()) |token| {
+            if (self.compiling != null) {
+                try self.compile(token);
+                continue;
+            }
             if (eql(token, "EXIT") and !self.assembling) {
                 if (try self.endBlock()) continue else break;
+            }
+            // a word of a definition means the name it meant when defined,
+            // or a word that is not a name
+            if (self.frames[self.frame_count - 1].definition) |definition| {
+                const word = self.defined[definition.at - 1];
+                if (word.name) |i| try self.runName(self.names[i]) else try self.interpretBuiltIn(token);
+                continue;
             }
             try self.interpret(token);
         }
         if (self.interactive) return;
+        if (self.compiling) |compiling| {
+            self.diagnostic.* = compiling.directive;
+            return error.UnclosedDefinition;
+        }
         if (self.inline_word != null) return error.UnclosedInline;
         try self.checkSaved();
     }
@@ -475,6 +518,16 @@ const Interpreter = struct {
     /// loaded this one at the end of a block
     fn next(self: *Interpreter) Error!?[]const u8 {
         while (true) {
+            if (self.frames[self.frame_count - 1].definition) |*definition| {
+                if (definition.at < definition.end) {
+                    const word = self.defined[definition.at];
+                    definition.at += 1;
+                    self.diagnostic.* = .{ .line = word.line, .token = word.text };
+                    return word.text;
+                }
+                if (!try self.endBlock()) return null;
+                continue;
+            }
             const t = self.tokens();
             const token = t.next() catch |err| {
                 self.diagnostic.* = .{ .line = t.start_line, .token = t.source[t.start..][0..1] };
@@ -531,6 +584,11 @@ const Interpreter = struct {
             if (self.bin.?.find(token)) |value| return self.callOrPush(value, true);
         }
         if (self.findName(token)) |i| return self.runName(self.names[i]);
+        return self.interpretBuiltIn(token);
+    }
+
+    /// interprets a word that is not a label or defined name
+    fn interpretBuiltIn(self: *Interpreter, token: []const u8) Error!void {
         if (self.asm_context) {
             if (std.meta.stringToEnum(AsmWord, token)) |word| return self.runAsm(word);
             if (std.meta.stringToEnum(Opcode, token)) |opcode| switch (opcode) {
@@ -564,7 +622,7 @@ const Interpreter = struct {
         if (self.inline_word) |*word| return word;
         const bin = try self.currentBin();
         bin.changed = true;
-        bin.builder.line = self.tokens().start_line;
+        bin.builder.line = self.diagnostic.line;
         return &bin.builder;
     }
 
@@ -601,10 +659,49 @@ const Interpreter = struct {
     }
 
     fn define(self: *Interpreter, kind: @FieldType(Name, "kind"), value: i64) Error!void {
-        const new_name = try self.name();
+        try self.addName(try self.name(), kind, value);
+    }
+
+    fn addName(self: *Interpreter, new_name: []const u8, kind: @FieldType(Name, "kind"), value: i64) Error!void {
         if (self.name_count == self.names.len) return error.TooManyLabels;
-        self.names[self.name_count] = .{ .name = new_name, .kind = kind, .value = value };
+        self.names[self.name_count] = .{ .name = new_name, .kind = kind, .value = value, .mark = self.defined_len };
         self.name_count += 1;
+    }
+
+    /// Adds a word to the definition being defined, or ends it at ;. Comments
+    /// and conditional assembly act as the words are read, as they are
+    /// immediate in polyFORTH.
+    fn compile(self: *Interpreter, token: []const u8) Error!void {
+        const compiling = self.compiling.?;
+        if (eql(token, ";")) {
+            const count = self.defined_len - compiling.start;
+            try self.addName(compiling.name, .definition, @as(i64, compiling.start) | @as(i64, count) << 16);
+            // forgetting it forgets its words
+            self.names[self.name_count - 1].mark = compiling.start;
+            self.compiling = null;
+            return;
+        }
+        for ([_][]const u8{ "{", "IF{", "{ELSE}", "}" }) |immediate| {
+            if (eql(token, immediate)) return self.runForth(std.meta.stringToEnum(ForthWord, immediate).?);
+        }
+        if (self.defined_len == self.defined.len) return error.DefinitionsTooLong;
+        self.defined[self.defined_len] = .{ .text = token, .line = self.diagnostic.line, .name = self.findName(token) };
+        self.defined_len += 1;
+    }
+
+    /// Runs a definition by interpreting its words, as compiled host code:
+    /// numbers go on the stack, even within ASM[
+    fn runDefinition(self: *Interpreter, value: i64) Error!void {
+        if (self.frame_count == self.frames.len) return error.LoadTooDeep;
+        const start: u16 = @intCast(value & 0xffff);
+        const count: u16 = @intCast(value >> 16);
+        self.frames[self.frame_count] = .{
+            .tokens = .{ .source = "" },
+            .definition = .{ .at = start, .end = start + count },
+            .assembling = self.assembling,
+        };
+        self.frame_count += 1;
+        self.assembling = false;
     }
 
     fn runName(self: *Interpreter, word: Name) Error!void {
@@ -616,6 +713,7 @@ const Interpreter = struct {
             } else try (try self.builder()).literal(word18(word.value)),
             .call => try self.callOrPush(@intCast(word.value & 0xffff), false),
             .constant => try self.push(@intCast(word.value)),
+            .definition => try self.runDefinition(word.value),
         }
     }
 
@@ -1209,7 +1307,14 @@ const Interpreter = struct {
             .ZAP => _ = try self.pop(),
             .FORGET => {
                 const forget_name = try self.name();
-                self.name_count = self.findName(forget_name) orelse return error.UnknownWord;
+                const i = self.findName(forget_name) orelse return error.UnknownWord;
+                self.defined_len = self.names[i].mark;
+                self.name_count = i;
+            },
+            .@":" => {
+                const directive = self.diagnostic.*;
+                const new_name = try self.name();
+                self.compiling = .{ .name = new_name, .start = self.defined_len, .directive = directive };
             },
         }
     }
@@ -1519,6 +1624,7 @@ const ForthWord = enum {
     DECIMAL,
     CONSTANT,
     FORGET,
+    @":",
     LOAD,
     THRU,
     FH,
@@ -2408,4 +2514,67 @@ test "a session acts on a chip, as the IDE does" {
     try std.testing.expectEqual(0, session.stack().len);
     try session.interpret("1 2");
     try std.testing.expectEqual(2, session.stack().len);
+}
+
+test "host definitions" {
+    var programs: [1]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+
+    try session.interpret(": double ( n - n) DUP + ;  21 double .");
+    // a definition can go on over several lines, and use the one before
+    // with its own name
+    try session.interpret(": triple DUP DUP");
+    try session.interpret("+ + ;  5 triple .");
+    try session.interpret(": double double double ;  3 double .");
+    // EXIT returns from a definition
+    try session.interpret(": early 1 EXIT 2 ;  early .S");
+    // conditional assembly and comments act while defining
+    try session.interpret("1 : choose IF{ 10 {ELSE} 20 } { a comment } ;  choose .");
+    try std.testing.expectEqualStrings("42 15 12 1 10 ", out.buffered());
+    try std.testing.expectEqual(0, session.stack().len - 1);
+
+    // forgetting a definition forgets its words, and those after it
+    const used = session.interpreter.defined_len;
+    try session.interpret(": more 1 2 3 ;  FORGET more");
+    try std.testing.expectEqual(used, session.interpreter.defined_len);
+    try std.testing.expectError(error.UnknownWord, session.interpret("more"));
+}
+
+test "host definitions run as host code, even in ASM[" {
+    // numbers in a definition go on the stack, for lit to assemble
+    try expectAssembles(": five 5. ;  ASM[ # 0 NODE  five lit >BIN", &.{ opcodes(.@"@p", .@";", .@";", .@";"), 5 });
+    // and : is still a label within ASM[
+    try expectAssembles("ASM[ # 0 NODE  : a dup ;  a >BIN", &.{
+        opcodes(.dup, .@";", .@";", .@";"),
+        jumpWord(.call, .@";", .@";", 0, 0),
+    });
+
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.UnclosedDefinition, assemble("1 2\n : unclosed DUP", &diagnostic));
+    try std.testing.expectEqual(2, diagnostic.line);
+    try std.testing.expectEqualStrings(":", diagnostic.token);
+    // errors in a definition's words are where the words were written
+    try std.testing.expectError(error.UnknownWord, assemble(": bad\n nothing ;\n bad", &diagnostic));
+    try std.testing.expectEqual(2, diagnostic.line);
+    try std.testing.expectEqualStrings("nothing", diagnostic.token);
+    // a definition does not mean itself, as it is not defined yet
+    try std.testing.expectError(error.UnknownWord, assemble(": forever forever ;  forever", &diagnostic));
+    try std.testing.expectEqual(1, diagnostic.line);
+
+    // definitions run definitions as deep as blocks load blocks
+    var deep: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer deep.deinit();
+    try deep.writer.writeAll(": d0 1 ;");
+    for (1..17) |i| try deep.writer.print(" : d{d} d{d} ;", .{ i, i - 1 });
+    try deep.writer.writeAll(" d16");
+    try std.testing.expectError(error.LoadTooDeep, assemble(deep.written(), &diagnostic));
+    deep.clearRetainingCapacity();
+    try deep.writer.writeAll(": d0 1 ;");
+    for (1..15) |i| try deep.writer.print(" : d{d} d{d} ;", .{ i, i - 1 });
+    try deep.writer.writeAll(" d14");
+    _ = try assemble(deep.written(), &diagnostic);
 }
