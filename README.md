@@ -134,16 +134,18 @@ $ gasim --load 2331 --load 2332 sF/pFDISK.blk
 `gasim blocks` writes the colorForth source in a file of blocks, as
 arrayForth 2 and colorForth keep it, as text. Each word is marked with its
 color where the color changes: `:` red, `[` yellow, `]` green, `\` cyan,
-`(` white, `@` magenta and `~` blue, with hex numbers after a `$`. Only the
-uncompressed blocks of an arrayForth 2 image, such as `OkadWork.cf`'s
-blocks 18 to 35, can be read so far.
+`(` white, `@` magenta, `^` gray and `~` blue, with hex numbers after a
+`$`. arrayForth 2 images such as `OkadWork.cf` are decompressed, as
+arrayForth 2 does when it starts, and the x86 kernel in their first 18
+blocks is left out. Gray numbers are what arrayForth 2 noted as it
+compiled, such as the address of each F18 definition.
 
 ```
-$ gasim blocks --load 32 OkadWork.cf
-block 32
-(- more [macro (uses ebx
-:b \?dup ]$c38b 2, ;
-:b! ]$d88b 2, \drop ];
+$ gasim blocks --load 256 OkadWork.cf
+block 256
+(exercising flash [$20 org
+:focus ^$20 ]@p dup a! .. (/ ]--l- (/ ]! ;
+:reading ^$23 (l h ]focus @p ! .. (/ ]@p @p .. (/ ~cr
 ...
 ```
 

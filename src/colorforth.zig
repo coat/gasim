@@ -16,17 +16,20 @@
 //!     10 capitalized    white word with its first letter in upper case
 //!     11 uppercase      white word in upper case
 //!     12 variable       magenta word, with its value in the next cell
-//!     13 gray           gray word, as arrayForth 2 shows compiler feedback
+//!     13 feedback       gray number in the cell's upper 27 bits, which
+//!                       arrayForth 2 writes after a name as it compiles it,
+//!                       such as the address of an F18 definition
 //!     14 format         blue word that lays out the block, such as cr
-//!     15 black          unused
+//!     15 comment_number white number in the cell's upper 27 bits
 //!
 //! The upper 28 bits of a word's cell hold its characters, packed from the
 //! top with a code of 4, 5 or 7 bits each, so that the common letters take
 //! fewer: `0xxx` for ` rtoeani`, `10xxx` for `smcylgfw`, and `11xxxxx` for
 //! the rest of `dvpbhxuq0123456789j-k.z/;:!+@*,?`. A character whose code
 //! does not fit fits anyway if the bits that are cut off are zeros, and
-//! otherwise starts an extension cell. A number's bit 4 says to show it in
-//! hex.
+//! otherwise starts an extension cell. A variable's name fits in one cell,
+//! as colorForth reads its value from the next. A number's bit 4 says to
+//! show it in hex.
 //!
 //! The editor works on tokens, which are decoded from and encoded into a
 //! block's bytes without allocating. Encoding a decoded block of source gives
@@ -45,8 +48,11 @@ pub const characters = " rtoeanismcylgfwdvpbhxuq0123456789j-k.z/;:!+@*,?";
 pub const Error = error{
     /// the tokens take more cells than a block has
     BlockFull,
-    /// more than `max_chars` characters
+    /// more than `max_chars` characters, or a variable's name longer than
+    /// a cell
     WordTooLong,
+    /// a white or gray number that does not fit in 27 bits
+    NumberOutOfRange,
     /// a character colorForth cannot pack, such as an upper case letter in
     /// a word that is not a comment
     InvalidCharacter,
@@ -66,13 +72,23 @@ pub const Tag = enum(u4) {
     capitalized,
     uppercase,
     variable,
-    gray,
+    feedback,
     format,
-    black,
+    comment_number,
 
     pub fn isNumber(self: Tag) bool {
+        return self.isLong() or self.isShort();
+    }
+
+    /// a number in the next cell
+    pub fn isLong(self: Tag) bool {
+        return self == .execute_long or self == .compile_long;
+    }
+
+    /// a number in the upper 27 bits of the cell
+    pub fn isShort(self: Tag) bool {
         return switch (self) {
-            .execute_long, .compile_long, .compile_short, .execute_short => true,
+            .compile_short, .execute_short, .feedback, .comment_number => true,
             else => false,
         };
     }
@@ -84,11 +100,10 @@ pub const Tag = enum(u4) {
             .define => .red,
             .compile, .compile_long, .compile_short => .green,
             .macro => .cyan,
-            .comment, .capitalized, .uppercase => .white,
+            .comment, .capitalized, .uppercase, .comment_number => .white,
             .variable => .magenta,
-            .gray => .gray,
+            .feedback => .gray,
             .format => .blue,
-            .black => .black,
         };
     }
 };
@@ -105,7 +120,6 @@ pub const Color = enum {
     magenta,
     gray,
     blue,
-    black,
 };
 
 pub const Token = struct {
@@ -133,12 +147,15 @@ pub const Token = struct {
         return token;
     }
 
-    /// A yellow or green number, packed into one cell if it fits
-    pub fn number(color: Color, value: i32, hex: bool) Token {
+    /// A yellow or green number, packed into one cell if it fits, or a
+    /// white or gray one, which must
+    pub fn number(color: Color, value: i32, hex: bool) Error!Token {
         const short = fitsShort(value);
         const tag: Tag = switch (color) {
             .yellow => if (short) .execute_short else .execute_long,
             .green => if (short) .compile_short else .compile_long,
+            .white => if (short) .comment_number else return error.NumberOutOfRange,
+            .gray => if (short) .feedback else return error.NumberOutOfRange,
             else => unreachable,
         };
         return .{ .tag = tag, .value = value, .hex = hex };
@@ -161,12 +178,9 @@ pub const Token = struct {
 
     /// cells the token takes in a block
     pub fn cells(self: Token) usize {
-        return switch (self.tag) {
-            .execute_long, .compile_long => 2,
-            .execute_short, .compile_short => 1,
-            .variable => 1 + packedCells(self.text()),
-            else => packedCells(self.text()),
-        };
+        if (self.tag.isLong() or self.tag == .variable) return 2;
+        if (self.tag.isShort()) return 1;
+        return packedCells(self.text());
     }
 };
 
@@ -212,7 +226,7 @@ pub fn decode(block: *const [block_size]u8, tokens: *[cells_per_block]Token) Err
                 i += 1;
                 tokens[len] = .{ .tag = tag, .value = @bitCast(value), .hex = cell & 0x10 != 0 };
             },
-            .execute_short, .compile_short => tokens[len] = .{
+            .execute_short, .compile_short, .feedback, .comment_number => tokens[len] = .{
                 .tag = tag,
                 .value = @as(i32, @bitCast(cell)) >> 5,
                 .hex = cell & 0x10 != 0,
@@ -252,13 +266,14 @@ pub fn encode(tokens: []const Token, block: *[block_size]u8) Error!void {
                 setCell(block, i + 1, @bitCast(token.value));
                 i += 2;
             },
-            .execute_short, .compile_short => {
+            .execute_short, .compile_short, .feedback, .comment_number => {
                 setCell(block, i, @as(u32, @bitCast(token.value)) << 5 | hex | tag);
                 i += 1;
             },
             else => {
                 var cells: [max_chars]u32 = undefined;
                 const packed_cells = try pack(token.text(), &cells);
+                if (token.tag == .variable and packed_cells.len > 1) return error.WordTooLong;
                 setCell(block, i, packed_cells[0] | tag);
                 i += 1;
                 if (token.tag == .variable) {
@@ -275,10 +290,202 @@ pub fn encode(tokens: []const Token, block: *[block_size]u8) Error!void {
     @memset(block[i * 4 ..], 0);
 }
 
+/// the blocks at the start of an arrayForth 2 image that it never
+/// compresses: the kernel, and the source it loads first, which decompresses
+/// the rest
+pub const uncompressed_blocks = 36;
+
+/// the block whose variables say whether an image is compressed, and the
+/// first of its source, as the blocks before it hold the kernel's code
+pub const header_block = 18;
+
+/// whether `bytes` are an arrayForth 2 image, compressed or not, as its
+/// block 18 starts with the variable `ns`
+pub fn isImage(bytes: []const u8) bool {
+    if (bytes.len < (header_block + 1) * block_size) return false;
+    return headerVariable(bytes[header_block * block_size ..][0..block_size], 0, "ns") != null;
+}
+
+pub const ImageError = Error || error{
+    /// the compressed bits end before the blocks they hold, or before the
+    /// sectors `ns` counts
+    ImageTruncated,
+    /// a compressed image does not fit
+    ImageFull,
+};
+
+/// The number of blocks an arrayForth 2 image holds once decompressed, or
+/// null if it is not compressed. Its block 18 starts with the variables
+/// `ns`, which is negative while the blocks after the first 36 are
+/// compressed, and `nblk`, the number of blocks.
+pub fn compressedBlocks(image: []const u8) ?usize {
+    if (image.len < (header_block + 1) * block_size) return null;
+    const block = image[header_block * block_size ..][0..block_size];
+    const ns = headerVariable(block, 0, "ns") orelse return null;
+    const nblk = headerVariable(block, 2, "nblk") orelse return null;
+    if (ns >= 0 or nblk < uncompressed_blocks) return null;
+    return @intCast(nblk);
+}
+
+/// the value of the variable `name` at cell `i` of a block, if it is there
+fn headerVariable(block: *const [block_size]u8, i: usize, name: []const u8) ?i32 {
+    const cell = cellAt(block, i);
+    if (@as(u4, @truncate(cell)) != @backingInt(Tag.variable)) return null;
+    var token: Token = .{ .tag = .variable };
+    unpack(cell, &token) catch return null;
+    if (!std.mem.eql(u8, token.text(), name)) return null;
+    return @bitCast(cellAt(block, i + 1));
+}
+
+/// Decompresses an arrayForth 2 image into `out`, `compressedBlocks(image)`
+/// blocks long, as arrayForth 2 does as it starts: the first 36 blocks are
+/// copied, and the rest decoded from the bits that follow them, block by
+/// block, most significant bit of each cell first. Each token is its tag,
+/// then a long number's hex bit and value, a short number's upper 28 bits,
+/// or a word's characters and a `0000` after them, and a variable's value.
+/// A tag of 0 ends a block. `ns` is made positive, as the blocks are no
+/// longer compressed.
+pub fn decompress(image: []const u8, out: []u8) ImageError!void {
+    const start = uncompressed_blocks * block_size;
+    if (image.len < start) return error.ImageTruncated;
+    @memcpy(out[0..start], image[0..start]);
+    const ns: *[4]u8 = out[header_block * block_size + 4 ..][0..4];
+    const sectors = std.math.cast(i32, @abs(std.mem.readInt(i32, ns, .little))) orelse return error.ImageTruncated;
+    std.mem.writeInt(i32, ns, sectors, .little);
+
+    var stream: BitReader = .{ .bytes = image[start..] };
+    var tokens: [cells_per_block]Token = undefined;
+    for (uncompressed_blocks..out.len / block_size) |n| {
+        var len: usize = 0;
+        while (true) {
+            const tag: Tag = @fromBackingInt(@intCast(try stream.take(4)));
+            if (tag == .extension) break;
+            if (len == cells_per_block) return error.BlockFull;
+            var token: Token = .{ .tag = tag };
+            if (tag.isLong()) {
+                token.hex = try stream.take(1) == 1;
+                token.value = @bitCast(try stream.take(32));
+            } else if (tag.isShort()) {
+                const cell = try stream.take(28) << 4 | @backingInt(tag);
+                token.value = @as(i32, @bitCast(cell)) >> 5;
+                token.hex = cell & 0x10 != 0;
+            } else {
+                while (try stream.char()) |index| {
+                    if (token.len == max_chars) return error.WordTooLong;
+                    token.chars[token.len] = characters[index];
+                    token.len += 1;
+                }
+                if (tag == .variable) token.value = @bitCast(try stream.take(32));
+            }
+            applyCase(&token);
+            tokens[len] = token;
+            len += 1;
+        }
+        try encode(tokens[0..len], out[n * block_size ..][0..block_size]);
+    }
+}
+
+/// Compresses an image as arrayForth 2 does, into `out`, returning how long
+/// it is: whole blocks, with `ns` negative and counting its 512-byte
+/// sectors, and `nc` its 18-block cylinders
+pub fn compress(image: []const u8, out: []u8) ImageError!usize {
+    const start = uncompressed_blocks * block_size;
+    if (out.len < start) return error.ImageFull;
+    @memcpy(out[0..start], image[0..start]);
+    @memset(out[start..], 0);
+
+    var stream: BitWriter = .{ .bytes = out[start..] };
+    var tokens: [cells_per_block]Token = undefined;
+    for (uncompressed_blocks..blockCount(image)) |n| {
+        var block: [block_size]u8 = @splat(0);
+        const bytes = image[n * block_size ..][0..@min(block_size, image.len - n * block_size)];
+        @memcpy(block[0..bytes.len], bytes);
+        for (try decode(&block, &tokens)) |token| {
+            // nothing can say where an extension on its own starts
+            if (token.tag == .extension) return error.InvalidCharacter;
+            try stream.put(@backingInt(token.tag), 4);
+            if (token.tag.isLong()) {
+                try stream.put(@intFromBool(token.hex), 1);
+                try stream.put(@bitCast(token.value), 32);
+            } else if (token.tag.isShort()) {
+                try stream.put(@as(u32, @bitCast(token.value)) << 1 | @intFromBool(token.hex), 28);
+            } else {
+                for (token.text()) |c| {
+                    const index = code(std.ascii.toLower(c)) orelse return error.InvalidCharacter;
+                    // a space would end the word
+                    if (index == 0) return error.InvalidCharacter;
+                    const value, const width = bits(index);
+                    try stream.put(value, width);
+                }
+                try stream.put(0, 4);
+                if (token.tag == .variable) try stream.put(@bitCast(token.value), 32);
+            }
+        }
+        try stream.put(0, 4);
+    }
+
+    const len = start + std.mem.alignForward(usize, std.math.divCeil(usize, stream.at, 8) catch unreachable, block_size);
+    if (len > out.len) return error.ImageFull;
+    const header = out[header_block * block_size ..][0..block_size];
+    if (headerVariable(header, 0, "ns") != null) setCell(header, 1, @bitCast(-@as(i32, @intCast(len / 512))));
+    if (headerVariable(header, 4, "nc") != null) setCell(header, 5, @intCast(std.math.divCeil(usize, len, 18 * block_size) catch unreachable));
+    return len;
+}
+
+/// reads the bits of a compressed image, most significant bit of each cell
+/// first
+const BitReader = struct {
+    bytes: []const u8,
+    /// bits read so far
+    at: usize = 0,
+
+    fn take(self: *BitReader, n: u6) ImageError!u32 {
+        var value: u32 = 0;
+        for (0..n) |_| {
+            if (self.at / 8 >= self.bytes.len) return error.ImageTruncated;
+            value = value << 1 | (self.bytes[byteOf(self.at)] >> @intCast(7 - self.at % 8) & 1);
+            self.at += 1;
+        }
+        return value;
+    }
+
+    /// the code of the next character of a word, or null at its end
+    fn char(self: *BitReader) ImageError!?u6 {
+        const first = try self.take(4);
+        if (first & 0b1000 == 0) return if (first == 0) null else @intCast(first);
+        if (first & 0b0100 == 0) return @intCast(8 + ((first << 1 | try self.take(1)) & 0b111));
+        return @intCast(16 + ((first << 3 | try self.take(3)) & 0b11111));
+    }
+};
+
+/// writes the bits of a compressed image into zeros, as `BitReader` reads
+/// them
+const BitWriter = struct {
+    bytes: []u8,
+    /// bits written so far
+    at: usize = 0,
+
+    fn put(self: *BitWriter, value: u32, n: u6) ImageError!void {
+        var i = n;
+        while (i > 0) {
+            i -= 1;
+            if (self.at / 8 >= self.bytes.len) return error.ImageFull;
+            self.bytes[byteOf(self.at)] |= @intCast((value >> @intCast(i) & 1) << @intCast(7 - self.at % 8));
+            self.at += 1;
+        }
+    }
+};
+
+/// the byte holding a bit of a compressed image, as cells are little-endian
+fn byteOf(bit: usize) usize {
+    const cell = bit / 32;
+    return cell * 4 + 3 - bit % 32 / 8;
+}
+
 /// Writes a block's tokens as text, with a mark before a token whose color
 /// differs from the one before it, as muforth lists colorForth: `:` red,
-/// `[` yellow, `]` green, `\` cyan, `(` white, `@` magenta, `^` gray, `~`
-/// blue and `!` black. Red and magenta words start a line, as colorForth
+/// `[` yellow, `]` green, `\` cyan, `(` white, `@` magenta, `^` gray and
+/// `~` blue. Red and magenta words start a line, as colorForth
 /// shows them, unless a blue `-cr` comes before, and so do blue `cr` and
 /// `br`, the last after an empty line.
 pub fn writeText(tokens: []const Token, writer: *Io.Writer) Io.Writer.Error!void {
@@ -318,7 +525,6 @@ fn mark(color: Color) ?u8 {
         .magenta => '@',
         .gray => '^',
         .blue => '~',
-        .black => '!',
     };
 }
 
@@ -464,11 +670,11 @@ test "long words continue in extension cells" {
 
 test "numbers short and long, in decimal and hex" {
     const tokens_in = [_]Token{
-        .number(.yellow, 25, false),
-        .number(.green, -1, true),
-        .number(.green, 1 << 26, false),
-        .number(.yellow, -(1 << 26), false),
-        .number(.yellow, std.math.minInt(i32), true),
+        try Token.number(.yellow, 25, false),
+        try Token.number(.green, -1, true),
+        try Token.number(.green, 1 << 26, false),
+        try Token.number(.yellow, -(1 << 26), false),
+        try Token.number(.yellow, std.math.minInt(i32), true),
     };
     try std.testing.expectEqual(.execute_short, tokens_in[0].tag);
     try std.testing.expectEqual(.compile_short, tokens_in[1].tag);
@@ -559,9 +765,9 @@ test "blocks as text" {
     var variable = try Token.word(.variable, "count");
     variable.value = 3;
     try encode(&.{
-        try Token.word(.comment, "Counts"), try Token.word(.define, "inc"), .number(.green, 1, false),
+        try Token.word(.comment, "Counts"), try Token.word(.define, "inc"), try Token.number(.green, 1, false),
         try Token.word(.compile, "+"),      try Token.word(.compile, ";"),  try Token.word(.format, "cr"),
-        variable,                           try Token.word(.define, "x"),   .number(.yellow, 0x1f, true),
+        variable,                           try Token.word(.define, "x"),   try Token.number(.yellow, 0x1f, true),
         try Token.word(.macro, "dup"),
     }, &block);
     var tokens: [cells_per_block]Token = undefined;
@@ -575,4 +781,49 @@ test "blocks as text" {
         \\:x [$1f \dup
         \\
     , writer.buffered());
+}
+
+test "arrayForth 2 images compress and decompress" {
+    const blocks = uncompressed_blocks + 3;
+    var image: [blocks * block_size]u8 = @splat(0);
+    // the variables that say whether the image is compressed
+    var ns = try Token.word(.variable, "ns");
+    ns.value = 2 * blocks;
+    var nblk = try Token.word(.variable, "nblk");
+    nblk.value = blocks;
+    var nc = try Token.word(.variable, "nc");
+    nc.value = 17;
+    try encode(&.{ ns, nblk, nc, try Token.word(.comment, "Header") }, image[header_block * block_size ..][0..block_size]);
+    image[0] = 0xeb;
+    var count = try Token.word(.variable, "count");
+    count.value = -7;
+    try encode(&.{
+        try Token.word(.define, "compile"), try Token.number(.green, -5, true),    try Token.number(.yellow, 1 << 30, false),
+        try Token.word(.comment, "GA144"),  try Token.number(.white, 2009, false), try Token.number(.gray, 0x32, true),
+        count,                              try Token.word(.format, "...."),
+    }, image[(uncompressed_blocks + 2) * block_size ..][0..block_size]);
+    try std.testing.expectEqual(null, compressedBlocks(&image));
+
+    var compressed: [blocks * block_size]u8 = undefined;
+    const len = try compress(&image, &compressed);
+    try std.testing.expectEqual((uncompressed_blocks + 1) * block_size, len);
+    try std.testing.expectEqual(blocks, compressedBlocks(compressed[0..len]));
+    var tokens: [cells_per_block]Token = undefined;
+    const header = try decode(compressed[header_block * block_size ..][0..block_size], &tokens);
+    try std.testing.expectEqual(-@as(i32, @intCast(len / 512)), header[0].value);
+    // 37 blocks are three cylinders
+    try std.testing.expectEqual(3, header[2].value);
+
+    var decompressed: [blocks * block_size]u8 = undefined;
+    try decompress(compressed[0..len], &decompressed);
+    try std.testing.expectEqual(null, compressedBlocks(&decompressed));
+    try std.testing.expectEqualSlices(u8, image[uncompressed_blocks * block_size ..], decompressed[uncompressed_blocks * block_size ..]);
+    try std.testing.expectEqual(0xeb, decompressed[0]);
+
+    try std.testing.expectError(error.ImageTruncated, decompress(compressed[0 .. uncompressed_blocks * block_size + 8], &decompressed));
+    // even before the blocks it copies, or with ns as low as it goes
+    try std.testing.expectError(error.ImageTruncated, decompress(compressed[0 .. (header_block + 1) * block_size], &decompressed));
+    std.mem.writeInt(i32, compressed[header_block * block_size + 4 ..][0..4], std.math.minInt(i32), .little);
+    try std.testing.expectError(error.ImageTruncated, decompress(compressed[0..len], &decompressed));
+    try std.testing.expectError(error.ImageFull, compress(&image, compressed[0 .. uncompressed_blocks * block_size]));
 }

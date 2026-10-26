@@ -18,7 +18,8 @@ const usage =
     \\IDE, such as 708 NODE UPD, after loading the program if there is one.
     \\
     \\With blocks, writes the colorForth source in a file of blocks as text,
-    \\each block that holds any, or those --load names.
+    \\each block that holds any, or those --load names. arrayForth 2 images
+    \\are decompressed, and the kernel's blocks before block 18 left out.
     \\
     \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
@@ -408,8 +409,17 @@ fn needsProgram(command: Command, listing: bool) bool {
 /// `loads` names or every one that is not empty
 fn writeBlocks(io: Io, arena: Allocator, path: []const u8, loads: []const u32) !void {
     const colorforth = gasim.colorforth;
-    const file = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_blocks_len)) catch |err|
+    const read = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_blocks_len)) catch |err|
         fatal("{s}: {t}", .{ path, err });
+    // arrayForth 2 images compress all but their first blocks
+    const file = if (colorforth.compressedBlocks(read)) |blocks| file: {
+        if (blocks * colorforth.block_size > max_blocks_len) fatal("{s}: has too many blocks", .{path});
+        const file = try arena.alloc(u8, blocks * colorforth.block_size);
+        colorforth.decompress(read, file) catch |err| fatal("{s}: {t}", .{ path, err });
+        break :file file;
+    } else read;
+    // and the kernel's code is in the blocks before their source
+    const first: usize = if (colorforth.isImage(file)) colorforth.header_block else 0;
     const count = colorforth.blockCount(file);
     for (loads) |n| if (n >= count) fatal("{s}: has no block {d}", .{ path, n });
 
@@ -417,21 +427,21 @@ fn writeBlocks(io: Io, arena: Allocator, path: []const u8, loads: []const u32) !
     var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
     const writer = &file_writer.interface;
     var tokens: [colorforth.cells_per_block]colorforth.Token = undefined;
-    var first = true;
+    var separate = false;
     for (0..count) |n| {
-        if (loads.len > 0 and std.mem.indexOfScalar(u32, loads, @intCast(n)) == null) continue;
+        if (if (loads.len > 0) std.mem.indexOfScalar(u32, loads, @intCast(n)) == null else n < first) continue;
         // a partial block at the end of the file reads as if zeros follow
         var block: [colorforth.block_size]u8 = @splat(0);
         const bytes = file[n * colorforth.block_size ..][0..@min(colorforth.block_size, file.len - n * colorforth.block_size)];
         @memcpy(block[0..bytes.len], bytes);
         const decoded = colorforth.decode(&block, &tokens) catch |err| {
-            try writer.print("{s}block {d}: {t}\n", .{ if (first) "" else "\n", n, err });
-            first = false;
+            try writer.print("{s}block {d}: {t}\n", .{ if (separate) "\n" else "", n, err });
+            separate = true;
             continue;
         };
         if (decoded.len == 0 and loads.len == 0) continue;
-        try writer.print("{s}block {d}\n", .{ if (first) "" else "\n", n });
-        first = false;
+        try writer.print("{s}block {d}\n", .{ if (separate) "\n" else "", n });
+        separate = true;
         try colorforth.writeText(decoded, writer);
     }
     try writer.flush();
