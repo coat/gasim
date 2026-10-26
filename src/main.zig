@@ -1,7 +1,7 @@
 //! gasim
 
 const usage =
-    \\usage: gasim [options] [program.ga | program.af | program.blk]
+    \\usage: gasim [options] [program.ga | program.af | program.blk | source.cf]
     \\       gasim run [options] <program.ga | program.af | program.blk>
     \\       gasim repl [options] [program.ga | program.af | program.blk]
     \\       gasim blocks [--load <block>]... <source.cf>
@@ -11,7 +11,9 @@ const usage =
     \\blocks of it. With run, or when stdin or stdout is not a terminal, runs
     \\the program instead with the console on stdin and stdout, until every
     \\node is waiting, or one reaches a breakpoint or makes a watched transfer.
-    \\With --listing, writes the assembled program instead.
+    \\With --listing, writes the assembled program instead. A .cf file of
+    \\colorForth blocks, such as an arrayForth 2 image, is opened in the
+    \\interface's editor, and created when it is saved if it does not exist.
     \\
     \\With repl, reads lines of arrayForth 3 from stdin and interprets them,
     \\to assemble code and act on the chip with the words of arrayForth 3's
@@ -155,8 +157,14 @@ pub fn main(init: std.process.Init) !void {
         } else fatal(usage, .{});
     }
     if (path == null and needsProgram(command, listing)) fatal(usage, .{});
+    if (command == .blocks) return writeBlocks(io, arena, path.?, loads[0..loads_len]);
+    // colorForth is edited rather than run, as gasim cannot compile it yet
+    const colorforth_path = if (path != null and std.mem.endsWith(u8, path.?, ".cf")) path else null;
+    if (colorforth_path) |cf| {
+        if (command != .tui or listing) fatal("{s}: colorForth can only be edited so far, in the terminal user interface", .{cf});
+        path = null;
+    }
     const source_path = path orelse "";
-    if (command == .blocks) return writeBlocks(io, arena, source_path, loads[0..loads_len]);
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
 
@@ -333,6 +341,7 @@ pub fn main(init: std.process.Init) !void {
         .console_node = console_node,
         .console_port = console_port,
         .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
+        .colorforth = if (colorforth_path) |cf| try openColorForth(io, arena, cf) else null,
     });
 
     var stderr_buffer: [4096]u8 = undefined;
@@ -403,6 +412,31 @@ fn commandOf(args: []const []const u8, terminal: bool) Command {
 /// only the terminal user interface and the prompt start without a program
 fn needsProgram(command: Command, listing: bool) bool {
     return command == .run or command == .blocks or listing;
+}
+
+/// the blocks an arrayForth 2 image has, which a file opened in the editor
+/// can grow to
+const editor_blocks = 1440;
+
+/// Opens a file of colorForth blocks to edit, decompressing an arrayForth 2
+/// image, or an empty one if the file does not exist yet
+fn openColorForth(io: Io, arena: Allocator, path: []const u8) !tui.ColorForth {
+    const colorforth = gasim.colorforth;
+    const read = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_blocks_len)) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => fatal("{s}: {t}", .{ path, err }),
+    };
+    const compressed = colorforth.compressedBlocks(read);
+    const count = compressed orelse colorforth.blockCount(read);
+    if (count * colorforth.block_size > max_blocks_len) fatal("{s}: has too many blocks", .{path});
+    const bytes = try arena.alloc(u8, @max(count, editor_blocks) * colorforth.block_size);
+    @memset(bytes, 0);
+    if (compressed != null) {
+        colorforth.decompress(read, bytes[0 .. count * colorforth.block_size]) catch |err| fatal("{s}: {t}", .{ path, err });
+    } else @memcpy(bytes[0..read.len], read);
+    const editor = try arena.create(gasim.Editor);
+    editor.open(bytes, count);
+    return .{ .editor = editor, .path = path, .compressed = compressed != null };
 }
 
 /// Writes the colorForth source in the blocks of a file as text, those

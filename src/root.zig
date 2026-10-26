@@ -12,6 +12,7 @@ pub const colorforth = @import("colorforth.zig");
 pub const boot = @import("boot.zig");
 pub const Chip = @import("Chip.zig");
 pub const Console = @import("Console.zig");
+pub const Editor = @import("Editor.zig");
 pub const disassembler = @import("disassembler.zig");
 pub const ga144 = @import("ga144.zig");
 
@@ -26,6 +27,7 @@ test {
     _ = @import("Chip.zig");
     _ = @import("colorforth.zig");
     _ = @import("Console.zig");
+    _ = @import("Editor.zig");
     _ = @import("disassembler.zig");
     _ = @import("ga144.zig");
     _ = @import("opcodes.zig");

@@ -149,6 +149,35 @@ block 256
 ...
 ```
 
+`gasim source.cf` opens the blocks in an editor, on a screen of its own in
+the terminal user interface, which alt+5 shows and alt+1 leaves. It is
+inspired by AshleyF's [Color](https://github.com/AshleyF/Color) editor: the
+cursor is on a word, and as in vim, keys move between words and blocks
+until `i`, `a` or `o` starts typing. Typing a space starts the next word, in
+green after a red name and otherwise in the same color, and a color key
+changes the color of the word being typed or the one under the cursor.
+Words typed in yellow, green or white that read as numbers, such as `-5` or
+`$1f`, become numbers. `s` saves the file, which a compressed arrayForth 2
+image is saved as uncompressed, and a file that does not exist is created.
+Blocks that are not colorForth source, such as the kernel of an arrayForth 2
+image, cannot be edited. colorForth cannot be compiled yet.
+
+| keys | |
+| --- | --- |
+| `h` `l`, `b` `w` | the word before or after |
+| `j` `k` | the next or previous red name |
+| `0` `$` | the first or last word |
+| `[` `]`, `256g` | the block before or after, or block 256 |
+| `i` `a` | type a word before or after the cursor |
+| `o` `O` | type a new red name on a line below or above |
+| `x` `X`, `y`, `p` `P` | delete the word or the one before it, copy it, put the last back after or before |
+| `u` `U` | undo, redo |
+| ctrl+r y g w t v b | red, yellow, green, white, cyan, magenta or blue, as typed or after |
+| `R` `Y` `G` `W` `C` `M` `B` | the same, while not typing |
+| space, enter, esc | while typing: the next word, a new line, done |
+| `f` | show or hide blue words, which lay out the block |
+| `s`, ctrl+s | save |
+
 ### arrayForth 3 prompt
 
 `gasim repl` is basically an  arrayForth 3 outer interpreter. Code can be
