@@ -125,6 +125,8 @@ const Tui = struct {
     map_scroll: struct { x: u16 = 0, y: u16 = 0 } = .{},
     /// how the map was last drawn, for the mouse
     tiles: Tiles = .compact,
+    /// arrows for the directions of nodes out of the map's view
+    map_more: []const u8 = "",
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
     message_buffer: [64]u8 = undefined,
@@ -759,6 +761,7 @@ const Tui = struct {
 
     fn draw(self: *Tui, win: vaxis.Window) void {
         self.frame = .init(&self.frame_buffer);
+        self.map_more = "";
         win.clear();
         // until the console shows it
         win.hideCursor();
@@ -795,7 +798,13 @@ const Tui = struct {
         } else if (!shown.contains(.map)) map_height = 0;
 
         if (shown.contains(.map)) {
-            self.drawMap(self.drawPanel(win, .map, 0, 0, left_width, map_height, self.print("1 chip {d}x{d}", .{ layout.rows, layout.columns })));
+            const title = self.print("1 chip {d}x{d}", .{ layout.rows, layout.columns });
+            self.drawMap(self.drawPanel(win, .map, 0, 0, left_width, map_height, title));
+            // which way the nodes out of view are, after the title
+            if (self.map_more.len > 0) {
+                const heading = win.child(.{ .x_off = 3 + @as(u16, @intCast(title.len)), .width = left_width -| (4 + @as(u16, @intCast(title.len))), .height = 1 });
+                _ = heading.printSegment(.{ .text = self.map_more, .style = .{ .bold = true } }, .{ .wrap = .none });
+            }
         }
         // the console above the forth panel, sharing the rest of the column
         const rest = body_height - map_height;
@@ -841,6 +850,12 @@ const Tui = struct {
         if (row < self.map_scroll.y) self.map_scroll.y = row;
         if (row >= self.map_scroll.y + rows) self.map_scroll.y = row + 1 - rows;
         const scroll = self.map_scroll;
+        self.map_more = self.print("{s}{s}{s}{s}", .{
+            if (scroll.y > 0) "↑" else "",
+            if (scroll.y + rows < layout.rows) "↓" else "",
+            if (scroll.x > 0) "←" else "",
+            if (scroll.x + columns < layout.columns) "→" else "",
+        });
 
         for (scroll.y..@min(layout.rows, scroll.y + rows)) |r| {
             // north at the top
@@ -880,27 +895,38 @@ const Tui = struct {
         const header = self.print("{d:0>3} {s}", .{ self.chip.layout.nodeNumber(i), self.statusText(i, status) });
         _ = win.printSegment(.{ .text = header, .style = style }, .{ .wrap = .none });
 
-        const items = [_][]const u8{
-            self.print("P{x}", .{@as(u10, @bitCast(n.p))}),
-            self.print("s{d}", .{n.slot}),
-            self.print("T{x}", .{@as(u18, @bitCast(n.data_stack.t))}),
-            self.print("S{x}", .{@as(u18, @bitCast(n.data_stack.s))}),
-            self.print("A{x}", .{@as(u18, @bitCast(n.a))}),
-            self.print("B{x}", .{n.b}),
-            self.print("io{x}", .{@as(u18, @bitCast(n.io))}),
+        // labels in their own colour, as in the node panel
+        const items = [_]struct { []const u8, []const u8 }{
+            .{ "P", self.print("{x}", .{@as(u10, @bitCast(n.p))}) },
+            .{ "s", self.print("{d}", .{n.slot}) },
+            .{ "T", self.print("{x}", .{@as(u18, @bitCast(n.data_stack.t))}) },
+            .{ "S", self.print("{x}", .{@as(u18, @bitCast(n.data_stack.s))}) },
+            .{ "A", self.print("{x}", .{@as(u18, @bitCast(n.a))}) },
+            .{ "B", self.print("{x}", .{n.b}) },
+            .{ "io", self.print("{x}", .{@as(u18, @bitCast(n.io))}) },
         };
         // as many as fit on each line, in order
         var line: u16 = 1;
         var at: usize = 0;
         while (line < win.height and at < items.len) : (line += 1) {
+            var segments: [3 * items.len]vaxis.Segment = undefined;
+            var count: usize = 0;
             var len: usize = 0;
-            var end = at;
-            while (end < items.len and len + items[end].len + @intFromBool(end > at) <= win.width) : (end += 1) len += items[end].len + @intFromBool(end > at);
-            // an item too wide for a line is cut short
-            if (end == at) end += 1;
-            const text = std.mem.join(self.frame.allocator(), " ", items[at..end]) catch return;
-            _ = win.printSegment(.{ .text = text }, .{ .row_offset = line, .wrap = .none });
-            at = end;
+            while (at < items.len) : (at += 1) {
+                const item = items[at];
+                const space = @intFromBool(count > 0);
+                // an item too wide for a line is cut short
+                if (count > 0 and len + space + item[0].len + item[1].len > win.width) break;
+                if (space == 1) {
+                    segments[count] = .{ .text = " " };
+                    count += 1;
+                }
+                segments[count] = .{ .text = item[0], .style = colors.label };
+                segments[count + 1] = .{ .text = item[1] };
+                count += 2;
+                len += space + item[0].len + item[1].len;
+            }
+            _ = win.print(segments[0..count], .{ .row_offset = line, .wrap = .none });
         }
     }
 
@@ -1852,6 +1878,11 @@ test "the map shows nodes as tiles when it has room" {
     const row: u16 = 1 + tiles.height + tiles.gap_y;
     try std.testing.expect(try t.shows(row, "000 code"));
     try std.testing.expect(try t.shows(row + 1, "T0 S0"));
+    // with labels in their own colour, and values not
+    try std.testing.expectEqual(colors.label.fg, t.screen.readCell(1, row + 1).?.style.fg);
+    try std.testing.expectEqual(vaxis.Color.default, t.screen.readCell(2, row + 1).?.style.fg);
+    // and every node in view, so nothing out of it to show in the title
+    try std.testing.expectEqualStrings("─", t.screen.readCell(3 + "1 chip 2x3".len, 0).?.char.grapheme);
 
     // nodes waiting for code from each other, as after reset, have no
     // arrows between them
@@ -1896,6 +1927,10 @@ test "the map scrolls through tiles too large to show every node" {
     // view, in the fifth
     try std.testing.expect(try t.shows(1 + 4 * 5, "000 "));
     try std.testing.expect(!try t.shows(1, "700 "));
+    // and the title shows there are more nodes north and east
+    const after_title = 3 + "1 chip 8x18".len;
+    try std.testing.expectEqualStrings("↑", t.screen.readCell(after_title, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("→", t.screen.readCell(after_title + 1, 0).?.char.grapheme);
 
     // the view follows the selected node to the top right
     for (0..17) |_| try t.press(vaxis.Key.right);
@@ -1904,4 +1939,6 @@ test "the map scrolls through tiles too large to show every node" {
     try std.testing.expect(try t.shows(1, "717 "));
     try std.testing.expect(try t.shows(1, "710 "));
     try std.testing.expect(!try t.shows(1, "709 "));
+    try std.testing.expectEqualStrings("↓", t.screen.readCell(after_title, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("←", t.screen.readCell(after_title + 1, 0).?.char.grapheme);
 }

@@ -161,14 +161,16 @@ line editing.
 
 ### Terminal user interface
 
-A map panel shows all nodes. Running nodes are green, nodes waiting on a port
-yellow, and nodes waiting for code dim. Unless the panel is small, it shows
-each node as a tile with what it is waiting on and its registers, scrolling
-to follow the selected node when they do not all fit, and arrows between
-tiles show what the ports between nodes are doing: green for a word that
-went across, yellow for a node waiting to read or write, and dim for one
-waiting for code. The node panel shows the selected
-node's registers, stacks, and RAM and ROM around the word it is executing.
+A map panel shows all nodes. Running nodes are green, nodes waiting on a
+port yellow, and nodes waiting for code dim. Unless the panel is small, it
+shows each node as a tile with what it is waiting on and its registers,
+scrolling to follow the selected node when they do not all fit, with arrows
+in its title for the nodes out of view. Arrows between tiles show what the
+ports between nodes are doing: green for a word that went across, yellow for
+a node waiting to read or write, and dim for one waiting for code, with none
+where the nodes on both sides wait to read. The node panel shows the
+selected node's registers, stacks, and RAM and ROM around the word it is
+executing.
 
 | Key | |
 | --- | --- |
