@@ -12,7 +12,8 @@ gasim examples/hello.ga
 
 This assembles the program onto a simulated 8x18 array of F18A nodes, like
 the GA144, and opens it in a terminal user interface. Nodes without a
-program wait for code on all of their ports.
+program wait for code on all of their ports. Without a program, `gasim`
+opens the chip as it is after reset, to load code from the forth panel.
 
 A console is attached to the `up` port of node 000, which faces off the
 south edge of the chip. Each word written to it is printed as a byte, and
