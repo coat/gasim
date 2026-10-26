@@ -125,6 +125,8 @@ pub const Error = assembler.Error || error{
     LoadTooDeep,
     /// a definition without its ;
     UnclosedDefinition,
+    /// FORGET, within the [ ] of a definition, of a name from before it
+    ForgetInDefinition,
     /// a control word such as IF outside a definition
     CompileOnly,
     /// I or J outside a loop
@@ -205,16 +207,37 @@ pub const Session = struct {
         it.frames[0] = .{ .tokens = .{ .source = source } };
         it.frame_count = 1;
         it.run() catch |err| {
-            it.depth = 0;
-            it.frame_count = 1;
-            it.assembling = false;
-            it.asm_context = false;
-            it.hash = false;
-            it.inline_word = null;
-            it.compiling = null;
-            it.loop_len = 0;
+            self.recover();
             return err;
         };
+    }
+
+    /// Fails, as the end of a program does, if a definition was left
+    /// without its ;
+    pub fn finish(self: *Session) Error!void {
+        self.interpreter.checkClosed() catch |err| {
+            self.recover();
+            return err;
+        };
+    }
+
+    /// Empties the stack and goes back to outside ASM[, dropping the
+    /// definition being defined with its words and the names made in its [ ]
+    fn recover(self: *Session) void {
+        const it = &self.interpreter;
+        it.depth = 0;
+        it.frame_count = 1;
+        it.assembling = false;
+        it.asm_context = false;
+        it.hash = false;
+        it.inline_word = null;
+        if (it.compiling) |compiling| {
+            if (compiling.names < it.name_count) it.here = it.names[compiling.names].here;
+            it.name_count = compiling.names;
+            it.defined_len = compiling.start;
+        }
+        it.compiling = null;
+        it.loop_len = 0;
     }
 
     /// the bins saved, and the boot descriptors given, so far
@@ -431,17 +454,15 @@ const Name = struct {
     here: u16,
 };
 
-/// a word of a definition, the line it was written on, and the name it
-/// meant when it was defined, as Forth binds names as it compiles them. A
-/// control word is compiled into a branch instead.
+/// a word of a definition, the line it was written on, and what it meant
+/// when it was defined, as Forth binds words as it compiles them: a name,
+/// or a word of the vocabularies searched then, such as 2* being the host's
+/// outside ASM, or a number in the base then. A control word is compiled
+/// into a branch instead.
 const DefinedWord = struct {
     text: []const u8,
     line: usize,
-    name: ?u8 = null,
-    /// whether the ASM vocabulary was searched before FORTH when it was
-    /// compiled, which decides what a word such as 2* is
-    asm_context: bool = false,
-    branch: ?Branch = null,
+    meaning: union(enum) { name: u8, built_in: BuiltIn, branch: Branch },
 
     /// where branches go are the indices of words in `defined`
     const Branch = union(enum) {
@@ -462,6 +483,17 @@ const DefinedWord = struct {
         /// pushes a number that LITERAL compiled
         literal: i32,
     };
+};
+
+/// a word that is not a label or defined name: of the ASM vocabulary, of
+/// FORTH, or a number
+const BuiltIn = union(enum) {
+    asm_word: AsmWord,
+    opcode: Opcode,
+    named_literal: u18,
+    named_call: u16,
+    forth: ForthWord,
+    number: Number,
 };
 
 /// control words of host definitions, which compile into branches
@@ -520,9 +552,10 @@ const Interpreter = struct {
     /// the words of every definition
     defined: [2048]DefinedWord = undefined,
     defined_len: u16 = 0,
-    /// the definition being defined, from its : until its ;, and whether [
-    /// has it interpreting words instead until ]
-    compiling: ?struct { name: []const u8, start: u16, directive: Diagnostic, interpreting: bool = false } = null,
+    /// the definition being defined, from its : until its ;, the names
+    /// there were at its :, and whether [ has it interpreting words instead
+    /// until ]
+    compiling: ?struct { name: []const u8, start: u16, names: u8, directive: Diagnostic, interpreting: bool = false } = null,
     /// host memory, of cells, the first `here` of which are used by
     /// VARIABLE, CREATE, ARRAY, ALLOT and ,
     memory: [4096]i32 = undefined,
@@ -555,19 +588,27 @@ const Interpreter = struct {
             // a word of a definition means the name it meant when defined,
             // or a word that is not a name
             if (self.frames[self.frame_count - 1].definition) |definition| {
-                const word = self.defined[definition.at - 1];
-                if (word.name) |i| try self.runName(self.names[i]) else try self.interpretBuiltIn(token, word.asm_context);
+                switch (self.defined[definition.at - 1].meaning) {
+                    .name => |i| try self.runName(self.names[i]),
+                    .built_in => |word| try self.runBuiltIn(word),
+                    .branch => unreachable,
+                }
                 continue;
             }
             try self.interpret(token);
         }
         if (self.interactive) return;
+        try self.checkClosed();
+        if (self.inline_word != null) return error.UnclosedInline;
+        try self.checkSaved();
+    }
+
+    /// fails if a definition is still being defined
+    fn checkClosed(self: *Interpreter) Error!void {
         if (self.compiling) |compiling| {
             self.diagnostic.* = compiling.directive;
             return error.UnclosedDefinition;
         }
-        if (self.inline_word != null) return error.UnclosedInline;
-        try self.checkSaved();
     }
 
     /// fails if the bin has code or labels that were not saved
@@ -592,8 +633,8 @@ const Interpreter = struct {
                     const word = self.defined[definition.at];
                     definition.at += 1;
                     self.diagnostic.* = .{ .line = word.line, .token = word.text };
-                    const branch = word.branch orelse return word.text;
-                    if (try self.take(branch)) |to| definition.at = to;
+                    if (word.meaning != .branch) return word.text;
+                    if (try self.take(word.meaning.branch)) |to| definition.at = to;
                     continue;
                 }
                 if (!try self.endBlock()) return null;
@@ -644,7 +685,9 @@ const Interpreter = struct {
                     self.loop_len -= 1;
                     return null;
                 }
-                loop.index -= 1;
+                // a negative count goes round through the largest number,
+                // as NEXT only stops at 0
+                loop.index -%= 1;
                 return to;
             },
             .do => {
@@ -654,9 +697,11 @@ const Interpreter = struct {
             .loop, .plus_loop => |to| {
                 const step = if (branch == .loop) 1 else try self.pop();
                 const loop = &self.loops[self.loop_len - 1];
-                loop.index +%= step;
-                // until the index passes the limit, going up or down
-                if (if (step >= 0) loop.index < loop.limit else loop.index >= loop.limit) return to;
+                const index, const overflow = @addWithOverflow(loop.index, step);
+                loop.index = index;
+                // until the index passes the limit, going up or down, which
+                // going past the largest or smallest number does
+                if (overflow == 0 and if (step >= 0) index < loop.limit else index >= loop.limit) return to;
                 self.loop_len -= 1;
             },
         }
@@ -702,26 +747,37 @@ const Interpreter = struct {
             if (self.bin.?.find(token)) |value| return self.callOrPush(value, true);
         }
         if (self.findName(token)) |i| return self.runName(self.names[i]);
-        return self.interpretBuiltIn(token, self.asm_context);
+        return self.runBuiltIn(try self.findBuiltIn(token));
     }
 
-    /// interprets a word that is not a label or defined name, searching ASM
-    /// before FORTH if `asm_context`
-    fn interpretBuiltIn(self: *Interpreter, token: []const u8, asm_context: bool) Error!void {
-        if (asm_context) {
-            if (std.meta.stringToEnum(AsmWord, token)) |word| return self.runAsm(word);
+    /// what a word that is not a label or defined name means, searching ASM
+    /// before FORTH if the ASM vocabulary is searched first, or the number
+    /// it is in the base
+    fn findBuiltIn(self: *Interpreter, token: []const u8) Error!BuiltIn {
+        if (self.asm_context) {
+            if (std.meta.stringToEnum(AsmWord, token)) |word| return .{ .asm_word = word };
             if (std.meta.stringToEnum(Opcode, token)) |opcode| switch (opcode) {
                 .jump, .call, .next, .@"if", .@"-if", .unext => {},
-                .@";" => return (try self.builder()).ret(),
-                else => return (try self.builder()).emit(opcode),
+                else => return .{ .opcode = opcode },
             };
-            if (named_literals.get(token)) |value| return self.namedLiteral(value);
-            if (named_calls.get(token)) |value| return self.callOrPush(value, false);
+            if (named_literals.get(token)) |value| return .{ .named_literal = value };
+            if (named_calls.get(token)) |value| return .{ .named_call = value };
         }
-        if (std.meta.stringToEnum(ForthWord, token)) |word| return self.runForth(word);
+        if (std.meta.stringToEnum(ForthWord, token)) |word| return .{ .forth = word };
         if (std.meta.stringToEnum(ControlWord, token) != null) return error.CompileOnly;
-        if (try parseNumber(token, self.base)) |value| return self.number(value);
+        if (try parseNumber(token, self.base)) |value| return .{ .number = value };
         return error.UnknownWord;
+    }
+
+    fn runBuiltIn(self: *Interpreter, word: BuiltIn) Error!void {
+        switch (word) {
+            .asm_word => |asm_word| try self.runAsm(asm_word),
+            .opcode => |opcode| if (opcode == .@";") try (try self.builder()).ret() else try (try self.builder()).emit(opcode),
+            .named_literal => |value| try self.namedLiteral(value),
+            .named_call => |value| try self.callOrPush(value, false),
+            .forth => |forth_word| try self.runForth(forth_word),
+            .number => |value| try self.number(value),
+        }
     }
 
     fn number(self: *Interpreter, value: Number) Error!void {
@@ -819,7 +875,11 @@ const Interpreter = struct {
             return;
         }
         if (std.meta.stringToEnum(ControlWord, token)) |word| return self.compileControl(word);
-        _ = try self.addDefined(.{ .text = token, .line = self.diagnostic.line, .name = self.findName(token), .asm_context = self.asm_context });
+        _ = try self.addDefined(.{
+            .text = token,
+            .line = self.diagnostic.line,
+            .meaning = if (self.findName(token)) |i| .{ .name = i } else .{ .built_in = try self.findBuiltIn(token) },
+        });
     }
 
     /// adds a word to the definition being defined, returning where it is
@@ -864,7 +924,7 @@ const Interpreter = struct {
     }
 
     fn addBranch(self: *Interpreter, branch: DefinedWord.Branch) Error!u16 {
-        return self.addDefined(.{ .text = self.diagnostic.token, .line = self.diagnostic.line, .branch = branch });
+        return self.addDefined(.{ .text = self.diagnostic.token, .line = self.diagnostic.line, .meaning = .{ .branch = branch } });
     }
 
     fn pushControl(self: *Interpreter, word: ControlWord, at: u16) Error!void {
@@ -882,9 +942,10 @@ const Interpreter = struct {
 
     /// makes a branch forward go to a word
     fn resolve(self: *Interpreter, branch: u16, to: u16) void {
-        switch (self.defined[branch].branch.?) {
-            .jump => self.defined[branch].branch = .{ .jump = to },
-            .jump_if_zero => self.defined[branch].branch = .{ .jump_if_zero = to },
+        const meaning = &self.defined[branch].meaning;
+        switch (meaning.branch) {
+            .jump => meaning.* = .{ .branch = .{ .jump = to } },
+            .jump_if_zero => meaning.* = .{ .branch = .{ .jump_if_zero = to } },
             else => unreachable,
         }
     }
@@ -1544,6 +1605,7 @@ const Interpreter = struct {
             .FORGET => {
                 const forget_name = try self.name();
                 const i = self.findName(forget_name) orelse return error.UnknownWord;
+                if (self.compiling) |compiling| if (i < compiling.names) return error.ForgetInDefinition;
                 self.defined_len = self.names[i].mark;
                 self.here = self.names[i].here;
                 self.name_count = i;
@@ -1551,23 +1613,25 @@ const Interpreter = struct {
             .@":" => {
                 const directive = self.diagnostic.*;
                 const new_name = try self.name();
-                self.compiling = .{ .name = new_name, .start = self.defined_len, .directive = directive };
+                self.compiling = .{ .name = new_name, .start = self.defined_len, .names = self.name_count, .directive = directive };
                 self.control_len = 0;
             },
             .@"[", .@"]", .LITERAL => return error.CompileOnly,
             .VARIABLE, .@"2VARIABLE", .CREATE => {
-                // named before its memory, which forgetting it gives back
-                try self.addName(try self.name(), .address, self.here);
-                try self.allot(switch (word) {
+                const new_name = try self.name();
+                const cells = try self.room(switch (word) {
                     .VARIABLE => 1,
                     .@"2VARIABLE" => 2,
                     else => 0,
                 });
+                // named before its memory, which forgetting it gives back
+                try self.addName(new_name, .address, self.here);
+                self.here += cells;
             },
             .ARRAY => {
-                const count = try self.pop();
+                const cells = try self.room(try self.pop());
                 try self.addName(try self.name(), .array, self.here);
-                try self.allot(count);
+                self.here += cells;
             },
             .@"2CONSTANT" => try self.define(.double_constant, try self.popDouble()),
             .ALLOT => try self.allot(try self.pop()),
@@ -1609,11 +1673,11 @@ const Interpreter = struct {
             .@"nn-b" => {
                 const nn = try self.pop();
                 if (nn < 0) return error.InvalidNode;
-                try self.push(nnToBin(@intCast(nn)));
+                try self.push(nnToBin(@intCast(nn)) orelse return error.InvalidNode);
             },
             .@"b-nn" => {
                 const n = try self.pop();
-                if (n < 0) return error.InvalidNode;
+                if (n < 0 or n >= 4 * 144) return error.InvalidNode;
                 try self.push(binToNn(@intCast(n)));
             },
             .I => try self.push(try self.loopIndex(0)),
@@ -1773,8 +1837,13 @@ const Interpreter = struct {
 
     /// Uses `count` more cells of host memory
     fn allot(self: *Interpreter, count: i32) Error!void {
+        self.here += try self.room(count);
+    }
+
+    /// `count` as a number of cells, if there is room for that many more
+    fn room(self: *Interpreter, count: i32) Error!u16 {
         if (count < 0 or count > self.memory.len - self.here) return error.NumberOutOfRange;
-        self.here += @intCast(count);
+        return @intCast(count);
     }
 
     /// a cell of host memory that is in use
@@ -1838,12 +1907,15 @@ fn inRam(address: i32, len: i32) bool {
 }
 
 /// The linear number of a node in ccyyxx form, counting the nodes of chip
-/// cc after those of the chips before it, as arrayForth 3 numbers bins
-fn nnToBin(nn: u32) i32 {
+/// cc after those of the chips before it, as arrayForth 3 numbers bins, or
+/// null if it is not one of the four chips' nodes
+fn nnToBin(nn: u32) ?i32 {
     const chip = nn / 10000;
     const y = nn / 100 % 100;
     const x = nn % 100;
-    return @intCast((chip * 144 + y * 18 + x) % (4 * 144));
+    if (x >= 18) return null;
+    const bin = chip * 144 + y * 18 + x;
+    return if (bin < 4 * 144) @intCast(bin) else null;
 }
 
 /// The ccyyxx form of a linear node number, as arrayForth 3's b-nn has it:
@@ -2923,6 +2995,28 @@ test "host definitions" {
     try session.interpret(": more 1 2 3 ;  FORGET more");
     try std.testing.expectEqual(used, session.interpreter.defined_len);
     try std.testing.expectError(error.UnknownWord, session.interpret("more"));
+
+    // numbers are read in the base they were compiled in
+    out.end = 0;
+    try session.interpret("HEX : sixteen 10 ; DECIMAL sixteen .");
+    try std.testing.expectEqualStrings("16 ", out.buffered());
+
+    // a definition that fails gives back its words, and the names and
+    // memory of its [ ]
+    const defined = session.interpreter.defined_len;
+    const here = session.interpreter.here;
+    try std.testing.expectError(error.UnmatchedControl, session.interpret(": broken 1 [ VARIABLE w ] 2 THEN"));
+    try std.testing.expectEqual(defined, session.interpreter.defined_len);
+    try std.testing.expectEqual(here, session.interpreter.here);
+    try std.testing.expectError(error.UnknownWord, session.interpret("w"));
+    // as does one left open at the end of a program
+    try session.interpret(": open DUP");
+    try std.testing.expectError(error.UnclosedDefinition, session.finish());
+    try std.testing.expectEqual(defined, session.interpreter.defined_len);
+    try session.finish();
+
+    // a definition cannot forget the names before it
+    try std.testing.expectError(error.ForgetInDefinition, session.interpret("VARIABLE v  : f 1 [ FORGET v ] 2 ;"));
 }
 
 test "host definitions run as host code, even in ASM[" {
@@ -2984,6 +3078,8 @@ test "host control flow" {
     try expectOutput(&session, &out, ": up ( n) 0 DO I . LOOP ;  3 up", "0 1 2 ");
     try expectOutput(&session, &out, ": evens 10 0 DO I . 2 +LOOP ;  evens", "0 2 4 6 8 ");
     try expectOutput(&session, &out, ": back 0 6 DO I . -2 +LOOP ;  back", "6 4 2 0 ");
+    // going past the largest number passes the limit
+    try expectOutput(&session, &out, ": wrap 2147483647 2147483640 DO I . 4 +LOOP ;  wrap", "2147483640 2147483644 ");
     try expectOutput(&session, &out, ": grid 2 0 DO 2 0 DO J . I . LOOP LOOP ;  grid", "0 0 0 1 1 0 1 1 ");
     try expectOutput(&session, &out, ": count ( n) BEGIN DUP . 1- DUP 0= UNTIL DROP ;  3 count", "3 2 1 ");
     try expectOutput(&session, &out, ": halve ( n) BEGIN DUP WHILE DUP . 2/ REPEAT DROP ;  8 halve", "8 4 2 1 ");
@@ -2993,6 +3089,13 @@ test "host control flow" {
     try expectOutput(&session, &out, ": find 10 0 DO I 3 = IF I EXIT THEN LOOP -1 ;  find .", "3 ");
     try std.testing.expectEqual(0, session.interpreter.loop_len);
     try std.testing.expectEqual(0, session.stack().len);
+
+    // a negative count of FOR goes round through the largest number
+    const it = &session.interpreter;
+    try it.startLoop(.{ .index = std.math.minInt(i32), .limit = 0 });
+    try std.testing.expectEqual(5, try it.take(.{ .next = 5 }));
+    try std.testing.expectEqual(std.math.maxInt(i32), it.loops[0].index);
+    it.loop_len = 0;
 
     try std.testing.expectError(error.CompileOnly, session.interpret("1 IF"));
     try std.testing.expectError(error.NoLoop, session.interpret("I"));
@@ -3030,6 +3133,9 @@ test "host memory" {
 
     try std.testing.expectError(error.NumberOutOfRange, session.interpret("HERE @"));
     try std.testing.expectError(error.NumberOutOfRange, session.interpret("-1 ALLOT"));
+    // a name is not made without its memory
+    try std.testing.expectError(error.NumberOutOfRange, session.interpret("-1 ARRAY bad"));
+    try std.testing.expectError(error.UnknownWord, session.interpret("bad"));
     try std.testing.expectError(error.CompileOnly, session.interpret("1 LITERAL"));
 }
 
@@ -3042,4 +3148,8 @@ test "chip configuration words" {
     var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
     try session.interpret("nnx . nny . nns . nnc .  708 nn-b .  134 b-nn .  10005 nn-b .  149 b-nn .  1601 nn-b .  289 b-nn .");
     try std.testing.expectEqualStrings("18 8 144 576 134 708 149 10005 289 1601 ", out.buffered());
+    // only the nodes of four chips have bins
+    try std.testing.expectError(error.InvalidNode, session.interpret("576 b-nn"));
+    try std.testing.expectError(error.InvalidNode, session.interpret("818 nn-b"));
+    try std.testing.expectError(error.InvalidNode, session.interpret("40000 nn-b"));
 }

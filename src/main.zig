@@ -471,6 +471,7 @@ fn loadSession(
             try session.interpret(std.fmt.allocPrint(arena, "{d} LOAD", .{block}) catch fatal("out of memory", .{}));
         }
     } else if (has_program) try session.interpret(file);
+    try session.finish();
     return session.assembled();
 }
 
