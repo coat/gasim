@@ -136,6 +136,8 @@ chip: `NODE` picks a node, `UPD` shows its stacks, `LIT` pushes onto them,
 `BOOT` loads a bin into its RAM, `CALL` runs code there, and `?RAM`, `-ASM`,
 `R@` and `R!` look at and change it. A program given after `repl` is loaded
 first, and the bins and labels of an arrayForth 3 program stay available.
+Outside `ASM[`, `: name … ;` defines a host word, with `IF`, `BEGIN`, `FOR`
+and `DO` loops, such as `: dump ( a n) 0 DO DUP I + R@ D. LOOP DROP ;`.
 
 ```
 $ gasim repl
