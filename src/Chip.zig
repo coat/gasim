@@ -452,8 +452,8 @@ pub fn setUp(self: *Chip, descriptor: boot.Descriptor, programs: []const assembl
 /// returns to the port.
 pub fn execute(self: *Chip, i: u16, word: Word) error{NotWaitingForCode}!void {
     const n = &self.nodes[i];
-    if (n.status() != .code) return error.NotWaitingForCode;
-    const ports = port.select(@bitCast(n.p.address)) orelse return error.NotWaitingForCode;
+    if (!waitsForCode(n)) return error.NotWaitingForCode;
+    const ports = port.select(@bitCast(n.p.address)).?;
     // a word already delivered to the node is code it will run first, so
     // check every port before withdrawing the node's reads from any
     var it = ports.iterator();
@@ -481,10 +481,16 @@ pub fn execute(self: *Chip, i: u16, word: Word) error{NotWaitingForCode}!void {
 /// running or every node was waiting on something else.
 pub fn runUntilWaiting(self: *Chip, i: u16, limit: usize) !bool {
     for (0..limit) |_| {
-        if (self.nodes[i].status() == .code) return true;
+        if (waitsForCode(&self.nodes[i])) return true;
         if (!try self.advance()) break;
     }
-    return self.nodes[i].status() == .code;
+    return waitsForCode(&self.nodes[i]);
+}
+
+/// Whether a node is waiting for code from a port, or is about to, such as
+/// after reset before it has tried
+fn waitsForCode(n: *const Computer) bool {
+    return n.state == .fetch and port.select(@bitCast(n.p.address)) != null;
 }
 
 /// Attaches a console to a port of a node that faces off the array
@@ -1114,8 +1120,10 @@ test "executes words from a port, as the IDE does" {
     var descriptor: boot.Descriptor = .ofProgram(program);
     descriptor.p = 0x175;
     try chip.setUp(descriptor, &.{program});
+    // about to fetch from the port, which is as good as waiting on it
     const i = chip.layout.index(0).?;
-    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    try std.testing.expectEqual(.running, chip.nodes[i].status());
+    try std.testing.expect(try chip.runUntilWaiting(i, 0));
 
     // code jumped to returns to the port, where the node waits for code
     // again, with its return stack as it was
@@ -1146,6 +1154,8 @@ test "words are only refused for code delivered to the node" {
     try chip.setUp(.{ .node = 101, .p = 0x1a5 }, &.{});
     const i = chip.layout.index(101).?;
     try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    // so it has tried to fetch, and is reading its ports
+    chip.stepNode(i);
     const n = &chip.nodes[i];
     const right = n.ports[@backingInt(Direction.right)];
     const left = n.ports[@backingInt(Direction.left)];
@@ -1157,10 +1167,12 @@ test "words are only refused for code delivered to the node" {
 
     // but one delivered to it is, and its other reads are left as they were
     try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    chip.stepNode(i);
     right.port.?.state = .{ .delivered = .{ .side = right.side, .value = 1 } };
-    try std.testing.expectEqual(Port.State{ .reading = left.side }, left.port.?.state);
+    const before = left.port.?.state;
+    try std.testing.expect(before == .reading);
     try std.testing.expectError(error.NotWaitingForCode, chip.execute(i, 0x15555));
-    try std.testing.expectEqual(Port.State{ .reading = left.side }, left.port.?.state);
+    try std.testing.expectEqual(before, left.port.?.state);
 }
 
 test "stops when interrupted" {

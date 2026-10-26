@@ -201,6 +201,11 @@ pub const Session = struct {
         return self.interpreter.target;
     }
 
+    /// makes a node of the chip the target of the IDE words, as NODE does
+    pub fn setTarget(self: *Session, node: u16) void {
+        self.interpreter.target = node;
+    }
+
     /// Calls `completer.add(word)` for each word the session knows that
     /// starts with `prefix`: FORTH and ASM words, opcodes, named literals
     /// and calls, the labels of the bin being assembled, and defined names
@@ -2373,8 +2378,8 @@ test "a session acts on a chip, as the IDE does" {
     // node 000 has no data register, so x141 is not one
     try std.testing.expectError(error.PortAccess, session.interpret("x141 R@"));
     try std.testing.expectError(error.PortAccess, session.interpret("5. x141 R!"));
-    // and the node still waits for code, rather than on x141
-    try std.testing.expectEqual(.code, std.meta.activeTag(chip.nodes[chip.layout.index(0).?].status()));
+    // and the node still takes words, rather than waiting on x141
+    try session.interpret("RDUP RDROP");
     try std.testing.expectEqualStrings("4155 000 04155  @p + ;\n001 00001  literal 1\n", out.buffered());
 
     // completion knows words, opcodes and labels

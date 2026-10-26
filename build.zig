@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const coverage = b.option(bool, "coverage", "Generate a coverage report with kcov") orelse false;
+    const isocline = b.option(bool, "isocline", "Edit lines at the repl with isocline, which links libc (default true)") orelse true;
 
     const mod = b.addModule("gasim", .{
         .root_source_file = b.path("src/root.zig"),
@@ -17,18 +18,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const options = b.addOptions();
+    options.addOption(bool, "isocline", isocline);
+
     const exe = b.addExecutable(.{
         .name = "gasim",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            // isocline is C, and only the executable uses it
+            .link_libc = if (isocline) true else null,
             .imports = &.{
                 .{ .name = "gasim", .module = mod },
                 .{ .name = "vaxis", .module = vaxis.module("vaxis") },
+                .{ .name = "build_options", .module = options.createModule() },
             },
         }),
     });
+    if (isocline) if (b.lazyDependency("isocline", .{})) |dependency| {
+        exe.root_module.addCSourceFile(.{ .file = dependency.path("src/isocline.c"), .flags = &.{"-std=c99"} });
+        exe.root_module.addIncludePath(dependency.path("include"));
+    };
 
     b.installArtifact(exe);
 

@@ -12,6 +12,11 @@
             .url = "git+https://github.com/rockorager/libvaxis#bb94364ce00a59044322d3d403d08e83d841d9d4",
             .hash = "vaxis-0.6.0-BWNV_IoaDQDXEsN4nhfsjQlgU3EfkQqJqTGkAW-vjAi0",
         },
+        .isocline = .{
+            .url = "git+https://github.com/daanx/isocline#8d6dc1ef95b1b46711e66eb23d39d4467a0fcdac",
+            .hash = "N-V-__8AAI8vEwDBxs8j_tnNzQ_8MiBQBrR3SXBPbov4JY9z",
+            .lazy = true,
+        },
     },
 
     .paths = .{

@@ -16,7 +16,7 @@ stdenv.mkDerivation (
       inherit (finalAttrs) src version;
       pname = finalAttrs.name;
       fetchAll = true;
-      hash = "sha256-4pnOoQIVkcqpQbACJw8QC7G3QUz4rYGNZX3tDH0Jeek=";
+      hash = "sha256-1FlTbzfg1D8Ls9CaOdBny5DbOuYwthga8iA22RC67b4=";
     };
 
     nativeBuildInputs =
