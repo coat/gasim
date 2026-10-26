@@ -40,6 +40,20 @@ test "upcase.cf" {
     try expectColorForthOutput(@embedFile("upcase.cf"), "Hello, World! az{`@[\n", "HELLO, WORLD! AZ{`@[\n");
 }
 
+// and ideas from AshleyF's posts on the F18, in colorForth
+
+test "alphabet.cf" {
+    try expectColorForthOutput(@embedFile("alphabet.cf"), "", "abcdefghijklmnopqrstuvwxyz\n");
+}
+
+test "variables.cf" {
+    try expectColorForthOutput(@embedFile("variables.cf"), "", "0123456789\n");
+}
+
+test "multiply.cf" {
+    try expectColorForthOutput(@embedFile("multiply.cf"), "", "bad\nfe01\n");
+}
+
 const expectOutput = @import("gasim").Chip.expectOutput;
 const expectArrayForthOutput = @import("gasim").Chip.expectArrayForthOutput;
 const expectColorForthOutput = @import("gasim").Chip.expectColorForthOutput;

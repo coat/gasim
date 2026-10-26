@@ -191,6 +191,21 @@ version, such as `examples/echo.cf`, which `gasim blocks` shows:
 :main ]up b! begin @b !b end
 ```
 
+Three more examples follow AshleyF's posts on the F18, from his
+[Chuck Moore's Creations](https://github.com/AshleyF/Color/blob/master/Docs/chuck_moores_creations.md)
+series: `alphabet.cf` prints the alphabet with a `for` loop,
+`variables.cf` counts with a variable whose store word, just before it,
+stores into its literal in place, and `multiply.cf` multiplies with the
+multiply-step instruction `+*` and prints the product in hex:
+
+```
+[0 node 0 org
+:* (ab-p ]a! 0 17 for +* unext drop drop a ;
+:digit (n ]$f and -10 . + -if 58 . + !b ; then 97 . + !b ;
+:.hex (n print the digits above this one first ]dup 2/ 2/ 2/ 2/ if .hex digit ; then drop digit ;
+:main ]up b! $3d $31 * .hex 10 !b $ff $ff * .hex 10 !b left b! @b
+```
+
 Yellow words run as the block is loaded: `n node` starts the code of a
 node, saving the code of the one before, `a org` sets where code goes,
 `here` leaves where that is, `n ,` lays down a number, `n load` and
