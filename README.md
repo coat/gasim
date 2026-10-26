@@ -130,13 +130,12 @@ $ gasim --load 2331 --load 2332 sF/pFDISK.blk
 
 ### arrayForth 3 prompt
 
-`gasim repl` reads lines of arrayForth 3 and interprets them, answering
-`ok`. Code can be assembled into bins, and the words of arrayForth 3's IDE act
-on the simulated chip: `NODE` picks a node, `UPD` shows its stacks, `LIT`
-pushes onto them, `BOOT` loads a bin into its RAM, `CALL` runs code there,
-and `?RAM`, `-ASM`, `R@` and `R!` look at and change it. A program given
-after `repl` is loaded first, and the bins and labels of an arrayForth 3
-program stay available.
+`gasim repl` is basically an  arrayForth 3 outer interpreter. Code can be
+assembled into bins, and the words of arrayForth 3's IDE act on the simulated
+chip: `NODE` picks a node, `UPD` shows its stacks, `LIT` pushes onto them,
+`BOOT` loads a bin into its RAM, `CALL` runs code there, and `?RAM`, `-ASM`,
+`R@` and `R!` look at and change it. A program given after `repl` is loaded
+first, and the bins and labels of an arrayForth 3 program stay available.
 
 ```
 $ gasim repl
@@ -155,12 +154,12 @@ R      0      0      0      0      0      0      0      0      0
 On a terminal, lines are edited with
 [isocline](https://github.com/daanx/isocline), with history and Tab
 completion of words and labels. isocline links libc into the `gasim`
-executable, which `zig build -Disocline=false` leaves out, along with the
+executable, which `zig build -Disocline=false` leaves out, along with
 line editing.
 
 ### Terminal user interface
 
-The map shows every node: running nodes are green, nodes waiting on a port
+A map panel shows all nodes. Running nodes are green, nodes waiting on a port
 yellow, and nodes waiting for code dim. The node panel shows the selected
 node's registers, stacks, and RAM and ROM around the word it is executing.
 
@@ -171,7 +170,7 @@ node's registers, stacks, and RAM and ROM around the word it is executing.
 | `S` | step every node once |
 | `n` | step the selected node |
 | `z` | go back to before the last step or run, up to 64 times |
-| arrows, `hjkl` | select a node on the map, or move through memory in the node panel |
+| `hjkl`, arrows | select a node on the map, or move through memory in the node panel |
 | `tab`, `shift+tab` | move to the next or previous panel, from the map and node panels |
 | `alt+1`-`4` | move to the map, console, node or forth panel from any panel, showing it, as does `ctrl` in terminals that report it |
 | `1` `2` `3` `4` | show or hide the map, console, node and forth panels |
@@ -183,7 +182,7 @@ node's registers, stacks, and RAM and ROM around the word it is executing.
 | `g` | follow the word the node is executing again |
 | `q`, `ctrl+c` | quit |
 
-Clicking a panel selects it, and clicking a node on the map selects it.
+Clicking a node on the map to select it.
 Clicking a word in memory moves the cursor to it, and clicking to its left
 sets or clears a breakpoint, shown as a red dot. Running pauses when a node
 is about to fetch a word with a breakpoint, or makes a watched transfer,
