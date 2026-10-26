@@ -203,9 +203,12 @@ by arrayForth 2's names `-` `or` `push` `pop` or arrayForth 3's, `begin`
 `if` `then` `next` and the other control words, calls to labels and the
 ROM, and port names such as `right`. Green numbers are literals. Gray
 numbers, which arrayForth 2 wrote as it compiled, are checked against where
-gasim has got to, with a warning if they differ. Host definitions between
-`host` and `target`, which are x86 code in arrayForth 2, are not supported
-yet. Compiled this way, the F18 code of `OkadWork.cf` agrees with the gray
+gasim has got to, with a warning if they differ. Between `host` and
+`target`, a red word defines a word for the host, which runs its green
+words as yellow ones and pushes its numbers, such as `:r-l- ]$1f5 lit ;`,
+a macro for a literal, until `empty` forgets the words defined since
+`mark`. `--listing` shows the line of colorForth each word came from, as
+`gasim blocks` writes it. Compiled this way, the F18 code of `OkadWork.cf` agrees with the gray
 numbers arrayForth 2 wrote, but for a few lines that were changed after it
 was compiled. This opens the PWM demo running in node 600, and lists the
 SHA-256 scheduler in node 101:

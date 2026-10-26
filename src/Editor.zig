@@ -86,15 +86,9 @@ pub fn cells(self: Editor) usize {
     return used;
 }
 
-/// Whether a token starts a line, as colorForth shows a block: a red or
-/// magenta one, unless a blue `-cr` comes before it, or one after a blue
-/// `cr` or `br`
+/// whether a token starts a line, as colorForth shows a block
 pub fn startsLine(self: Editor, i: usize) bool {
-    if (i == 0) return true;
-    const before = self.tokens[i - 1];
-    if (isFormat(before, "cr") or isFormat(before, "br")) return true;
-    const c = self.tokens[i].tag.color();
-    return (c == .red or c == .magenta) and !isFormat(before, "-cr");
+    return i == 0 or colorforth.startsLine(self.tokens[i - 1], self.tokens[i]);
 }
 
 /// Moves to another block, leaving the one being edited as it is
@@ -474,10 +468,6 @@ fn nextColor(before: ?Color) Color {
 /// a blue cr, which ends a line
 fn cr() Token {
     return Token.word(.format, "cr") catch unreachable;
-}
-
-fn isFormat(token: Token, text: []const u8) bool {
-    return token.tag == .format and std.mem.eql(u8, token.text(), text);
 }
 
 /// a number as typed: decimal digits or `$` and hex digits, after an

@@ -512,33 +512,52 @@ fn byteOf(bit: usize) usize {
 /// Writes a block's tokens as text, with a mark before a token whose color
 /// differs from the one before it, as muforth lists colorForth: `:` red,
 /// `[` yellow, `]` green, `\` cyan, `(` white, `@` magenta, `^` gray and
-/// `~` blue. Red and magenta words start a line, as colorForth
-/// shows them, unless a blue `-cr` comes before, and so do blue `cr` and
-/// `br`, the last after an empty line.
+/// `~` blue. Lines start as `startsLine` says.
 pub fn writeText(tokens: []const Token, writer: *Io.Writer) Io.Writer.Error!void {
     var color: Color = .none;
-    var line_start = true;
-    var cr_allowed = true;
+    var before: ?Token = null;
     for (tokens) |token| {
-        const c = token.tag.color();
-        const defines = c == .red or c == .magenta;
-        if (defines and !line_start and cr_allowed) {
-            try writer.writeByte('\n');
-            line_start = true;
+        if (before) |b| {
+            if (startsLine(b, token)) {
+                try writer.writeAll(if (isFormat(b, "br")) "\n\n" else "\n");
+            } else try writer.writeByte(' ');
         }
-        if (!line_start) try writer.writeByte(' ');
-        if (c != color or defines) if (mark(c)) |m| try writer.writeByte(m);
+        const c = token.tag.color();
+        if (c != color or c == .red or c == .magenta) if (mark(c)) |m| try writer.writeByte(m);
         color = c;
         try writer.print("{f}", .{token});
         if (token.tag == .variable) try writer.print(" {d}", .{token.value});
-        line_start = false;
-        cr_allowed = !(c == .blue and std.mem.eql(u8, token.text(), "-cr"));
-        if (c == .blue and (std.mem.eql(u8, token.text(), "cr") or std.mem.eql(u8, token.text(), "br"))) {
-            try writer.writeAll(if (token.text()[0] == 'b') "\n\n" else "\n");
-            line_start = true;
-        }
+        before = token;
     }
-    if (!line_start) try writer.writeByte('\n');
+    if (before != null) try writer.writeByte('\n');
+}
+
+/// Whether a token starts a line, as colorForth shows a block, after the
+/// token before it: a red or magenta one does, unless a blue `-cr` comes
+/// before it, and so does one after a blue `cr`, or `br` and an empty line
+pub fn startsLine(before: Token, token: Token) bool {
+    if (isFormat(before, "cr") or isFormat(before, "br")) return true;
+    const c = token.tag.color();
+    return (c == .red or c == .magenta) and !isFormat(before, "-cr");
+}
+
+/// Counts the lines of a block, from 0, as `writeText` writes them
+pub const Lines = struct {
+    before: ?Token = null,
+    line: usize = 0,
+
+    /// the line of the next token of the block
+    pub fn of(self: *Lines, token: Token) usize {
+        if (self.before) |b| if (startsLine(b, token)) {
+            self.line += if (isFormat(b, "br")) 2 else 1;
+        };
+        self.before = token;
+        return self.line;
+    }
+};
+
+fn isFormat(token: Token, text: []const u8) bool {
+    return token.tag == .format and std.mem.eql(u8, token.text(), text);
 }
 
 fn mark(color: Color) ?u8 {

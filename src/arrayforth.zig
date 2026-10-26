@@ -219,9 +219,9 @@ pub const Session = struct {
 
     /// Compiles colorForth `blocks`, starting with `block`, as
     /// `assembleColorForth` does, keeping the bins and stack, but for the
-    /// bins compiled from `block` before, which it replaces. After an error
-    /// the stack is emptied, and the bin being assembled dropped. The gray
-    /// numbers that differ are counted afresh.
+    /// bins and host words compiled from `block` before, which it replaces.
+    /// After an error the stack is emptied, and the bin being assembled
+    /// dropped. The gray numbers that differ are counted afresh.
     pub fn loadColorForth(self: *Session, blocks: []const u8, block: u32) Error!void {
         const it = &self.interpreter;
         it.diagnostic.* = .{ .line = colorforth.line(block, 1) };
@@ -234,6 +234,8 @@ pub const Session = struct {
         it.first_difference = null;
         it.loadColorForth(std.math.cast(i32, block) orelse return error.NoSuchBlock) catch |err| {
             it.color_depth = 0;
+            it.host_mode = false;
+            it.defining = null;
             // its code is incomplete, and node would save it
             it.bin = null;
             self.recover();
@@ -367,8 +369,9 @@ pub fn assembleBlocks(blocks: []const u8, loads: []const u32, programs: []Progra
 /// Compiles the F18 code in colorForth blocks, as arrayForth 2 does,
 /// loading each of `loads` in turn. Each node's code is saved as its
 /// program once another node is chosen, and at the end of each load. The
-/// lines of the programs and the diagnostic are places in the blocks, from
-/// `colorforth.line`.
+/// diagnostic is the place of a token in the blocks, from `colorforth.line`,
+/// and the lines of the programs are lines of their blocks as
+/// `colorforth.writeText` writes them, from `colorforth.line` too.
 pub fn assembleColorForth(blocks: []const u8, loads: []const u32, programs: []Program, descriptors: []boot.Descriptor, diagnostic: *Diagnostic) Error!Assembled {
     var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs, .descriptors = descriptors, .color_blocks = blocks };
     for (loads) |load| {
@@ -410,10 +413,23 @@ const ColorFrame = struct {
     reader: colorforth.Reader,
     block: usize,
     token: usize = 0,
+    lines: colorforth.Lines = .{},
+};
+
+/// a word defined for the host, between host and target, and the words and
+/// numbers it runs, which are part of `host_body`
+const HostWord = struct {
+    name: []const u8,
+    start: u16,
+    len: u16,
+    /// the block a session compiled it from
+    block: ?u32 = null,
+
+    const Part = union(enum) { number: i32, word: []const u8 };
 };
 
 /// the yellow words that colorForth runs on the host
-const ColorWord = enum { node, bin, @":", host, org, here, @"+cy", @"-cy", @",", load, loads, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod" };
+const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/" };
 
 /// arrayForth 2's names for opcodes that arrayForth 3 renamed
 const colorforth_opcodes: std.StaticStringMap([]const u8) = .initComptime(.{
@@ -654,16 +670,32 @@ const Interpreter = struct {
     color_blocks: ?[]const u8 = null,
     color_frames: [16]ColorFrame = undefined,
     color_depth: u8 = 0,
-    /// the block a session is compiling, which the bins it makes come
-    /// from
+    /// the block a session is compiling, which the bins and host words it
+    /// makes come from
     color_load: ?u32 = null,
     /// the names of colorForth labels, which are not kept as text in blocks
     names_text: [16 * 1024]u8 = undefined,
     names_len: u16 = 0,
-    /// the colorForth token being interpreted, for the diagnostic
+    /// the colorForth token being interpreted, for the diagnostic, and the
+    /// line it is on as `colorforth.writeText` writes its block, for the
+    /// lines of programs
     token_text: [colorforth.max_chars]u8 = undefined,
+    color_line: ?usize = null,
     feedback_differs: usize = 0,
     first_difference: ?Feedback = null,
+    /// between host and target, where red words define words for the host,
+    /// such as macros that assemble a literal
+    host_mode: bool = false,
+    host_words: [128]HostWord = undefined,
+    host_word_count: u8 = 0,
+    /// the host words that empty leaves, as mark left them
+    host_mark: u8 = 0,
+    host_body: [1024]HostWord.Part = undefined,
+    host_body_len: u16 = 0,
+    /// the host word being defined, until its ;
+    defining: ?u8 = null,
+    /// host words running host words
+    host_depth: u8 = 0,
 
     fn assembled(self: Interpreter) Assembled {
         return .{
@@ -896,7 +928,7 @@ const Interpreter = struct {
         if (self.inline_word) |*word| return word;
         const bin = try self.currentBin();
         bin.changed = true;
-        bin.builder.line = self.diagnostic.line;
+        bin.builder.line = self.color_line orelse self.diagnostic.line;
         return &bin.builder;
     }
 
@@ -1094,6 +1126,7 @@ const Interpreter = struct {
     /// Interprets colorForth blocks, starting with `block`, until it and
     /// the blocks it loads have been, and saves the bin being assembled
     fn loadColorForth(self: *Interpreter, block: i32) Error!void {
+        defer self.color_line = null;
         try self.pushColorBlock(block);
         while (self.color_depth > 0) {
             const frame = &self.color_frames[self.color_depth - 1];
@@ -1105,6 +1138,7 @@ const Interpreter = struct {
                 continue;
             };
             frame.token += 1;
+            self.color_line = colorforth.line(frame.block, frame.lines.of(token) + 1);
             var writer: Io.Writer = .fixed(&self.token_text);
             token.format(&writer) catch {};
             self.colorDiagnostic(frame, writer.buffered());
@@ -1113,8 +1147,8 @@ const Interpreter = struct {
         if (self.bin) |bin| if (bin.changed) try self.save();
     }
 
-    /// Forgets the bins that a session compiled from `block`, keeping those
-    /// of other blocks and those saved since
+    /// Forgets the bins and host words that a session compiled from
+    /// `block`, keeping those of other blocks and those saved since
     fn forgetColorLoad(self: *Interpreter, block: u32) void {
         var kept: u16 = 0;
         for (0..self.saved_count) |i| {
@@ -1125,6 +1159,25 @@ const Interpreter = struct {
         }
         self.count = kept;
         self.saved_count = kept;
+
+        // the host words kept, with their words and numbers moved down to
+        // follow each other, and mark counting those kept before it
+        var words: u8 = 0;
+        var body: u16 = 0;
+        var mark: u8 = 0;
+        for (self.host_words[0..self.host_word_count], 0..) |word, i| {
+            if (i == self.host_mark) mark = words;
+            if (word.block == block) continue;
+            std.mem.copyForwards(HostWord.Part, self.host_body[body..][0..word.len], self.host_body[word.start..][0..word.len]);
+            self.host_words[words] = word;
+            self.host_words[words].start = body;
+            body += word.len;
+            words += 1;
+        }
+        if (self.host_mark == self.host_word_count) mark = words;
+        self.host_word_count = words;
+        self.host_body_len = body;
+        self.host_mark = mark;
     }
 
     fn colorDiagnostic(self: *Interpreter, frame: *const ColorFrame, token: []const u8) void {
@@ -1145,6 +1198,7 @@ const Interpreter = struct {
     /// on the host, as arrayForth 2 compiles F18 code. Gray numbers, which
     /// arrayForth 2 wrote where it had assembled to, are checked.
     fn colorToken(self: *Interpreter, token: colorforth.Token) Error!void {
+        if (self.host_mode) return self.hostToken(token);
         switch (token.tag.color()) {
             .white, .blue, .none => {},
             // where arrayForth 2 had assembled to, once a node has code
@@ -1174,6 +1228,61 @@ const Interpreter = struct {
         }
     }
 
+    /// Defines host words between host and target: a red word starts one,
+    /// whose green words and numbers it runs, and yellow numbers, until a
+    /// green ;
+    fn hostToken(self: *Interpreter, token: colorforth.Token) Error!void {
+        switch (token.tag.color()) {
+            .white, .blue, .gray, .none => {},
+            .cyan, .magenta => return error.HostCode,
+            .red => {
+                if (self.host_word_count == self.host_words.len) return error.TooManyLabels;
+                self.host_words[self.host_word_count] = .{ .name = try self.keepName(token.text()), .start = self.host_body_len, .len = 0, .block = self.color_load };
+                self.defining = self.host_word_count;
+                self.host_word_count += 1;
+            },
+            .yellow, .green => if (self.defining) |i| {
+                const word = &self.host_words[i];
+                if (token.tag.color() == .green and !token.tag.isNumber() and eql(token.text(), ";")) {
+                    self.defining = null;
+                    return;
+                }
+                // yellow words would run as the word is defined
+                if (token.tag.color() == .yellow and !token.tag.isNumber()) {
+                    if (eql(token.text(), "target")) return error.UnclosedDefinition;
+                    return error.HostCode;
+                }
+                if (self.host_body_len == self.host_body.len) return error.DefinitionsTooLong;
+                self.host_body[self.host_body_len] = if (token.tag.isNumber()) .{ .number = token.value } else .{ .word = try self.keepName(token.text()) };
+                self.host_body_len += 1;
+                word.len += 1;
+            } else if (token.tag.color() == .yellow) {
+                if (token.tag.isNumber()) return self.push(token.value);
+                return self.yellowWord(token.text());
+            } else return error.HostCode,
+        }
+    }
+
+    fn findHostWord(self: *Interpreter, text: []const u8) ?HostWord {
+        var i = self.host_word_count;
+        while (i > 0) {
+            i -= 1;
+            if (eql(self.host_words[i].name, text)) return self.host_words[i];
+        }
+        return null;
+    }
+
+    /// runs a host word's words and numbers on the host
+    fn runHostWord(self: *Interpreter, word: HostWord) Error!void {
+        if (self.host_depth == self.color_frames.len) return error.LoadTooDeep;
+        self.host_depth += 1;
+        defer self.host_depth -= 1;
+        for (self.host_body[word.start..][0..word.len]) |part| switch (part) {
+            .number => |n| try self.push(n),
+            .word => |text| try self.yellowWord(text),
+        };
+    }
+
     /// keeps the name of a label, which outlives the token it came from,
     /// sharing a name kept before, as compiling again keeps the same names
     fn keepName(self: *Interpreter, text: []const u8) Error![]const u8 {
@@ -1190,8 +1299,9 @@ const Interpreter = struct {
     /// arrayForth 2 name or arrayForth 3's, a control word, or a named
     /// literal or call
     fn greenWord(self: *Interpreter, text: []const u8) Error!void {
-        const bin = self.bin orelse return error.NoNode;
-        if (bin.find(text)) |value| return self.callOrPush(value, true);
+        if (self.bin) |*bin| if (bin.find(text)) |value| return self.callOrPush(value, true);
+        if (self.findHostWord(text)) |word| return self.runHostWord(word);
+        if (self.bin == null) return error.NoNode;
         if (eql(text, ",")) return (try self.builder()).data(word18(try self.pop()));
         if (eql(text, "lit")) return (try self.builder()).literal(word18(try self.pop()));
         // words of arrayForth 3 that read a name after them, as colorForth
@@ -1211,8 +1321,11 @@ const Interpreter = struct {
     /// colorForth's meanings, where - inverts and or is exclusive, the words
     /// that place and load code, and labels, which push their address
     fn yellowWord(self: *Interpreter, text: []const u8) Error!void {
-        // a label's address, such as for lit
+        if (self.findHostWord(text)) |host_word| return self.runHostWord(host_word);
+        // a label's address, such as for lit, or a port's or port call's
         if (self.bin) |*bin| if (bin.find(text)) |value| return self.push(value);
+        if (named_literals.get(text)) |value| return self.push(value);
+        if (named_calls.get(text)) |value| return self.push(value);
         const word = std.meta.stringToEnum(ColorWord, text) orelse return error.UnknownWord;
         switch (word) {
             .node => {
@@ -1230,8 +1343,12 @@ const Interpreter = struct {
             },
             // before a label, as labels push their address anyway
             .@":" => {},
-            // host definitions, which are x86 code
-            .host => return error.HostCode,
+            .host => self.host_mode = true,
+            .target => {
+                if (self.defining != null) return error.UnclosedDefinition;
+                self.host_mode = false;
+            },
+            .lit => try (try self.builder()).literal(word18(try self.pop())),
             .org => try self.runAsm(.org),
             .here => try self.runAsm(.here),
             .@"+cy" => try self.runAsm(.@"+cy"),
@@ -1250,8 +1367,12 @@ const Interpreter = struct {
                 }
             },
             .exit => self.color_depth -= 1,
-            // the host's dictionary, which gasim does not keep
-            .empty, .mark, .reclaim => {},
+            // the host words defined since mark, which empty forgets
+            .mark => self.host_mark = self.host_word_count,
+            .empty, .reclaim => {
+                self.host_word_count = self.host_mark;
+                self.host_body_len = if (self.host_mark == 0) 0 else self.host_words[self.host_mark - 1].start + self.host_words[self.host_mark - 1].len;
+            },
             .dup => {
                 const t = try self.pop();
                 try self.push(t);
@@ -1275,6 +1396,13 @@ const Interpreter = struct {
             .@"-" => try self.push(~try self.pop()),
             .@"2*" => try self.push(try self.pop() << 1),
             .@"2/" => try self.push(try self.pop() >> 1),
+            .@"*/" => {
+                const u = try self.pop();
+                const t = try self.pop();
+                const product = @as(i64, try self.pop()) * t;
+                if (u == 0) return error.NumberOutOfRange;
+                try self.push(std.math.cast(i32, @divTrunc(product, u)) orelse return error.NumberOutOfRange);
+            },
             .@"+", .@"*", .@"and", .@"or", .@"/", .mod, .@"/mod" => {
                 const t = try self.pop();
                 const s = try self.pop();
@@ -3619,6 +3747,36 @@ test "colorForth's gray numbers are checked against where code was assembled" {
     try std.testing.expectEqual(0x402, difference.found);
 }
 
+test "colorForth defines words for the host between host and target" {
+    // a macro that assembles a literal, used green, and arithmetic, used
+    // yellow, both forgotten by empty
+    const bytes = try colorBlocks(&.{
+        \\[ mark 7 node host
+        \\: rl ] $1f5 lit ;
+        \\: less ] -3 + ; [ target 0 org
+        \\: main ] rl b! [ 10 less ] lit [ right , ] ;
+        \\[ empty
+    });
+    var programs: [4]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = (try assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic)).programs;
+    // , ends the instruction word, so ; starts the next
+    try std.testing.expectEqualSlices(Word, &.{ opcodes(.@"@p", .@"b!", .@"@p", .@"."), 0x1f5, 7, 0x1d5 }, assembled[0].ram[0..4]);
+
+    // and errors
+    const cases = .{
+        .{ error.HostCode, "[ host : x ] 1 [ dup", "dup" },
+        .{ error.HostCode, "[ host ] dup", "dup" },
+        .{ error.UnclosedDefinition, "[ host : x ] 1 [ target", "target" },
+        .{ error.UnknownWord, "[ host : x ] 1 ; [ target empty x", "x" },
+    };
+    inline for (cases) |case| {
+        const errors = try colorBlocks(&.{case[1]});
+        try std.testing.expectError(case[0], assembleColorForth(&errors, &.{0}, &programs, &.{}, &diagnostic));
+        try std.testing.expectEqualStrings(case[2], diagnostic.token);
+    }
+}
+
 test "a session compiles colorForth blocks again, replacing what they compiled" {
     var programs: [4]Program = undefined;
     var descriptors: [1]boot.Descriptor = undefined;
@@ -3629,14 +3787,16 @@ test "a session compiles colorForth blocks again, replacing what they compiled" 
     try session.interpret("ASM[ # 5 NODE dup >BIN ]ASM");
 
     const two = try colorBlocks(&.{
-        \\[ 0 node 0 org
-        \\: main ] [ 10 -3 + ] lit ;
+        \\[ host
+        \\: less ] -3 + ; [ target 0 node 0 org
+        \\: main ] [ 10 less ] lit ;
         \\[ 1 node 0 org
         \\: main ] drop ;
     });
-    // without running out of names or labels
+    // without running out of names, host words or labels
     for (0..200) |_| try session.loadColorForth(&two, 0);
     try std.testing.expectEqual(3, session.assembled().programs.len);
+    try std.testing.expectEqual(1, session.interpreter.host_word_count);
 
     // a node no longer compiled is forgotten, and the bin from the forth
     // panel kept
@@ -3649,6 +3809,7 @@ test "a session compiles colorForth blocks again, replacing what they compiled" 
     try std.testing.expectEqual(2, assembled.len);
     try std.testing.expectEqual(5, assembled[0].node);
     try std.testing.expectEqual(0, assembled[1].node);
+    try std.testing.expectEqual(0, session.interpreter.host_word_count);
 
     // an error drops the bin it was assembling
     const failing = try colorBlocks(&.{

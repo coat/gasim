@@ -188,7 +188,9 @@ pub fn main(init: std.process.Init) !void {
             fatal("{s}: {t}", .{ source_path, err });
     if (!blocks and file.len > max_source_len) fatal("{s}: file is too large", .{source_path});
     // blocks are listed as lines of text, numbered the same way
-    const source = if (blocks)
+    const source = if (colorforth and listing)
+        try colorForthText(arena, colorforth_blocks.?)
+    else if (blocks)
         gasim.arrayforth.blockText(file, try arena.alloc(u8, gasim.arrayforth.blockCount(file) * 16 * 65))
     else
         file;
@@ -461,6 +463,23 @@ fn editColorForth(arena: Allocator, blocks: ColorForthBlocks, path: []const u8) 
     const editor = try arena.create(gasim.Editor);
     editor.open(blocks.bytes, blocks.count);
     return .{ .editor = editor, .path = path, .compressed = blocks.compressed };
+}
+
+/// colorForth blocks as text for a listing, 256 lines to a block, as
+/// `colorforth.line` numbers them
+fn colorForthText(arena: Allocator, blocks: ColorForthBlocks) ![]const u8 {
+    const colorforth = gasim.colorforth;
+    var text: Io.Writer.Allocating = .init(arena);
+    var block_text: Io.Writer.Allocating = .init(arena);
+    var tokens: [colorforth.cells_per_block]colorforth.Token = undefined;
+    for (0..blocks.count) |n| {
+        block_text.clearRetainingCapacity();
+        const decoded = colorforth.decode(blocks.bytes[n * colorforth.block_size ..][0..colorforth.block_size], &tokens) catch &.{};
+        try colorforth.writeText(decoded, &block_text.writer);
+        var lines = std.mem.splitScalar(u8, block_text.written(), '\n');
+        for (0..colorforth.cells_per_block) |_| try text.writer.print("{s}\n", .{lines.next() orelse ""});
+    }
+    return text.written();
 }
 
 /// Compiles colorForth blocks, loading each of `loads` in turn, in the
