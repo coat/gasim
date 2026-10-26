@@ -1,15 +1,16 @@
 //! gasim
 
 const usage =
-    \\usage: gasim [run] [options] <program.ga | program.af | program.blk>
+    \\usage: gasim [options] [program.ga | program.af | program.blk]
+    \\       gasim run [options] <program.ga | program.af | program.blk>
     \\       gasim repl [options] [program.ga | program.af | program.blk]
     \\
-    \\Opens the program in a terminal user interface, reading .af files as
-    \\arrayForth 3 source and .blk files as blocks of it. With run, or when stdin
-    \\or stdout is not a terminal, runs it instead with the console on stdin
-    \\and stdout, until every node is waiting, or one reaches a breakpoint or
-    \\makes a watched transfer. With --listing, writes the assembled program
-    \\instead.
+    \\Opens the chip in a terminal user interface, with the program loaded if
+    \\there is one, reading .af files as arrayForth 3 source and .blk files as
+    \\blocks of it. With run, or when stdin or stdout is not a terminal, runs
+    \\the program instead with the console on stdin and stdout, until every
+    \\node is waiting, or one reaches a breakpoint or makes a watched transfer.
+    \\With --listing, writes the assembled program instead.
     \\
     \\With repl, reads lines of arrayForth 3 from stdin and interprets them,
     \\to assemble code and act on the chip with the words of arrayForth 3's
@@ -66,13 +67,7 @@ pub fn main(init: std.process.Init) !void {
 
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 2) fatal(usage, .{});
-    const run_command = std.mem.eql(u8, args[1], "run");
-    const repl_command = std.mem.eql(u8, args[1], "repl");
-    // a pipe or file wants plain output rather than a user interface
-    const command: Command = if (repl_command)
-        .repl
-    else if (run_command or !try Io.File.stdin().isTty(io) or !try Io.File.stdout().isTty(io)) .run else .tui;
+    const command = commandOf(args, try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io));
 
     var layout: Chip.Layout = .ga144;
     var console_node: u16 = 0;
@@ -89,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
     var breakpoints_len: usize = 0;
     var watches: [Chip.max_watches]struct { node: u16, direction: Direction, read: bool, write: bool } = undefined;
     var watches_len: usize = 0;
-    var i: usize = if (run_command or repl_command) 2 else 1;
+    var i: usize = if (named(args)) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load")) {
@@ -153,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
             path = arg;
         } else fatal(usage, .{});
     }
-    if (path == null and command != .repl) fatal(usage, .{});
+    if (path == null and needsProgram(command, listing)) fatal(usage, .{});
     const source_path = path orelse "";
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
@@ -384,6 +379,24 @@ pub fn main(init: std.process.Init) !void {
     if (!console.used) std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
 }
 
+/// whether the arguments start with a command, run or repl
+fn named(args: []const []const u8) bool {
+    return args.len > 1 and (std.mem.eql(u8, args[1], "run") or std.mem.eql(u8, args[1], "repl"));
+}
+
+/// The command the arguments start with, or without one the terminal user
+/// interface, unless stdin or stdout is not a terminal: a pipe or file wants
+/// plain output rather than a user interface
+fn commandOf(args: []const []const u8, terminal: bool) Command {
+    if (named(args)) return if (std.mem.eql(u8, args[1], "repl")) .repl else .run;
+    return if (terminal) .tui else .run;
+}
+
+/// only the terminal user interface and the prompt start without a program
+fn needsProgram(command: Command, listing: bool) bool {
+    return command == .run or listing;
+}
+
 /// Logs what each node is waiting on, such as `node 001 waiting to read
 /// right`. Nodes waiting on several ports for code, or in ROM, as they do
 /// after reset, are counted rather than listed.
@@ -525,4 +538,18 @@ const vaxis = @import("vaxis");
 test {
     _ = repl;
     _ = tui;
+}
+
+test "the terminal user interface and the prompt start without a program" {
+    try std.testing.expectEqual(.tui, commandOf(&.{"gasim"}, true));
+    try std.testing.expectEqual(.repl, commandOf(&.{ "gasim", "repl" }, true));
+    try std.testing.expect(!needsProgram(.tui, false));
+    try std.testing.expect(!needsProgram(.repl, false));
+    // but running a program, or listing one, needs one
+    try std.testing.expectEqual(.run, commandOf(&.{ "gasim", "run" }, true));
+    try std.testing.expect(needsProgram(.run, false));
+    try std.testing.expect(needsProgram(.tui, true));
+    // as does a pipe or file, which runs it
+    try std.testing.expectEqual(.run, commandOf(&.{"gasim"}, false));
+    try std.testing.expectEqual(.repl, commandOf(&.{ "gasim", "repl" }, false));
 }

@@ -12,7 +12,8 @@ gasim examples/hello.ga
 
 This assembles the program onto a simulated 8x18 array of F18A nodes, like
 the GA144, and opens it in a terminal user interface. Nodes without a
-program wait for code on all of their ports.
+program wait for code on all of their ports. Without a program, `gasim`
+opens the chip as it is after reset, to load code from the forth panel.
 
 A console is attached to the `up` port of node 000, which faces off the
 south edge of the chip. Each word written to it is printed as a byte, and
@@ -161,9 +162,16 @@ line editing.
 
 ### Terminal user interface
 
-A map panel shows all nodes. Running nodes are green, nodes waiting on a port
-yellow, and nodes waiting for code dim. The node panel shows the selected
-node's registers, stacks, and RAM and ROM around the word it is executing.
+A map panel shows all nodes. Running nodes are green, nodes waiting on a
+port yellow, and nodes waiting for code dim. Unless the panel is small, it
+shows each node as a tile with what it is waiting on and its registers,
+scrolling to follow the selected node when they do not all fit, with arrows
+in its title for the nodes out of view. Arrows between tiles show what the
+ports between nodes are doing: green for a word that went across, yellow for
+a node waiting to read or write, and dim for one waiting for code, with none
+where the nodes on both sides wait to read. The node panel shows the
+selected node's registers, stacks, and RAM and ROM around the word it is
+executing.
 
 | Key | |
 | --- | --- |
