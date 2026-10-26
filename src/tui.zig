@@ -157,6 +157,9 @@ const Tui = struct {
     editor_count: ?usize = null,
     /// whether the editor shows blue words, which lay out the block
     show_format: bool = true,
+    /// the chip as it started, which compiling colorForth starts it from
+    /// again
+    start: ?Chip.Snapshot = null,
     /// the chip before each step or run, to go back to, allocated the first
     /// time each is needed. The `history_len` kept start from the oldest at
     /// `history_start`, and the oldest is dropped to make room. The one after
@@ -192,6 +195,7 @@ const Tui = struct {
     }
 
     fn deinit(self: *Tui) void {
+        if (self.start) |*s| s.deinit(self.gpa);
         for (self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(self.gpa);
     }
 
@@ -466,8 +470,35 @@ const Tui = struct {
         if (k.matches('U', .{})) editor.redo();
         if (k.matches('f', .{})) self.show_format = !self.show_format;
         if (k.matches('s', .{})) self.save();
+        if (k.matches('L', .{})) self.compile();
         if (k.matches('q', .{})) return self.keepOnQuit();
         return true;
+    }
+
+    /// Compiles the block being edited, and the blocks it loads, and starts
+    /// the chip again as it started, with the code compiled so far, the
+    /// block's replacing what it compiled before. An error in the block
+    /// moves the cursor to the word.
+    fn compile(self: *Tui) void {
+        const editor = self.options.colorforth.?.editor;
+        const forth = self.options.forth orelse return;
+        const start = self.start orelse return;
+        forth.session.loadColorForth(editor.contents(), @intCast(editor.block)) catch |err| {
+            const place = gasim.colorforth.place(forth.diagnostic.line);
+            if (place.block == editor.block and place.token <= editor.len) editor.cursor = place.token - 1;
+            self.message = self.printLasting("{t} at {s} in block {d}", .{ err, forth.diagnostic.token, place.block });
+            return;
+        };
+        self.remember();
+        self.chip.restore(&start);
+        const assembled = forth.session.assembled();
+        var nodes: usize = 0;
+        for (assembled.programs) |program| if (program.bin == null) {
+            self.chip.setUp(.ofProgram(program), assembled.programs) catch continue;
+            nodes += 1;
+        };
+        self.settled = false;
+        self.message = if (assembled.first_difference) |first| self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ nodes, assembled.feedback_differs, first.noted, first.found }) else self.printLasting("compiled, and started the chip again with {d} nodes' code", .{nodes});
     }
 
     /// writes the editor's blocks to their file
@@ -1388,8 +1419,8 @@ const Tui = struct {
         const hints: []const Hint = if (editor.mode == .insert)
             &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "ctrl+r y g w t v b", "color" }, .{ "esc", "done" } }
         else
-            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "s", "save" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
-        var segments: [4 + 2 * 10]vaxis.Segment = undefined;
+            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
+        var segments: [4 + 2 * 11]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = if (editor.mode == .insert)
             .{ .text = " insert ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } }
@@ -1549,6 +1580,8 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
     var tui: Tui = .init(io, gpa, chip, options);
     defer tui.deinit();
     tui.history = &history;
+    tui.start = try .init(gpa, chip.layout);
+    chip.save(&tui.start.?);
     while (true) {
         // wait for the user unless the chip has something to do
         const busy = tui.running and !tui.settled;
@@ -2252,4 +2285,53 @@ test "the colorForth editor, on a screen of its own" {
     try t.press('q');
     try std.testing.expect(try t.shows(29, "q again quits"));
     try std.testing.expect(!try t.tui.handle(.{ .key_press = .{ .codepoint = 'q', .text = "q" } }));
+}
+
+test "compiling colorForth in the editor starts the chip again with its code" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.tui.start = try .init(std.testing.allocator, t.chip.layout);
+    t.chip.save(&t.tui.start.?);
+    var programs: [2]gasim.assembler.Program = undefined;
+    var descriptors: [2]gasim.boot.Descriptor = undefined;
+    var buffer: [forth_capacity]u8 = undefined;
+    var output: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &output, .chip = &t.chip });
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    t.tui.options.forth = .{ .session = &session, .output = &output, .diagnostic = &diagnostic, .arena = arena.allocator() };
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [gasim.colorforth.block_size]u8 = @splat(0);
+    editor.open(&blocks, 1);
+    t.tui.options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
+    try t.pressWith('5', .{ .alt = true });
+
+    // echo, typed in yellow, red and green
+    try t.press('i');
+    try t.pressWith('y', .{ .ctrl = true });
+    for ("0 node 0 org ") |c| try t.press(c);
+    try t.pressWith('r', .{ .ctrl = true });
+    for ("main up b! begin @b !b end") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    try t.press('L');
+    try std.testing.expect(try t.shows(29, "with 1 nodes' code"));
+    const echo = try gasim.arrayforth.assemble("ASM[ # 0 NODE ERS # 0 org : main up b! begin @b !b again >BIN ]ASM", &diagnostic);
+    try std.testing.expectEqualSlices(gasim.Word, echo.ram[0..echo.len], t.chip.nodes[0].mem[0..echo.len]);
+
+    // an error moves the cursor to the word
+    try t.press('0');
+    try t.press('l');
+    try t.press('l');
+    try t.press('l');
+    try t.press('l');
+    try t.press('a');
+    for ("nothing") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    editor.first();
+    try t.press('L');
+    try std.testing.expect(try t.shows(29, "UnknownWord at nothing in block 0"));
+    try std.testing.expectEqualStrings("nothing", editor.current().?.text());
 }

@@ -204,6 +204,17 @@ pub fn fitsShort(value: i32) bool {
     return value >= -(1 << 26) and value < 1 << 26;
 }
 
+/// A place in blocks as a line number, for diagnostics and listings: a
+/// token of a block, counting from 1, after 256 for each block before it
+pub fn line(block: usize, token: usize) usize {
+    return block * cells_per_block + token;
+}
+
+/// the block and token of a line number from `line`
+pub fn place(at: usize) struct { block: usize, token: usize } {
+    return .{ .block = (at -| 1) / cells_per_block, .token = (at -| 1) % cells_per_block + 1 };
+}
+
 /// the number of blocks in `bytes`, counting a partial block at the end
 pub fn blockCount(bytes: []const u8) usize {
     return std.math.divCeil(usize, bytes.len, block_size) catch unreachable;
@@ -212,46 +223,62 @@ pub fn blockCount(bytes: []const u8) usize {
 /// Decodes the tokens of a block, up to the first zero cell. A block that is
 /// not colorForth source, such as compressed blocks, decodes to nonsense.
 pub fn decode(block: *const [block_size]u8, tokens: *[cells_per_block]Token) Error![]Token {
+    var reader: Reader = .{ .block = block };
     var len: usize = 0;
-    var i: usize = 0;
-    while (i < cells_per_block) {
-        const cell = cellAt(block, i);
-        i += 1;
-        if (cell == 0) break;
-        const tag: Tag = @fromBackingInt(@intCast(@as(u4, @truncate(cell))));
-        switch (tag) {
-            .execute_long, .compile_long => {
-                // a number cut off by the end of the block is zero
-                const value = if (i < cells_per_block) cellAt(block, i) else 0;
-                i += 1;
-                tokens[len] = .{ .tag = tag, .value = @bitCast(value), .hex = cell & 0x10 != 0 };
-            },
-            .execute_short, .compile_short, .feedback, .comment_number => tokens[len] = .{
-                .tag = tag,
-                .value = @as(i32, @bitCast(cell)) >> 5,
-                .hex = cell & 0x10 != 0,
-            },
-            .extension => if (len > 0 and !tokens[len - 1].tag.isNumber()) {
-                try unpack(cell, &tokens[len - 1]);
-                continue;
-            } else {
-                tokens[len] = .{ .tag = .extension };
-                try unpack(cell, &tokens[len]);
-            },
-            else => {
-                tokens[len] = .{ .tag = tag };
-                try unpack(cell, &tokens[len]);
-                if (tag == .variable) {
-                    tokens[len].value = if (i < cells_per_block) @bitCast(cellAt(block, i)) else 0;
-                    i += 1;
-                }
-            },
-        }
+    while (try reader.next()) |token| {
+        tokens[len] = token;
         len += 1;
     }
-    for (tokens[0..len]) |*token| applyCase(token);
     return tokens[0..len];
 }
+
+/// Reads the tokens of a block one at a time, as `decode` does
+pub const Reader = struct {
+    block: *const [block_size]u8,
+    /// the next cell to read
+    cell: usize = 0,
+
+    /// the next token, or null at the zero cell that ends the block
+    pub fn next(self: *Reader) Error!?Token {
+        if (self.cell == cells_per_block) return null;
+        const cell = self.take();
+        if (cell == 0) {
+            self.cell = cells_per_block;
+            return null;
+        }
+        const tag: Tag = @fromBackingInt(@intCast(@as(u4, @truncate(cell))));
+        var token: Token = .{ .tag = tag };
+        if (tag.isLong()) {
+            token.value = @bitCast(self.take());
+            token.hex = cell & 0x10 != 0;
+            return token;
+        }
+        if (tag.isShort()) {
+            token.value = @as(i32, @bitCast(cell)) >> 5;
+            token.hex = cell & 0x10 != 0;
+            return token;
+        }
+        try unpack(cell, &token);
+        if (tag == .variable) token.value = @bitCast(self.take());
+        // more characters, even for an extension without a word before it
+        while (self.cell < cells_per_block) {
+            const more = cellAt(self.block, self.cell);
+            if (more == 0 or @as(u4, @truncate(more)) != 0) break;
+            self.cell += 1;
+            try unpack(more, &token);
+        }
+        applyCase(&token);
+        return token;
+    }
+
+    /// the next cell, or zero past the end of the block, as a number cut
+    /// off by it is
+    fn take(self: *Reader) u32 {
+        if (self.cell == cells_per_block) return 0;
+        self.cell += 1;
+        return cellAt(self.block, self.cell - 1);
+    }
+};
 
 /// Encodes tokens into a block, filling the rest of it with zeros
 pub fn encode(tokens: []const Token, block: *[block_size]u8) Error!void {

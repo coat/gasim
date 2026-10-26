@@ -26,5 +26,20 @@ test "upcase.af" {
     try expectArrayForthOutput(@embedFile("upcase.af"), "Hello, World! az{`@[\n", "HELLO, WORLD! AZ{`@[\n");
 }
 
+// and in colorForth
+
+test "hello.cf" {
+    try expectColorForthOutput(@embedFile("hello.cf"), "", "Hello, world!\n");
+}
+
+test "echo.cf" {
+    try expectColorForthOutput(@embedFile("echo.cf"), "echo me\n", "echo me\n");
+}
+
+test "upcase.cf" {
+    try expectColorForthOutput(@embedFile("upcase.cf"), "Hello, World! az{`@[\n", "HELLO, WORLD! AZ{`@[\n");
+}
+
 const expectOutput = @import("gasim").Chip.expectOutput;
 const expectArrayForthOutput = @import("gasim").Chip.expectArrayForthOutput;
+const expectColorForthOutput = @import("gasim").Chip.expectColorForthOutput;
