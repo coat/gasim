@@ -8,6 +8,7 @@ pub const Port = port.Port;
 
 pub const arrayforth = @import("arrayforth.zig");
 pub const assembler = @import("assembler.zig");
+pub const colorforth = @import("colorforth.zig");
 pub const boot = @import("boot.zig");
 pub const Chip = @import("Chip.zig");
 pub const Console = @import("Console.zig");
@@ -23,6 +24,7 @@ test {
     _ = @import("boot.zig");
     _ = @import("Builder.zig");
     _ = @import("Chip.zig");
+    _ = @import("colorforth.zig");
     _ = @import("Console.zig");
     _ = @import("disassembler.zig");
     _ = @import("ga144.zig");

@@ -129,6 +129,24 @@ load block:
 $ gasim --load 2331 --load 2332 sF/pFDISK.blk
 ```
 
+### colorForth blocks
+
+`gasim blocks` writes the colorForth source in a file of blocks, as
+arrayForth 2 and colorForth keep it, as text. Each word is marked with its
+color where the color changes: `:` red, `[` yellow, `]` green, `\` cyan,
+`(` white, `@` magenta and `~` blue, with hex numbers after a `$`. Only the
+uncompressed blocks of an arrayForth 2 image, such as `OkadWork.cf`'s
+blocks 18 to 35, can be read so far.
+
+```
+$ gasim blocks --load 32 OkadWork.cf
+block 32
+(- more [macro (uses ebx
+:b \?dup ]$c38b 2, ;
+:b! ]$d88b 2, \drop ];
+...
+```
+
 ### arrayForth 3 prompt
 
 `gasim repl` is basically an  arrayForth 3 outer interpreter. Code can be

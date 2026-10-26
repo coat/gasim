@@ -4,6 +4,7 @@ const usage =
     \\usage: gasim [options] [program.ga | program.af | program.blk]
     \\       gasim run [options] <program.ga | program.af | program.blk>
     \\       gasim repl [options] [program.ga | program.af | program.blk]
+    \\       gasim blocks [--load <block>]... <source.cf>
     \\
     \\Opens the chip in a terminal user interface, with the program loaded if
     \\there is one, reading .af files as arrayForth 3 source and .blk files as
@@ -15,6 +16,9 @@ const usage =
     \\With repl, reads lines of arrayForth 3 from stdin and interprets them,
     \\to assemble code and act on the chip with the words of arrayForth 3's
     \\IDE, such as 708 NODE UPD, after loading the program if there is one.
+    \\
+    \\With blocks, writes the colorForth source in a file of blocks as text,
+    \\each block that holds any, or those --load names.
     \\
     \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
@@ -36,7 +40,8 @@ const usage =
     \\                             once every node is waiting
     \\  --load <block>             with a .blk file, the block to load (default
     \\                             0). Can be given more than once, to load
-    \\                             blocks such as configuration first.
+    \\                             blocks such as configuration first. With
+    \\                             blocks, a block to write.
     \\  --listing                  write each node's words with their
     \\                             disassembly and source lines to stdout,
     \\                             instead of running
@@ -52,7 +57,7 @@ const max_blocks_len = 64 * 1024 * 1024;
 /// the console stopped by ctrl+c
 var interruptible: ?*Console = null;
 
-const Command = enum { run, tui, repl };
+const Command = enum { run, tui, repl, blocks };
 
 /// restores the terminal from the user interface before reporting a panic
 pub const panic = std.debug.FullPanic(struct {
@@ -150,6 +155,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (path == null and needsProgram(command, listing)) fatal(usage, .{});
     const source_path = path orelse "";
+    if (command == .blocks) return writeBlocks(io, arena, source_path, loads[0..loads_len]);
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
 
@@ -307,6 +313,7 @@ pub fn main(init: std.process.Init) !void {
             .run => &stdout_file_writer.interface,
             .tui => &screen,
             .repl => &repl_writer.interface,
+            .blocks => unreachable,
         },
     };
     chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
@@ -381,20 +388,53 @@ pub fn main(init: std.process.Init) !void {
 
 /// whether the arguments start with a command, run or repl
 fn named(args: []const []const u8) bool {
-    return args.len > 1 and (std.mem.eql(u8, args[1], "run") or std.mem.eql(u8, args[1], "repl"));
+    return args.len > 1 and (std.mem.eql(u8, args[1], "run") or std.mem.eql(u8, args[1], "repl") or std.mem.eql(u8, args[1], "blocks"));
 }
 
 /// The command the arguments start with, or without one the terminal user
 /// interface, unless stdin or stdout is not a terminal: a pipe or file wants
 /// plain output rather than a user interface
 fn commandOf(args: []const []const u8, terminal: bool) Command {
-    if (named(args)) return if (std.mem.eql(u8, args[1], "repl")) .repl else .run;
+    if (named(args)) return std.meta.stringToEnum(Command, args[1]).?;
     return if (terminal) .tui else .run;
 }
 
 /// only the terminal user interface and the prompt start without a program
 fn needsProgram(command: Command, listing: bool) bool {
-    return command == .run or listing;
+    return command == .run or command == .blocks or listing;
+}
+
+/// Writes the colorForth source in the blocks of a file as text, those
+/// `loads` names or every one that is not empty
+fn writeBlocks(io: Io, arena: Allocator, path: []const u8, loads: []const u32) !void {
+    const colorforth = gasim.colorforth;
+    const file = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_blocks_len)) catch |err|
+        fatal("{s}: {t}", .{ path, err });
+    const count = colorforth.blockCount(file);
+    for (loads) |n| if (n >= count) fatal("{s}: has no block {d}", .{ path, n });
+
+    var buffer: [4096]u8 = undefined;
+    var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const writer = &file_writer.interface;
+    var tokens: [colorforth.cells_per_block]colorforth.Token = undefined;
+    var first = true;
+    for (0..count) |n| {
+        if (loads.len > 0 and std.mem.indexOfScalar(u32, loads, @intCast(n)) == null) continue;
+        // a partial block at the end of the file reads as if zeros follow
+        var block: [colorforth.block_size]u8 = @splat(0);
+        const bytes = file[n * colorforth.block_size ..][0..@min(colorforth.block_size, file.len - n * colorforth.block_size)];
+        @memcpy(block[0..bytes.len], bytes);
+        const decoded = colorforth.decode(&block, &tokens) catch |err| {
+            try writer.print("{s}block {d}: {t}\n", .{ if (first) "" else "\n", n, err });
+            first = false;
+            continue;
+        };
+        if (decoded.len == 0 and loads.len == 0) continue;
+        try writer.print("{s}block {d}\n", .{ if (first) "" else "\n", n });
+        first = false;
+        try colorforth.writeText(decoded, writer);
+    }
+    try writer.flush();
 }
 
 /// Logs what each node is waiting on, such as `node 001 waiting to read
