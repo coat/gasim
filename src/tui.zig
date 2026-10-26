@@ -555,8 +555,14 @@ const Tui = struct {
             };
             if (panel == .map) {
                 const t = self.tiles;
-                const column: u16 = @intCast(@divFloor(m.col - w.x_off, t.width + t.gap_x) + self.map_scroll.x);
-                const row: u16 = @intCast(@divFloor(m.row - w.y_off, t.height + t.gap_y) + self.map_scroll.y);
+                const x: u16 = @intCast(m.col - w.x_off);
+                const y: u16 = @intCast(m.row - w.y_off);
+                const columns, const rows = t.inView(w);
+                // nothing in the gaps between tiles, or past the last tile in view
+                if (x % (t.width + t.gap_x) >= t.width or y % (t.height + t.gap_y) >= t.height) return;
+                if (x / (t.width + t.gap_x) >= columns or y / (t.height + t.gap_y) >= rows) return;
+                const column = x / (t.width + t.gap_x) + self.map_scroll.x;
+                const row = y / (t.height + t.gap_y) + self.map_scroll.y;
                 const layout = self.chip.layout;
                 if (column < layout.columns and row < layout.rows) self.select((layout.rows - 1 - row) * layout.columns + column);
             }
@@ -818,12 +824,14 @@ const Tui = struct {
         return inside;
     }
 
+    /// Draws the nodes in view, following the selected one: as tiles of
+    /// their state and registers, with arrows between tiles showing what the
+    /// ports between them are doing, or with too little room as numbers
     fn drawMap(self: *Tui, win: vaxis.Window) void {
-        self.tiles = .fit(win, self.chip.layout);
-        if (self.tiles.height > 1) return self.drawTiles(win);
         const layout = self.chip.layout;
-        const columns = @max(win.width / cell_width, 1);
-        const rows = @max(win.height, 1);
+        const t: Tiles = .fit(win, layout);
+        self.tiles = t;
+        const columns, const rows = t.inView(win);
 
         // keep the selected node in view
         const x = self.selected % layout.columns;
@@ -832,40 +840,31 @@ const Tui = struct {
         if (x >= self.map_scroll.x + columns) self.map_scroll.x = x + 1 - columns;
         if (row < self.map_scroll.y) self.map_scroll.y = row;
         if (row >= self.map_scroll.y + rows) self.map_scroll.y = row + 1 - rows;
+        const scroll = self.map_scroll;
 
-        for (self.map_scroll.y..@min(layout.rows, self.map_scroll.y + rows)) |r| {
+        for (scroll.y..@min(layout.rows, scroll.y + rows)) |r| {
+            // north at the top
             const y = layout.rows - 1 - r;
-            for (self.map_scroll.x..@min(layout.columns, self.map_scroll.x + columns)) |c| {
+            for (scroll.x..@min(layout.columns, scroll.x + columns)) |c| {
                 const i: u16 = @intCast(y * layout.columns + c);
-                var style = statusStyle(self.chip.nodes[i].status());
-                if (i == self.selected) style.reverse = true;
-                _ = win.printSegment(.{ .text = self.print("{d:0>3}", .{layout.nodeNumber(i)}), .style = style }, .{
-                    .row_offset = @intCast(r - self.map_scroll.y),
-                    .col_offset = @intCast((c - self.map_scroll.x) * cell_width),
-                });
+                const column: u16 = @intCast((c - scroll.x) * (t.width + t.gap_x));
+                const top: u16 = @intCast((r - scroll.y) * (t.height + t.gap_y));
+                if (t.height == 1) {
+                    var style = statusStyle(self.chip.nodes[i].status());
+                    if (i == self.selected) style.reverse = true;
+                    _ = win.printSegment(.{ .text = self.print("{d:0>3}", .{layout.nodeNumber(i)}), .style = style }, .{ .row_offset = top, .col_offset = column });
+                    continue;
+                }
+                self.drawTile(win.child(.{ .x_off = column, .y_off = top, .width = t.width, .height = t.height }), i);
+                // between this tile and those east and north of it, if in view
+                if (c + 1 < @min(layout.columns, scroll.x + columns)) if (self.portArrow(i, .east)) |segment| {
+                    _ = win.printSegment(segment, .{ .row_offset = top + t.height / 2, .col_offset = column + t.width + t.gap_x / 2, .wrap = .none });
+                };
+                if (r > scroll.y) if (self.portArrow(i, .north)) |segment| {
+                    _ = win.printSegment(segment, .{ .row_offset = top - 1, .col_offset = column + t.width / 2, .wrap = .none });
+                };
             }
         }
-    }
-
-    /// Draws every node as a tile of its state and registers, with arrows
-    /// between tiles showing what the ports between them are doing
-    fn drawTiles(self: *Tui, win: vaxis.Window) void {
-        const layout = self.chip.layout;
-        const t = self.tiles;
-        self.map_scroll = .{};
-        for (0..layout.rows) |y| for (0..layout.columns) |x| {
-            const i: u16 = @intCast(y * layout.columns + x);
-            // north at the top
-            const column: u16 = @intCast(x * (t.width + t.gap_x));
-            const row: u16 = @intCast((layout.rows - 1 - y) * (t.height + t.gap_y));
-            self.drawTile(win.child(.{ .x_off = column, .y_off = row, .width = t.width, .height = t.height }), i);
-            if (x + 1 < layout.columns) if (self.portArrow(i, .east)) |segment| {
-                _ = win.printSegment(segment, .{ .row_offset = row + t.height / 2, .col_offset = column + t.width + t.gap_x / 2, .wrap = .none });
-            };
-            if (y + 1 < layout.rows) if (self.portArrow(i, .north)) |segment| {
-                _ = win.printSegment(segment, .{ .row_offset = row - 1, .col_offset = column + t.width / 2, .wrap = .none });
-            };
-        };
     }
 
     /// Draws a node's number and what it is doing, coloured by it, then its
@@ -1296,14 +1295,38 @@ const Tiles = struct {
     gap_y: u16,
 
     const compact: Tiles = .{ .width = cell_width - 1, .height = 1, .gap_x = 1, .gap_y = 0 };
+    /// big enough for a node's registers on a few lines, with arrows in the
+    /// middle of the gaps
+    const comfortable: Tiles = .{ .width = 12, .height = 4, .gap_x = 3, .gap_y = 1 };
+    const smallest: Tiles = .{ .width = 8, .height = 2, .gap_x = 3, .gap_y = 1 };
+    const largest: Tiles = .{ .width = 16, .height = 6, .gap_x = 3, .gap_y = 1 };
 
-    /// the largest tiles every node fits in `win` with, or compact ones
+    /// Tiles every node fits in `win` with, if they are at least
+    /// comfortable, and as large as fit up to the largest. Otherwise
+    /// comfortable tiles to scroll through, if at least two by two fit, or
+    /// every node in the smallest tiles or larger, and with too little room
+    /// for those, compact ones.
     fn fit(win: vaxis.Window, layout: Chip.Layout) Tiles {
         const width = win.width / layout.columns;
         const height = win.height / layout.rows;
-        // with the arrows between tiles in the middle of their gaps
-        if (width < 11 or height < 3) return compact;
-        return .{ .width = @min(width - 3, 16), .height = @min(height - 1, 6), .gap_x = 3, .gap_y = 1 };
+        const c = comfortable;
+        if (width >= c.width + c.gap_x and height >= c.height + c.gap_y) {
+            return .{ .width = @min(width - c.gap_x, largest.width), .height = @min(height - c.gap_y, largest.height), .gap_x = c.gap_x, .gap_y = c.gap_y };
+        }
+        if (win.width >= 2 * c.width + c.gap_x and win.height >= 2 * c.height + c.gap_y) return c;
+        const s = smallest;
+        if (width >= s.width + s.gap_x and height >= s.height + s.gap_y) {
+            return .{ .width = @min(width - s.gap_x, largest.width), .height = @min(height - s.gap_y, largest.height), .gap_x = s.gap_x, .gap_y = s.gap_y };
+        }
+        return compact;
+    }
+
+    /// how many columns and rows of tiles `win` shows, at least one of each
+    fn inView(self: Tiles, win: vaxis.Window) struct { u16, u16 } {
+        return .{
+            @max((win.width + self.gap_x) / (self.width + self.gap_x), 1),
+            @max((win.height + self.gap_y) / (self.height + self.gap_y), 1),
+        };
     }
 };
 
@@ -1804,6 +1827,15 @@ test "a short screen leaves text panels no rows" {
     for (8..14) |height| t.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = @intCast(height), .screen = &t.screen });
 }
 
+test "tiles are no larger than the largest" {
+    const layout: Chip.Layout = .{ .rows = 2, .columns = 3 };
+    // too short for comfortable tiles, but wide
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 300, .height = 8, .screen = undefined };
+    const tiles: Tiles = .fit(win, layout);
+    try std.testing.expectEqual(Tiles.largest.width, tiles.width);
+    try std.testing.expectEqual(3, tiles.height);
+}
+
 test "the map shows nodes as tiles when it has room" {
     var t: TestTui = .{ .chip = undefined };
     try t.initLayout("", .{ .rows = 2, .columns = 3 });
@@ -1840,4 +1872,36 @@ test "the map shows nodes as tiles when it has room" {
     // and clicking a tile selects its node
     try t.click(1 + tiles.width + tiles.gap_x + 2, 2, .press);
     try std.testing.expectEqual(chip.layout.index(101).?, t.tui.selected);
+    // but not the gap beside it
+    try t.click(1 + tiles.width, row + 1, .press);
+    try std.testing.expectEqual(chip.layout.index(101).?, t.tui.selected);
+}
+
+test "the map scrolls through tiles too large to show every node" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.tui.focus = .map;
+    try t.press('f');
+    try std.testing.expectEqual(Tiles.comfortable, t.tui.tiles);
+    // with the north edge in view, clicking the room below the last row in
+    // view selects nothing
+    for (0..7) |_| try t.press(vaxis.Key.up);
+    const selected = t.tui.selected;
+    try std.testing.expect(t.tui.windows.get(.map).?.height > 5 * 5);
+    try t.click(2, 1 + 5 * 5, .press);
+    try std.testing.expectEqual(selected, t.tui.selected);
+    for (0..7) |_| try t.press(vaxis.Key.down);
+    // eight columns of five rows fit, and node 000 at the bottom left is in
+    // view, in the fifth
+    try std.testing.expect(try t.shows(1 + 4 * 5, "000 "));
+    try std.testing.expect(!try t.shows(1, "700 "));
+
+    // the view follows the selected node to the top right
+    for (0..17) |_| try t.press(vaxis.Key.right);
+    for (0..7) |_| try t.press(vaxis.Key.up);
+    try std.testing.expectEqual(t.chip.layout.index(717).?, t.tui.selected);
+    try std.testing.expect(try t.shows(1, "717 "));
+    try std.testing.expect(try t.shows(1, "710 "));
+    try std.testing.expect(!try t.shows(1, "709 "));
 }
