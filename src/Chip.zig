@@ -717,6 +717,19 @@ pub fn expectArrayForthOutput(source: []const u8, input: []const u8, expected: [
     try expectRun(&chip, input, expected);
 }
 
+/// Compiles colorForth blocks from block 0, runs them with the console on
+/// node 000's up port, with `input`, and checks its output
+pub fn expectColorForthOutput(blocks: []const u8, input: []const u8, expected: []const u8) !void {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+
+    var programs: [8]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try arrayforth.assembleColorForth(blocks, &.{0}, &programs, &.{}, &diagnostic);
+    for (assembled.programs) |program| if (program.bin == null) try chip.setUp(.ofProgram(program), assembled.programs);
+    try expectRun(&chip, input, expected);
+}
+
 /// runs a chip with the console on node 000's up port, with `input`, and
 /// checks its output
 fn expectRun(chip: *Chip, input: []const u8, expected: []const u8) !void {

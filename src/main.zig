@@ -1,20 +1,29 @@
 //! gasim
 
 const usage =
-    \\usage: gasim [options] [program.ga | program.af | program.blk]
-    \\       gasim run [options] <program.ga | program.af | program.blk>
-    \\       gasim repl [options] [program.ga | program.af | program.blk]
+    \\usage: gasim [options] [program.ga | program.af | program.blk | source.cf]
+    \\       gasim run [options] <program.ga | program.af | program.blk | source.cf>
+    \\       gasim repl [options] [program.ga | program.af | program.blk | source.cf]
+    \\       gasim blocks [--load <block>]... <source.cf>
     \\
     \\Opens the chip in a terminal user interface, with the program loaded if
     \\there is one, reading .af files as arrayForth 3 source and .blk files as
     \\blocks of it. With run, or when stdin or stdout is not a terminal, runs
     \\the program instead with the console on stdin and stdout, until every
     \\node is waiting, or one reaches a breakpoint or makes a watched transfer.
-    \\With --listing, writes the assembled program instead.
+    \\With --listing, writes the assembled program instead. A .cf file of
+    \\colorForth blocks, such as an arrayForth 2 image, is compiled as
+    \\arrayForth 2 compiles F18 code, from block 0 or the blocks --load
+    \\names. The interface opens it in its editor instead, compiling it at
+    \\the start only with --load, and creates it if it does not exist.
     \\
     \\With repl, reads lines of arrayForth 3 from stdin and interprets them,
     \\to assemble code and act on the chip with the words of arrayForth 3's
     \\IDE, such as 708 NODE UPD, after loading the program if there is one.
+    \\
+    \\With blocks, writes the colorForth source in a file of blocks as text,
+    \\each block that holds any, or those --load names. arrayForth 2 images
+    \\are decompressed, and the kernel's blocks before block 18 left out.
     \\
     \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
@@ -34,9 +43,10 @@ const usage =
     \\                             word a node executes
     \\  --why                      with run, say what each node is waiting on
     \\                             once every node is waiting
-    \\  --load <block>             with a .blk file, the block to load (default
-    \\                             0). Can be given more than once, to load
-    \\                             blocks such as configuration first.
+    \\  --load <block>             with a .blk or .cf file, the block to load
+    \\                             (default 0). Can be given more than once, to
+    \\                             load blocks such as configuration first.
+    \\                             With blocks, a block to write.
     \\  --listing                  write each node's words with their
     \\                             disassembly and source lines to stdout,
     \\                             instead of running
@@ -52,7 +62,7 @@ const max_blocks_len = 64 * 1024 * 1024;
 /// the console stopped by ctrl+c
 var interruptible: ?*Console = null;
 
-const Command = enum { run, tui, repl };
+const Command = enum { run, tui, repl, blocks };
 
 /// restores the terminal from the user interface before reporting a panic
 pub const panic = std.debug.FullPanic(struct {
@@ -149,19 +159,26 @@ pub fn main(init: std.process.Init) !void {
         } else fatal(usage, .{});
     }
     if (path == null and needsProgram(command, listing)) fatal(usage, .{});
+    if (command == .blocks) return writeBlocks(io, arena, path.?, loads[0..loads_len]);
     const source_path = path orelse "";
+    // colorForth blocks, which the terminal user interface edits, and only
+    // compiles at the start with --load
+    const colorforth = std.mem.endsWith(u8, source_path, ".cf");
+    const compile_colorforth = colorforth and (loads_len > 0 or command != .tui);
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
 
     const blocks = std.mem.endsWith(u8, source_path, ".blk");
-    if (loads_len > 0 and !blocks) fatal("--load needs a .blk file of blocks", .{});
+    if (loads_len > 0 and !blocks and !colorforth) fatal("--load needs a .blk or .cf file of blocks", .{});
     if (loads_len == 0) {
         loads[0] = 0;
         loads_len = 1;
     }
     // one spare byte tells a full buffer apart from a longer file
     var source_buffer: [max_source_len + 1]u8 = undefined;
-    const file = if (path == null)
+    // the editor creates a file that does not exist yet
+    const colorforth_blocks: ?ColorForthBlocks = if (colorforth) try readColorForth(io, arena, source_path, command == .tui) else null;
+    const file = if (path == null or colorforth)
         ""
     else if (blocks)
         Io.Dir.cwd().readFileAlloc(io, source_path, arena, .limited(max_blocks_len)) catch |err|
@@ -171,7 +188,9 @@ pub fn main(init: std.process.Init) !void {
             fatal("{s}: {t}", .{ source_path, err });
     if (!blocks and file.len > max_source_len) fatal("{s}: file is too large", .{source_path});
     // blocks are listed as lines of text, numbered the same way
-    const source = if (blocks)
+    const source = if (colorforth and listing)
+        try colorForthText(arena, colorforth_blocks.?)
+    else if (blocks)
         gasim.arrayforth.blockText(file, try arena.alloc(u8, gasim.arrayforth.blockCount(file) * 16 * 65))
     else
         file;
@@ -203,14 +222,16 @@ pub fn main(init: std.process.Init) !void {
         });
         break :session session;
     } else null;
-    const ga = path != null and !blocks and !std.mem.endsWith(u8, source_path, ".af");
-    const assembled = (if (session != null and !ga)
+    const ga = path != null and !blocks and !colorforth and !std.mem.endsWith(u8, source_path, ".af");
+    const assembled = (if (colorforth)
+        compileColorForth(session, colorforth_blocks.?, if (compile_colorforth) loads[0..loads_len] else &.{}, program_buffer, descriptor_buffer, &diagnostic)
+    else if (session != null and !ga)
         loadSession(arena, session.?, &diagnostic, file, blocks, loads[0..loads_len], path != null)
     else if (blocks)
         gasim.arrayforth.assembleBlocks(file, loads[0..loads_len], program_buffer, descriptor_buffer, &diagnostic)
     else
         assemble(source_path, file, program_buffer, descriptor_buffer, &diagnostic)) catch |err| {
-        const where: Where = .{ .path = source_path, .line = diagnostic.line, .blocks = blocks };
+        const where: Where = .{ .path = source_path, .line = diagnostic.line, .kind = if (blocks) .blocks else if (colorforth) .colorforth else .text };
         switch (err) {
             error.TooManyNodes => fatal("{f}: more nodes than a {d}x{d} layout has at '{s}'", .{ where, layout.rows, layout.columns, diagnostic.token }),
             error.NoSuchBlock => if (diagnostic.line == 0) fatal("{s}: has fewer blocks than --load needs", .{source_path}),
@@ -219,6 +240,12 @@ pub fn main(init: std.process.Init) !void {
         fatal("{f}: {t} at '{s}'", .{ where, err, diagnostic.token });
     };
     const programs = assembled.programs;
+    if (assembled.first_difference) |first| std.log.warn("{f}: arrayForth 2 noted {x:0>3} here, where gasim is at {x:0>3}, and {d} more gray numbers differ", .{
+        Where{ .path = source_path, .line = first.line, .kind = .colorforth },
+        first.noted,
+        first.found,
+        assembled.feedback_differs - 1,
+    });
     if (listing) {
         var buffer: [4096]u8 = undefined;
         var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
@@ -251,7 +278,7 @@ pub fn main(init: std.process.Init) !void {
         for (descriptor.loads[0..descriptor.load_count]) |part| {
             const program = gasim.boot.findBin(programs, part.bin) orelse continue;
             if (program.rom_word) |word|
-                fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .blocks = blocks }, word.token });
+                fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .kind = if (blocks) .blocks else if (colorforth) .colorforth else .text }, word.token });
         }
         if (descriptor.p & 0x180 == 0x080)
             fatal("{s}: node {d:0>3} starts in ROM at {x:0>3}, which is not loaded (see --rom)", .{ source_path, descriptor.node, descriptor.p });
@@ -307,6 +334,7 @@ pub fn main(init: std.process.Init) !void {
             .run => &stdout_file_writer.interface,
             .tui => &screen,
             .repl => &repl_writer.interface,
+            .blocks => unreachable,
         },
     };
     chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
@@ -325,6 +353,7 @@ pub fn main(init: std.process.Init) !void {
         .console_node = console_node,
         .console_port = console_port,
         .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
+        .colorforth = if (colorforth_blocks) |cf| try editColorForth(arena, cf, source_path) else null,
     });
 
     var stderr_buffer: [4096]u8 = undefined;
@@ -381,20 +410,135 @@ pub fn main(init: std.process.Init) !void {
 
 /// whether the arguments start with a command, run or repl
 fn named(args: []const []const u8) bool {
-    return args.len > 1 and (std.mem.eql(u8, args[1], "run") or std.mem.eql(u8, args[1], "repl"));
+    return args.len > 1 and (std.mem.eql(u8, args[1], "run") or std.mem.eql(u8, args[1], "repl") or std.mem.eql(u8, args[1], "blocks"));
 }
 
 /// The command the arguments start with, or without one the terminal user
 /// interface, unless stdin or stdout is not a terminal: a pipe or file wants
 /// plain output rather than a user interface
 fn commandOf(args: []const []const u8, terminal: bool) Command {
-    if (named(args)) return if (std.mem.eql(u8, args[1], "repl")) .repl else .run;
+    if (named(args)) return std.meta.stringToEnum(Command, args[1]).?;
     return if (terminal) .tui else .run;
 }
 
 /// only the terminal user interface and the prompt start without a program
 fn needsProgram(command: Command, listing: bool) bool {
-    return command == .run or listing;
+    return command == .run or command == .blocks or listing;
+}
+
+/// the blocks an arrayForth 2 image has, which a file opened in the editor
+/// can grow to
+const editor_blocks = 1440;
+
+/// a file of colorForth blocks, with room to grow
+const ColorForthBlocks = struct {
+    bytes: []u8,
+    /// blocks in the file
+    count: usize,
+    /// the file was a compressed arrayForth 2 image
+    compressed: bool,
+};
+
+/// Reads a file of colorForth blocks, decompressing an arrayForth 2 image,
+/// or none if the file does not exist yet and `new` allows that
+fn readColorForth(io: Io, arena: Allocator, path: []const u8, new: bool) !ColorForthBlocks {
+    const colorforth = gasim.colorforth;
+    const read = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_blocks_len)) catch |err| switch (err) {
+        error.FileNotFound => if (new) "" else fatal("{s}: {t}", .{ path, err }),
+        else => fatal("{s}: {t}", .{ path, err }),
+    };
+    const compressed = colorforth.compressedBlocks(read);
+    const count = compressed orelse colorforth.blockCount(read);
+    if (count * colorforth.block_size > max_blocks_len) fatal("{s}: has too many blocks", .{path});
+    const bytes = try arena.alloc(u8, @max(count, editor_blocks) * colorforth.block_size);
+    @memset(bytes, 0);
+    if (compressed != null) {
+        colorforth.decompress(read, bytes[0 .. count * colorforth.block_size]) catch |err| fatal("{s}: {t}", .{ path, err });
+    } else @memcpy(bytes[0..read.len], read);
+    return .{ .bytes = bytes, .count = count, .compressed = compressed != null };
+}
+
+/// an editor on colorForth blocks, which compiling in the editor reads
+fn editColorForth(arena: Allocator, blocks: ColorForthBlocks, path: []const u8) !tui.ColorForth {
+    const editor = try arena.create(gasim.Editor);
+    editor.open(blocks.bytes, blocks.count);
+    return .{ .editor = editor, .path = path, .compressed = blocks.compressed };
+}
+
+/// colorForth blocks as text for a listing, 256 lines to a block, as
+/// `colorforth.line` numbers them
+fn colorForthText(arena: Allocator, blocks: ColorForthBlocks) ![]const u8 {
+    const colorforth = gasim.colorforth;
+    var text: Io.Writer.Allocating = .init(arena);
+    var block_text: Io.Writer.Allocating = .init(arena);
+    var tokens: [colorforth.cells_per_block]colorforth.Token = undefined;
+    for (0..blocks.count) |n| {
+        block_text.clearRetainingCapacity();
+        const decoded = colorforth.decode(blocks.bytes[n * colorforth.block_size ..][0..colorforth.block_size], &tokens) catch &.{};
+        try colorforth.writeText(decoded, &block_text.writer);
+        var lines = std.mem.splitScalar(u8, block_text.written(), '\n');
+        for (0..colorforth.cells_per_block) |_| try text.writer.print("{s}\n", .{lines.next() orelse ""});
+    }
+    return text.written();
+}
+
+/// Compiles colorForth blocks, loading each of `loads` in turn, in the
+/// session if there is one, as the terminal user interface goes on to load
+/// more
+fn compileColorForth(
+    session: ?*gasim.arrayforth.Session,
+    blocks: ColorForthBlocks,
+    loads: []const u32,
+    programs: []assembler.Program,
+    descriptors: []gasim.boot.Descriptor,
+    diagnostic: *assembler.Diagnostic,
+) gasim.arrayforth.Error!gasim.arrayforth.Assembled {
+    const file = blocks.bytes[0 .. blocks.count * gasim.colorforth.block_size];
+    const s = session orelse return gasim.arrayforth.assembleColorForth(file, loads, programs, descriptors, diagnostic);
+    for (loads) |block| try s.loadColorForth(file, block);
+    return s.assembled();
+}
+
+/// Writes the colorForth source in the blocks of a file as text, those
+/// `loads` names or every one that is not empty
+fn writeBlocks(io: Io, arena: Allocator, path: []const u8, loads: []const u32) !void {
+    const colorforth = gasim.colorforth;
+    const read = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_blocks_len)) catch |err|
+        fatal("{s}: {t}", .{ path, err });
+    // arrayForth 2 images compress all but their first blocks
+    const file = if (colorforth.compressedBlocks(read)) |blocks| file: {
+        if (blocks * colorforth.block_size > max_blocks_len) fatal("{s}: has too many blocks", .{path});
+        const file = try arena.alloc(u8, blocks * colorforth.block_size);
+        colorforth.decompress(read, file) catch |err| fatal("{s}: {t}", .{ path, err });
+        break :file file;
+    } else read;
+    // and the kernel's code is in the blocks before their source
+    const first: usize = if (colorforth.isImage(file)) colorforth.header_block else 0;
+    const count = colorforth.blockCount(file);
+    for (loads) |n| if (n >= count) fatal("{s}: has no block {d}", .{ path, n });
+
+    var buffer: [4096]u8 = undefined;
+    var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const writer = &file_writer.interface;
+    var tokens: [colorforth.cells_per_block]colorforth.Token = undefined;
+    var separate = false;
+    for (0..count) |n| {
+        if (if (loads.len > 0) std.mem.indexOfScalar(u32, loads, @intCast(n)) == null else n < first) continue;
+        // a partial block at the end of the file reads as if zeros follow
+        var block: [colorforth.block_size]u8 = @splat(0);
+        const bytes = file[n * colorforth.block_size ..][0..@min(colorforth.block_size, file.len - n * colorforth.block_size)];
+        @memcpy(block[0..bytes.len], bytes);
+        const decoded = colorforth.decode(&block, &tokens) catch |err| {
+            try writer.print("{s}block {d}: {t}\n", .{ if (separate) "\n" else "", n, err });
+            separate = true;
+            continue;
+        };
+        if (decoded.len == 0 and loads.len == 0) continue;
+        try writer.print("{s}block {d}\n", .{ if (separate) "\n" else "", n });
+        separate = true;
+        try colorforth.writeText(decoded, writer);
+    }
+    try writer.flush();
 }
 
 /// Logs what each node is waiting on, such as `node 001 waiting to read
@@ -494,11 +638,17 @@ fn loadSession(
 const Where = struct {
     path: []const u8,
     line: usize,
-    blocks: bool,
+    kind: enum { text, blocks, colorforth },
 
     pub fn format(self: Where, writer: *Io.Writer) Io.Writer.Error!void {
-        if (!self.blocks) return writer.print("{s}:{d}", .{ self.path, self.line });
-        try writer.print("{s}: block {d} line {d}", .{ self.path, (self.line -| 1) / 16, (self.line -| 1) % 16 });
+        switch (self.kind) {
+            .text => try writer.print("{s}:{d}", .{ self.path, self.line }),
+            .blocks => try writer.print("{s}: block {d} line {d}", .{ self.path, (self.line -| 1) / 16, (self.line -| 1) % 16 }),
+            .colorforth => {
+                const place = gasim.colorforth.place(self.line);
+                try writer.print("{s}: block {d} word {d}", .{ self.path, place.block, place.token });
+            },
+        }
     }
 };
 

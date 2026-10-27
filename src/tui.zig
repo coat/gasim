@@ -2,6 +2,7 @@
 //! its nodes, the registers, stacks and memory of the selected node, the
 //! console, and arrayForth 3 typed at the chip with the words of its IDE.
 //! Panels can be hidden, zoomed to fill the screen, resized and scrolled.
+//! A screen of its own edits colorForth blocks, with vim-like keys.
 
 /// bytes of console output kept for display
 pub const console_capacity = 16 * 1024;
@@ -15,6 +16,17 @@ pub const Options = struct {
     console_port: Direction,
     /// arrayForth 3 typed into the forth panel, if it is shown
     forth: ?Forth = null,
+    /// colorForth blocks to edit, if a file was opened
+    colorforth: ?ColorForth = null,
+};
+
+pub const ColorForth = struct {
+    editor: *Editor,
+    /// where the blocks are saved
+    path: []const u8,
+    /// the file was a compressed arrayForth 2 image, which is saved
+    /// uncompressed
+    compressed: bool,
 };
 
 pub const Forth = struct {
@@ -58,6 +70,9 @@ const memory_rows = 2 * 65;
 
 const Panel = enum { map, console, forth, node };
 
+/// the chip's panels, or the colorForth editor
+const Screen = enum { chip, editor };
+
 /// the border between the left panels and the node panel, or between the
 /// map and the console
 const Border = enum { columns, rows };
@@ -88,6 +103,7 @@ const Tui = struct {
     settled: bool = false,
     /// index of the selected node
     selected: u16,
+    screen: Screen = .chip,
     focus: Panel = .map,
     shown: std.EnumSet(Panel) = .full,
     zoomed: ?Panel = null,
@@ -132,6 +148,18 @@ const Tui = struct {
     message_buffer: [64]u8 = undefined,
     /// the next key chooses a port of the selected node to watch
     choosing_watch: bool = false,
+    /// quitting was asked for with unsaved blocks, and asking again quits
+    quit_asked: bool = false,
+    quit_confirmed: bool = false,
+    /// the first row of the editor's block in view
+    editor_scroll: u16 = 0,
+    /// a number typed in the editor, such as a block to go to
+    editor_count: ?usize = null,
+    /// whether the editor shows blue words, which lay out the block
+    show_format: bool = true,
+    /// the chip as it started, which compiling colorForth starts it from
+    /// again
+    start: ?Chip.Snapshot = null,
     /// the chip before each step or run, to go back to, allocated the first
     /// time each is needed. The `history_len` kept start from the oldest at
     /// `history_start`, and the oldest is dropped to make room. The one after
@@ -158,10 +186,16 @@ const Tui = struct {
     fn init(io: Io, gpa: Allocator, chip: *Chip, options: Options) Tui {
         var tui: Tui = .{ .io = io, .gpa = gpa, .chip = chip, .options = options, .selected = chip.layout.index(options.console_node) orelse 0 };
         if (options.forth == null) tui.shown.remove(.forth);
+        // a file of colorForth was opened to edit it
+        if (options.colorforth) |cf| {
+            tui.screen = .editor;
+            if (cf.compressed) tui.message = "decompressed, and saved uncompressed";
+        }
         return tui;
     }
 
     fn deinit(self: *Tui) void {
+        if (self.start) |*s| s.deinit(self.gpa);
         for (self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(self.gpa);
     }
 
@@ -223,17 +257,27 @@ const Tui = struct {
         switch (event) {
             .key_press => |k| {
                 self.message = null;
+                self.quit_confirmed = self.quit_asked;
+                self.quit_asked = false;
                 // a key ends moving a border by tapping
                 self.dragging = null;
-                if (k.matches('c', .{ .ctrl = true })) return false;
+                if (k.matches('c', .{ .ctrl = true })) return self.keepOnQuit();
                 // a digit with alt, or with ctrl where the terminal reports it,
                 // focuses a panel, even from the panels that take text
                 for ([_]Panel{ .map, .console, .node, .forth }, "1234") |panel, digit| {
                     if (k.matches(digit, .{ .alt = true }) or k.matches(digit, .{ .ctrl = true })) {
+                        self.screen = .chip;
                         self.focusPanel(panel);
                         return true;
                     }
                 }
+                if (k.matches('5', .{ .alt = true }) or k.matches('5', .{ .ctrl = true })) {
+                    if (self.options.colorforth == null) {
+                        self.message = "open a .cf file to edit colorForth";
+                    } else self.screen = .editor;
+                    return true;
+                }
+                if (self.screen == .editor) return self.editorKey(k);
                 if (self.focus == .console and try self.consoleKey(k)) return true;
                 if (self.focus == .forth and try self.forthKey(k)) return true;
                 return self.key(k);
@@ -251,7 +295,7 @@ const Tui = struct {
             self.chooseWatch(k);
             return true;
         }
-        if (k.matches('q', .{})) return false;
+        if (k.matches('q', .{})) return self.keepOnQuit();
         // matching text would take tab for shift+tab too
         if (k.codepoint == vaxis.Key.tab) self.cycleFocus(if (k.mods.shift) -1 else 1);
         if (k.matches(vaxis.Key.escape, .{})) self.zoomed = null;
@@ -336,6 +380,137 @@ const Tui = struct {
         // north is up
         if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{}) and y + 1 < layout.rows) self.select(self.selected + layout.columns);
         if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{}) and y > 0) self.select(self.selected - layout.columns);
+    }
+
+    /// Whether to keep going rather than quit, which with blocks not saved
+    /// takes asking twice
+    fn keepOnQuit(self: *Tui) bool {
+        const cf = self.options.colorforth orelse return false;
+        if (self.quit_confirmed or !cf.editor.unsaved()) return false;
+        self.quit_asked = true;
+        self.message = "blocks are not saved: s in the editor saves them, and q again quits";
+        return true;
+    }
+
+    /// Handles keys in the colorForth editor, returning false to quit
+    fn editorKey(self: *Tui, k: vaxis.Key) !bool {
+        const editor = self.options.colorforth.?.editor;
+        const keep = self.editKey(editor, k) catch |err| {
+            self.message = switch (err) {
+                error.BlockFull => "the block is full",
+                error.ReadOnly => "this block is not colorForth source, so it cannot be edited",
+                error.InvalidWord => "colorForth has no such character here, or names a variable in one cell",
+                error.NumberOutOfRange => "a white number fits in 27 bits",
+                error.HexWord => "a hex number can only be yellow, green or white",
+                error.NoSuchBlock => "there is no such block",
+            };
+            return true;
+        };
+        return keep;
+    }
+
+    fn editKey(self: *Tui, editor: *Editor, k: vaxis.Key) Editor.Error!bool {
+        // a color with ctrl, as it is typed or afterwards
+        for ("rygwtvb", [_]Color{ .red, .yellow, .green, .white, .cyan, .magenta, .blue }) |letter, color| {
+            if (k.matches(letter, .{ .ctrl = true })) {
+                try editor.setColor(color);
+                return true;
+            }
+        }
+        if (k.matches('s', .{ .ctrl = true })) {
+            try editor.escape();
+            self.save();
+            return true;
+        }
+
+        if (editor.mode == .insert) {
+            if (k.matches(vaxis.Key.escape, .{})) {
+                try editor.escape();
+            } else if (k.matches(vaxis.Key.enter, .{})) {
+                try editor.enter();
+            } else if (k.matches(vaxis.Key.backspace, .{})) {
+                editor.backspace();
+            } else if (k.text) |text| {
+                for (text) |c| if (c == ' ') try editor.space() else if (c > ' ' and c < 0x7f) try editor.typeChar(c);
+            }
+            return true;
+        }
+
+        // a count typed before a key, such as a block to go to before g
+        if (k.text) |text| if (text.len == 1 and std.ascii.isDigit(text[0]) and (text[0] != '0' or self.editor_count != null)) {
+            self.editor_count = (self.editor_count orelse 0) *| 10 +| (text[0] - '0');
+            return true;
+        };
+        const count = self.editor_count;
+        self.editor_count = null;
+
+        // a color with shift
+        for ("RYGWCMB", [_]Color{ .red, .yellow, .green, .white, .cyan, .magenta, .blue }) |letter, color| {
+            if (k.matches(letter, .{})) try editor.setColor(color);
+        }
+        if (k.matchesAny(&.{ vaxis.Key.left, 'h', 'b' }, .{})) editor.left();
+        if (k.matchesAny(&.{ vaxis.Key.right, 'l', 'w' }, .{})) editor.right();
+        if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) editor.nextDefinition();
+        if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) editor.previousDefinition();
+        if (k.matchesAny(&.{ vaxis.Key.home, '0' }, .{})) editor.first();
+        if (k.matchesAny(&.{ vaxis.Key.end, '$' }, .{})) editor.last();
+        if (k.matchesAny(&.{ vaxis.Key.page_down, ']' }, .{})) try editor.goTo(editor.block + 1);
+        if (k.matchesAny(&.{ vaxis.Key.page_up, '[' }, .{}) and editor.block > 0) try editor.goTo(editor.block - 1);
+        if (k.matches('g', .{})) if (count) |block| try editor.goTo(block) else editor.first();
+        if (k.matches('i', .{})) try editor.insert(false);
+        if (k.matches('a', .{})) try editor.insert(true);
+        if (k.matches('o', .{})) try editor.openLine(false);
+        if (k.matches('O', .{})) try editor.openLine(true);
+        if (k.matches('x', .{})) try editor.delete(false);
+        if (k.matches('X', .{})) try editor.delete(true);
+        if (k.matches('y', .{})) editor.yank();
+        if (k.matches('p', .{})) try editor.put(true);
+        if (k.matches('P', .{})) try editor.put(false);
+        if (k.matches('u', .{})) editor.undo();
+        if (k.matches('U', .{})) editor.redo();
+        if (k.matches('f', .{})) self.show_format = !self.show_format;
+        if (k.matches('s', .{})) self.save();
+        if (k.matches('L', .{})) self.compile();
+        if (k.matches('q', .{})) return self.keepOnQuit();
+        return true;
+    }
+
+    /// Compiles the block being edited, and the blocks it loads, and starts
+    /// the chip again as it started, with the code compiled so far, the
+    /// block's replacing what it compiled before. An error in the block
+    /// moves the cursor to the word.
+    fn compile(self: *Tui) void {
+        const editor = self.options.colorforth.?.editor;
+        const forth = self.options.forth orelse return;
+        const start = self.start orelse return;
+        forth.session.loadColorForth(editor.contents(), @intCast(editor.block)) catch |err| {
+            const place = gasim.colorforth.place(forth.diagnostic.line);
+            if (place.block == editor.block and place.token <= editor.len) editor.cursor = place.token - 1;
+            self.message = self.printLasting("{t} at {s} in block {d}", .{ err, forth.diagnostic.token, place.block });
+            return;
+        };
+        self.remember();
+        self.chip.restore(&start);
+        const assembled = forth.session.assembled();
+        var nodes: usize = 0;
+        for (assembled.programs) |program| if (program.bin == null) {
+            self.chip.setUp(.ofProgram(program), assembled.programs) catch continue;
+            nodes += 1;
+        };
+        self.settled = false;
+        self.message = if (assembled.first_difference) |first| self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ nodes, assembled.feedback_differs, first.noted, first.found }) else self.printLasting("compiled, and started the chip again with {d} nodes' code", .{nodes});
+    }
+
+    /// writes the editor's blocks to their file
+    fn save(self: *Tui) void {
+        const cf = self.options.colorforth.?;
+        const contents = cf.editor.contents();
+        Io.Dir.cwd().writeFile(self.io, .{ .sub_path = cf.path, .data = contents }) catch |err| {
+            self.message = self.printLasting("cannot save {s}: {t}", .{ cf.path, err });
+            return;
+        };
+        cf.editor.saved();
+        self.message = self.printLasting("saved {d} blocks", .{contents.len / gasim.colorforth.block_size});
     }
 
     /// Handles keys typed into the console, returning false for keys it
@@ -773,6 +948,7 @@ const Tui = struct {
             _ = win.printSegment(.{ .text = "The terminal is too small" }, .{});
             return;
         }
+        if (self.screen == .editor) return self.drawEditor(win);
 
         const layout = self.chip.layout;
         const body_height = win.height - 1;
@@ -1166,6 +1342,109 @@ const Tui = struct {
         }
     }
 
+    /// Draws the block being edited, with its tokens in their colors and
+    /// laid out as colorForth shows them
+    fn drawEditor(self: *Tui, win: vaxis.Window) void {
+        const cf = self.options.colorforth.?;
+        const editor = cf.editor;
+        const body_height = win.height - 1;
+        const inside = win.child(.{ .height = body_height, .border = .{ .where = .all, .style = .{ .fg = .{ .index = 6 } } } });
+        const title = self.print("5 colorforth  block {d}{s}  {s}", .{ editor.block, if (editor.unsaved()) " +" else "", std.fs.path.basename(cf.path) });
+        _ = win.child(.{ .x_off = 2, .width = win.width -| 3, .height = 1 }).printSegment(.{ .text = title, .style = .{ .bold = true } }, .{ .wrap = .none });
+
+        if (editor.read_only) {
+            _ = inside.printSegment(.{ .text = "This block is not colorForth source, such as the kernel of an arrayForth 2 image, so it cannot be edited.", .style = colors.dim }, .{});
+        } else if (editor.len == 0) {
+            _ = inside.printSegment(.{ .text = "An empty block: i to type into it", .style = colors.dim }, .{});
+        } else {
+            // keep the cursor in view
+            const row = self.layoutBlock(inside, false);
+            if (row < self.editor_scroll) self.editor_scroll = row;
+            if (row >= self.editor_scroll + inside.height) self.editor_scroll = row + 1 - inside.height;
+            _ = self.layoutBlock(inside, true);
+        }
+        self.drawEditorStatus(win.child(.{ .y_off = body_height, .height = 1 }));
+    }
+
+    /// Lays out the block's tokens in `win`, from the row scrolled to,
+    /// drawing them if `drawing`, and returns the row of the cursor
+    fn layoutBlock(self: *Tui, win: vaxis.Window, drawing: bool) u16 {
+        const editor = self.options.colorforth.?.editor;
+        var x: u16 = 0;
+        var y: u16 = 0;
+        var cursor_row: u16 = 0;
+        for (editor.tokens[0..editor.len], 0..) |*token, i| {
+            if (i > 0 and editor.startsLine(i) and x > 0) {
+                x = 0;
+                y += 1;
+            }
+            const typing = editor.mode == .insert and i == editor.cursor;
+            const text = if (typing) token.text() else self.print("{f}", .{token.*});
+            const value = if (token.tag == .variable) self.print(" {d}", .{token.value}) else "";
+            const hidden = token.tag == .format and !self.show_format and !typing;
+            const width: u16 = @intCast(@min(text.len + value.len, win.width));
+            if (!hidden and x > 0 and x + width > win.width) {
+                x = 0;
+                y += 1;
+            }
+            if (i == editor.cursor) cursor_row = y;
+            if (drawing and !hidden and y >= self.editor_scroll and y - self.editor_scroll < win.height) {
+                const row = y - self.editor_scroll;
+                var style = tokenStyle(token.tag.color());
+                if (i == editor.cursor) {
+                    if (typing) style.ul_style = .single else style.reverse = true;
+                }
+                _ = win.print(&.{
+                    .{ .text = text, .style = style },
+                    .{ .text = value, .style = tokenStyle(.green) },
+                }, .{ .row_offset = row, .col_offset = x, .wrap = .none });
+                if (typing) win.showCursor(@min(x + text.len, win.width - 1), row);
+            }
+            if (!hidden) x += width + 1;
+            if (token.tag == .format and !typing) {
+                if (std.mem.eql(u8, token.text(), "cr")) {
+                    x = 0;
+                    y += 1;
+                } else if (std.mem.eql(u8, token.text(), "br")) {
+                    x = 0;
+                    y += 2;
+                }
+            }
+        }
+        return cursor_row;
+    }
+
+    fn drawEditorStatus(self: *Tui, win: vaxis.Window) void {
+        const editor = self.options.colorforth.?.editor;
+        const hints: []const Hint = if (editor.mode == .insert)
+            &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "ctrl+r y g w t v b", "color" }, .{ "esc", "done" } }
+        else
+            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
+        var segments: [4 + 2 * 11]vaxis.Segment = undefined;
+        var len: usize = 0;
+        segments[len] = if (editor.mode == .insert)
+            .{ .text = " insert ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } }
+        else
+            .{ .text = " normal ", .style = .{ .reverse = true, .bold = true } };
+        len += 1;
+        segments[len] = .{ .text = self.print(" {d}/{d} cells ", .{ editor.cells(), gasim.colorforth.cells_per_block }), .style = colors.dim };
+        len += 1;
+        if (self.editor_count) |count| {
+            segments[len] = .{ .text = self.print(" {d} ", .{count}), .style = colors.label };
+            len += 1;
+        }
+        if (self.message) |message| {
+            segments[len] = .{ .text = self.print(" {s} ", .{message}), .style = colors.literal };
+            len += 1;
+        }
+        for (hints) |hint| {
+            segments[len] = .{ .text = self.print(" {s}", .{hint[0]}), .style = colors.label };
+            segments[len + 1] = .{ .text = self.print(" {s} ", .{hint[1]}) };
+            len += 2;
+        }
+        _ = win.print(segments[0..len], .{ .wrap = .none });
+    }
+
     fn drawStatus(self: *Tui, win: vaxis.Window) void {
         // reversed, so the text takes the theme's background colour
         const state: vaxis.Segment = if (!self.running)
@@ -1180,7 +1459,7 @@ const Tui = struct {
             .forth => &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-4", "panels" }, .{ "esc", "map" } },
             .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
         };
-        var segments: [4 + 2 * 10]vaxis.Segment = undefined;
+        var segments: [4 + 2 * 11]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = state;
         len += 1;
@@ -1193,6 +1472,11 @@ const Tui = struct {
         for (hints) |hint| {
             segments[len] = .{ .text = self.print(" {s}", .{hint[0]}), .style = colors.label };
             segments[len + 1] = .{ .text = self.print(" {s} ", .{hint[1]}) };
+            len += 2;
+        }
+        if (self.options.colorforth != null and self.focus == .map) {
+            segments[len] = .{ .text = " alt+5", .style = colors.label };
+            segments[len + 1] = .{ .text = " colorforth " };
             len += 2;
         }
         _ = win.print(segments[0..len], .{ .wrap = .none });
@@ -1247,6 +1531,21 @@ fn memoryRow(address: Address) ?u16 {
     return if (address.rom) 65 + 1 + i else 1 + i;
 }
 
+/// how a token in a color is drawn, with white in the terminal's own color
+fn tokenStyle(color: Color) vaxis.Style {
+    return switch (color) {
+        .red => .{ .fg = .{ .index = 1 }, .bold = true },
+        .yellow => .{ .fg = .{ .index = 3 } },
+        .green => .{ .fg = .{ .index = 2 } },
+        .cyan => .{ .fg = .{ .index = 6 } },
+        .white => .{},
+        .magenta => .{ .fg = .{ .index = 5 } },
+        .gray => .{ .fg = .{ .index = 8 } },
+        .blue => .{ .fg = .{ .index = 4 } },
+        .none => .{ .dim = true },
+    };
+}
+
 fn statusStyle(s: Computer.Status) vaxis.Style {
     return switch (s) {
         .running => .{ .fg = .{ .index = 2 }, .bold = true },
@@ -1281,6 +1580,8 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
     var tui: Tui = .init(io, gpa, chip, options);
     defer tui.deinit();
     tui.history = &history;
+    tui.start = try .init(gpa, chip.layout);
+    chip.save(&tui.start.?);
     while (true) {
         // wait for the user unless the chip has something to do
         const busy = tui.running and !tui.settled;
@@ -1742,8 +2043,10 @@ const Address = gasim.Address;
 const Chip = gasim.Chip;
 const Computer = gasim.Computer;
 const Console = gasim.Console;
+const Color = gasim.colorforth.Color;
 const Diagnostic = gasim.assembler.Diagnostic;
 const Direction = gasim.Direction;
+const Editor = gasim.Editor;
 const Instruction = gasim.Instruction;
 const Word = gasim.Word;
 const disassembler = gasim.disassembler;
@@ -1941,4 +2244,94 @@ test "the map scrolls through tiles too large to show every node" {
     try std.testing.expect(!try t.shows(1, "709 "));
     try std.testing.expectEqualStrings("↓", t.screen.readCell(after_title, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("←", t.screen.readCell(after_title + 1, 0).?.char.grapheme);
+}
+
+test "the colorForth editor, on a screen of its own" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [2 * gasim.colorforth.block_size]u8 = @splat(0);
+    editor.open(&blocks, 2);
+    t.tui.options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
+    t.draw();
+
+    try std.testing.expect(try t.shows(0, "1 chip"));
+    try t.pressWith('5', .{ .alt = true });
+    try std.testing.expect(try t.shows(0, "5 colorforth  block 0  test.cf"));
+    try std.testing.expect(try t.shows(1, "An empty block"));
+    // typing a definition, and making its last word yellow
+    for ("iinc 1 + ;") |c| try t.press(c);
+    try std.testing.expect(try t.shows(29, "insert"));
+    try t.pressWith('y', .{ .ctrl = true });
+    try t.press(vaxis.Key.escape);
+    try std.testing.expect(try t.shows(1, "inc 1 + ;"));
+    try std.testing.expectEqual(.execute, editor.tokens[3].tag);
+    try std.testing.expect(try t.shows(0, "block 0 +"));
+    try std.testing.expect(try t.shows(29, "4/256 cells"));
+    // a count before g goes to a block, rather than the keys of the map
+    try t.press('1');
+    try t.press('g');
+    try std.testing.expect(try t.shows(0, "block 1 +"));
+    try std.testing.expect(t.tui.shown.contains(.map));
+
+    // and back to the chip, until alt+5 again
+    try t.pressWith('1', .{ .alt = true });
+    try std.testing.expect(try t.shows(0, "1 chip"));
+    try t.pressWith('5', .{ .alt = true });
+
+    // quitting with blocks not saved takes asking twice
+    try t.press('q');
+    try std.testing.expect(try t.shows(29, "q again quits"));
+    try std.testing.expect(!try t.tui.handle(.{ .key_press = .{ .codepoint = 'q', .text = "q" } }));
+}
+
+test "compiling colorForth in the editor starts the chip again with its code" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.tui.start = try .init(std.testing.allocator, t.chip.layout);
+    t.chip.save(&t.tui.start.?);
+    var programs: [2]gasim.assembler.Program = undefined;
+    var descriptors: [2]gasim.boot.Descriptor = undefined;
+    var buffer: [forth_capacity]u8 = undefined;
+    var output: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &output, .chip = &t.chip });
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    t.tui.options.forth = .{ .session = &session, .output = &output, .diagnostic = &diagnostic, .arena = arena.allocator() };
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [gasim.colorforth.block_size]u8 = @splat(0);
+    editor.open(&blocks, 1);
+    t.tui.options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
+    try t.pressWith('5', .{ .alt = true });
+
+    // echo, typed in yellow, red and green
+    try t.press('i');
+    try t.pressWith('y', .{ .ctrl = true });
+    for ("0 node 0 org ") |c| try t.press(c);
+    try t.pressWith('r', .{ .ctrl = true });
+    for ("main up b! begin @b !b end") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    try t.press('L');
+    try std.testing.expect(try t.shows(29, "with 1 nodes' code"));
+    const echo = try gasim.arrayforth.assemble("ASM[ # 0 NODE ERS # 0 org : main up b! begin @b !b again >BIN ]ASM", &diagnostic);
+    try std.testing.expectEqualSlices(gasim.Word, echo.ram[0..echo.len], t.chip.nodes[0].mem[0..echo.len]);
+
+    // an error moves the cursor to the word
+    try t.press('0');
+    try t.press('l');
+    try t.press('l');
+    try t.press('l');
+    try t.press('l');
+    try t.press('a');
+    for ("nothing") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    editor.first();
+    try t.press('L');
+    try std.testing.expect(try t.shows(29, "UnknownWord at nothing in block 0"));
+    try std.testing.expectEqualStrings("nothing", editor.current().?.text());
 }
