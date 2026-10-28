@@ -1935,10 +1935,10 @@ const Tiles = struct {
 
 fn arrow(cardinal: Chip.Cardinal) []const u8 {
     return switch (cardinal) {
-        .north => "↑",
-        .east => "→",
-        .south => "↓",
-        .west => "←",
+        .north => "▴",
+        .east => "▸",
+        .south => "▾",
+        .west => "◂",
     };
 }
 
@@ -2468,8 +2468,8 @@ test "the map shows nodes as tiles when it has room" {
     const up = chip.nodes[0].ports[@backingInt(Chip.portToward(0, 0, .north))];
     up.port.?.state = .{ .reading = up.side.other() };
     t.draw();
-    try std.testing.expectEqualStrings("→", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
-    try std.testing.expectEqualStrings("↑", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("▸", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("▴", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
 
     // and clicking a tile selects its node
     try t.click(1 + tiles.width + tiles.gap_x + 2, 2, .press);
