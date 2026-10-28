@@ -871,7 +871,10 @@ const Tui = struct {
             return;
         };
         // a tap leaves the border to move with the next tap
-        if (m.type == .release and self.dragged) self.dragging = null;
+        if (m.type == .release and self.dragged) {
+            self.dragging = null;
+            self.message = null;
+        }
         if (m.type == .press and m.button == .left) if (self.dragging) |border| {
             if (self.onBorder(m) == null) {
                 self.moveBorder(border, m);
@@ -2070,6 +2073,7 @@ test "draws the chip, console and selected node" {
     try t.click(border - 10, 5, .drag);
     try t.click(border - 10, 5, .release);
     try std.testing.expectEqual(border - 10, t.tui.column_border.?);
+    try std.testing.expectEqual(null, t.tui.message);
     try t.click(border - 10, 5, .press);
     try t.click(border - 10, 5, .release);
     try t.click(border - 4, 5, .press);
