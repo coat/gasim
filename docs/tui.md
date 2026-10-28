@@ -30,6 +30,7 @@ executing.
 | `b` | set or clear a breakpoint on the word in memory under the cursor |
 | `w` | watch the selected node's reads from a port, with `r` `d` `l` `u`, or its writes to one, with `R` `D` `L` `U`, or stop watching it |
 | `g` | follow the word the node is executing again |
+| `?`, `F1` | list the keys, with `F1` where `?` would be typed |
 | `q`, `ctrl+c` | quit |
 
 Clicking a node on the map to select it.

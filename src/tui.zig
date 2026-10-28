@@ -3,6 +3,7 @@
 //! console, and arrayForth 3 typed at the chip with the words of its IDE.
 //! Panels can be hidden, zoomed to fill the screen, resized and scrolled.
 //! A screen of its own edits colorForth blocks, with vim-like keys.
+//! Help lists the keys over either screen.
 
 /// bytes of console output kept for display
 pub const console_capacity = 16 * 1024;
@@ -125,6 +126,123 @@ const colors = struct {
 /// a key and what it does, for the status bar
 const Hint = struct { []const u8, []const u8 };
 
+/// keys listed in the help, under a heading
+const help: []const struct { []const u8, []const Hint } = &.{
+    .{ "everywhere", &.{
+        .{ "F1, ?", "show or hide this help, with ? where it is not typed" },
+        .{ "alt+1-5", "the map, console, node, forth or debug panel, showing it" },
+        .{ "ctrl+1-5", "the same, in terminals that report it" },
+        .{ "alt+6", "the colorForth editor, with a .cf file open" },
+        .{ "ctrl+c", "quit" },
+    } },
+    .{ "map and node panels", &.{
+        .{ "space", "run or pause" },
+        .{ "s", "step the next node to run, and select it" },
+        .{ "S", "step every node once" },
+        .{ "n", "step the selected node" },
+        .{ "z", "go back to before the last step or run, up to 64 times" },
+        .{ "tab, shift+tab", "the next or previous panel" },
+        .{ "1 2 3 4 5", "show or hide the map, console, node, forth and debug panels" },
+        .{ "f, esc", "fill the screen with the panel, and go back" },
+        .{ "< >", "narrow or widen the panels on the left" },
+        .{ "- +", "shorten or lengthen the map" },
+        .{ "q", "quit" },
+    } },
+    .{ "map", &.{
+        .{ "arrows, h j k l", "select a node, with north up" },
+        .{ "t", "tiles: registers if they fit, only numbers, or registers" },
+    } },
+    .{ "node", &.{
+        .{ "up down, j k", "move through memory" },
+        .{ "pgup pgdn", "page through memory" },
+        .{ "g, home", "follow the word the node is executing" },
+        .{ "b", "set or clear a breakpoint on the word under the cursor" },
+        .{ "w, then r d l u", "watch reads from a port, or stop watching them" },
+        .{ "w, then R D L U", "watch writes to a port, or stop watching them" },
+    } },
+    .{ "console", &.{
+        .{ "enter", "send the line" },
+        .{ "ctrl+d", "send what is typed without a newline, or end the input" },
+        .{ "pgup pgdn", "scroll" },
+        .{ "esc", "leave the console" },
+    } },
+    .{ "forth", &.{
+        .{ "enter", "interpret the line, with the selected node as the target" },
+        .{ "tab", "complete a word" },
+        .{ "up down", "recall lines typed" },
+        .{ "pgup pgdn", "scroll" },
+        .{ "esc", "leave the forth panel" },
+    } },
+    .{ "debug", &.{
+        .{ "h l, left right", "trace, breakpoints and watches, or history" },
+        .{ "t", "trace or stop, keeping what was traced" },
+        .{ "o", "trace only the selected node, or every node" },
+        .{ "c", "clear the trace" },
+        .{ "w", "save the trace to trace.txt" },
+        .{ "pgup pgdn", "scroll the trace" },
+        .{ "up down, j k", "choose a breakpoint, watch or step" },
+        .{ "enter", "show the breakpoint or watch, or go back to the step" },
+        .{ "x X", "remove the breakpoint or watch, or all of them" },
+    } },
+    .{ "colorForth editor", &.{
+        .{ "h l, b w", "the word before or after" },
+        .{ "j k", "the next or previous red name" },
+        .{ "0 $", "the first or last word" },
+        .{ "[ ], 256g", "the block before or after, or block 256" },
+        .{ "i a", "type a word before or after the cursor" },
+        .{ "o O", "type a new red name on a line below or above" },
+        .{ "x X", "delete the word, or the one before it" },
+        .{ "y", "copy the word" },
+        .{ "p P", "put the last deleted or copied after or before" },
+        .{ "u U", "undo, redo" },
+        .{ "R Y G W C M B", "red, yellow, green, white, cyan, magenta or blue" },
+        .{ "f", "show or hide blue words, which lay out the block" },
+        .{ "L", "compile the block and start the chip again with its code" },
+        .{ "s, ctrl+s", "save" },
+        .{ "q", "quit" },
+    } },
+    .{ "typing in the editor", &.{
+        .{ "space", "the next word" },
+        .{ "enter", "a new red name on the next line" },
+        .{ "backspace", "delete a character" },
+        .{ "ctrl+r y g w t v b", "red, yellow, green, white, cyan, magenta or blue" },
+        .{ "esc", "done" },
+    } },
+    .{ "mouse", &.{
+        .{ "click", "focus a panel, select a node, or move to a word in memory" },
+        .{ "click memory's edge", "set or clear a breakpoint" },
+        .{ "wheel", "scroll memory, the console, the forth panel or this help" },
+        .{ "drag a border", "resize panels, or tap it and then where it goes" },
+    } },
+    .{ "this help", &.{
+        .{ "up down, j k", "scroll" },
+        .{ "pgup pgdn", "page" },
+        .{ "g G, home end", "the top or bottom" },
+        .{ "esc, q, ?, F1", "close" },
+    } },
+};
+
+/// rows of the help: a heading and its keys, with a blank row between
+/// headings
+const help_rows = rows: {
+    var rows: u16 = help.len - 1;
+    for (help) |section| rows += 1 + section[1].len;
+    break :rows rows;
+};
+
+/// columns of the help taken by keys
+const help_key_width = 22;
+
+/// the row of the help a heading is on
+fn helpRow(heading: []const u8) u16 {
+    var row: u16 = 0;
+    for (help) |section| {
+        if (std.mem.eql(u8, section[0], heading)) break;
+        row += 2 + @as(u16, @intCast(section[1].len));
+    }
+    return row;
+}
+
 const Tui = struct {
     io: Io,
     /// for snapshots of the chip, as they are needed
@@ -182,6 +300,10 @@ const Tui = struct {
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
     message_buffer: [64]u8 = undefined,
+    /// the first row of the help in view, while it is shown
+    help_scroll: ?u16 = null,
+    /// rows of the help last drawn in view
+    help_page: u16 = 1,
     /// the next key chooses a port of the selected node to watch
     choosing_watch: bool = false,
     /// quitting was asked for with unsaved blocks, and asking again quits
@@ -317,6 +439,8 @@ const Tui = struct {
                 // a key ends moving a border by tapping
                 self.dragging = null;
                 if (k.matches('c', .{ .ctrl = true })) return self.keepOnQuit();
+                if (self.help_scroll != null) return self.helpKey(k);
+                if (k.matches(vaxis.Key.f1, .{})) return self.openHelp();
                 // a digit with alt, or with ctrl where the terminal reports it,
                 // focuses a panel, even from the panels that take text
                 for ([_]Panel{ .map, .console, .node, .forth, .debug }, "12345") |panel, digit| {
@@ -351,6 +475,7 @@ const Tui = struct {
             return true;
         }
         if (k.matches('q', .{})) return self.keepOnQuit();
+        if (k.matches('?', .{})) return self.openHelp();
         // matching text would take tab for shift+tab too
         if (k.codepoint == vaxis.Key.tab) self.cycleFocus(if (k.mods.shift) -1 else 1);
         if (k.matches(vaxis.Key.escape, .{})) self.zoomed = null;
@@ -430,6 +555,30 @@ const Tui = struct {
             .console, .forth => {},
         }
         return true;
+    }
+
+    /// Shows the help, at the editor's keys in the editor
+    fn openHelp(self: *Tui) bool {
+        self.help_scroll = if (self.screen == .editor) helpRow("colorForth editor") else 0;
+        return true;
+    }
+
+    /// Handles keys while the help is shown, which scroll and close it
+    fn helpKey(self: *Tui, k: vaxis.Key) bool {
+        const page: i32 = self.help_page;
+        if (k.matchesAny(&.{ vaxis.Key.escape, vaxis.Key.f1, 'q', '?' }, .{})) self.help_scroll = null;
+        if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.scrollHelp(-1);
+        if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) self.scrollHelp(1);
+        if (k.matches(vaxis.Key.page_up, .{})) self.scrollHelp(-page);
+        if (k.matches(vaxis.Key.page_down, .{})) self.scrollHelp(page);
+        if (k.matchesAny(&.{ vaxis.Key.home, 'g' }, .{})) self.help_scroll = 0;
+        if (k.matchesAny(&.{ vaxis.Key.end, 'G' }, .{})) self.scrollHelp(help_rows);
+        return true;
+    }
+
+    fn scrollHelp(self: *Tui, rows: i32) void {
+        const first = self.help_scroll orelse return;
+        self.help_scroll = @intCast(std.math.clamp(@as(i32, first) + rows, 0, @max(help_rows - @as(i32, self.help_page), 0)));
     }
 
     fn mapKey(self: *Tui, k: vaxis.Key) void {
@@ -622,6 +771,7 @@ const Tui = struct {
             if (editor.mode == .insert or text.len == 1) chars = text;
         }
 
+        if (editor.mode == .normal and named == null and std.mem.eql(u8, chars, "?")) return self.openHelp();
         if (named) |one| return self.editorAction(editor, one);
         for (chars) |c| if (!self.editorAction(editor, .char(c))) return false;
         return true;
@@ -865,6 +1015,13 @@ const Tui = struct {
     }
 
     fn mouse(self: *Tui, m: vaxis.Mouse) void {
+        // the help takes the wheel, and nothing else
+        if (self.help_scroll != null) {
+            if (m.type != .press) return;
+            if (m.button == .wheel_up) self.scrollHelp(-3);
+            if (m.button == .wheel_down) self.scrollHelp(3);
+            return;
+        }
         if (m.type == .drag) if (self.dragging) |border| {
             self.moveBorder(border, m);
             self.dragged = true;
@@ -1163,6 +1320,8 @@ const Tui = struct {
             _ = win.printSegment(.{ .text = "The terminal is too small" }, .{});
             return;
         }
+        // over either screen
+        defer if (self.help_scroll != null) self.drawHelp(win);
         if (self.screen == .editor) return self.drawEditor(win);
 
         const layout = self.chip.layout;
@@ -1230,6 +1389,45 @@ const Tui = struct {
             self.drawNode(self.drawPanel(win, .node, left_width, 0, win.width - left_width, body_height, self.print("3 node {d:0>3}", .{layout.nodeNumber(self.selected)})));
         }
         self.drawStatus(win.child(.{ .y_off = body_height, .height = 1 }));
+    }
+
+    /// Draws the help in a box over the screen, with arrows after its title
+    /// when there is more of it above or below
+    fn drawHelp(self: *Tui, win: vaxis.Window) void {
+        const width = @min(win.width -| 4, help_key_width + 60);
+        const height = @min(win.height -| 1, help_rows + 2);
+        const x = (win.width - width) / 2;
+        const y = (win.height - 1 -| height) / 2;
+        const box = win.child(.{ .x_off = x, .y_off = y, .width = width, .height = height });
+        box.clear();
+        // with a column of space inside the border
+        const inside = box.child(.{ .border = .{ .where = .all, .style = .{ .fg = .{ .index = 6 } } } }).child(.{ .x_off = 1 });
+        self.help_page = @max(inside.height, 1);
+        // so the last page is full, as after resizing
+        const first = @min(self.help_scroll.?, help_rows -| self.help_page);
+        self.help_scroll = first;
+        const more = self.print("{s}{s}", .{ if (first > 0) "↑" else "", if (first + self.help_page < help_rows) "↓" else "" });
+        _ = box.child(.{ .x_off = 2, .width = width -| 3, .height = 1 }).print(&.{
+            .{ .text = "help", .style = .{ .bold = true } },
+            .{ .text = " " },
+            .{ .text = more, .style = .{ .bold = true } },
+        }, .{ .wrap = .none });
+
+        var row: u16 = 0;
+        for (help) |section| {
+            if (row >= first and row - first < inside.height) {
+                _ = inside.printSegment(.{ .text = section[0], .style = colors.heading }, .{ .row_offset = row - first, .wrap = .none });
+            }
+            row += 1;
+            for (section[1]) |hint| {
+                if (row >= first and row - first < inside.height) {
+                    _ = inside.printSegment(.{ .text = hint[0], .style = colors.label }, .{ .row_offset = row - first, .wrap = .none });
+                    _ = inside.printSegment(.{ .text = hint[1] }, .{ .row_offset = row - first, .col_offset = help_key_width, .wrap = .none });
+                }
+                row += 1;
+            }
+            row += 1;
+        }
     }
 
     /// Draws a bordered panel with a title, returning the window inside it
@@ -1691,8 +1889,8 @@ const Tui = struct {
         const hints: []const Hint = if (editor.mode == .insert)
             &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "ctrl+r y g w t v b", "color" }, .{ "esc", "done" } }
         else
-            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
-        var segments: [4 + 2 * 11]vaxis.Segment = undefined;
+            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "?", "help" }, .{ "q", "quit" } };
+        var segments: [4 + 2 * 12]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = if (editor.mode == .insert)
             .{ .text = " insert ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } }
@@ -1726,17 +1924,17 @@ const Tui = struct {
         else
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
         const hints: []const Hint = switch (self.focus) {
-            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "t", "tiles" }, .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
-            .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" }, .{ "esc", "map" } },
-            .forth => &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" }, .{ "esc", "map" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
+            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "t", "tiles" }, .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" }, .{ "q", "quit" } },
+            .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" }, .{ "esc", "map" } },
+            .forth => &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" }, .{ "esc", "map" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" } },
             .debug => switch (self.debug) {
-                .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "c", "clear" }, .{ "w", "save trace.txt" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" } },
-                .breakpoints => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "x", "remove" }, .{ "X", "remove all" }, .{ "space", "run" }, .{ "tab", "next" } },
-                .history => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "go back" }, .{ "space", "run" }, .{ "tab", "next" } },
+                .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "c", "clear" }, .{ "w", "save trace.txt" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
+                .breakpoints => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "x", "remove" }, .{ "X", "remove all" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
+                .history => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "go back" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
             },
         };
-        var segments: [4 + 2 * 12]vaxis.Segment = undefined;
+        var segments: [3 + 2 * 13]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = state;
         len += 1;
@@ -2094,6 +2292,46 @@ test "draws the chip, console and selected node" {
     var sent: [3]u8 = undefined;
     try std.testing.expectEqual(3, try t.input.get(std.testing.io, &sent, 0));
     try std.testing.expectEqualStrings("hi\n", &sent);
+}
+
+test "help lists the keys, and scrolls" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+
+    try t.press('?');
+    // more below, after the title in the middle of the screen
+    const more = (120 - (help_key_width + 60)) / 2 + 2 + "help ".len;
+    try std.testing.expect(try t.shows(0, "help #"));
+    try std.testing.expectEqualStrings("↓", t.screen.readCell(more, 0).?.char.grapheme);
+    try std.testing.expect(try t.shows(1, "everywhere"));
+    try std.testing.expect(try t.shows(2, "F1, ?"));
+    // keys scroll it rather than reaching the chip
+    try t.press('s');
+    try std.testing.expectEqual(0, t.tui.chip.steps);
+    try t.press('j');
+    try std.testing.expect(try t.shows(1, "F1, ?"));
+    try t.press('G');
+    try std.testing.expect(try t.shows(27, "esc, q, ?, F1"));
+    try std.testing.expectEqualStrings("↑", t.screen.readCell(more, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", t.screen.readCell(more + 1, 0).?.char.grapheme);
+    try std.testing.expect(try t.tui.handle(.{ .mouse = .{ .col = 50, .row = 10, .button = .wheel_up, .mods = .{}, .type = .press } }));
+    try std.testing.expectEqual(help_rows - t.tui.help_page - 3, t.tui.help_scroll.?);
+    try t.press('g');
+    try std.testing.expectEqual(0, t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+    try std.testing.expectEqual(null, t.tui.help_scroll);
+    try std.testing.expect(try t.shows(0, "1 chip"));
+
+    // ? is typed into the console, and F1 shows the help from it
+    try t.pressWith('2', .{ .alt = true });
+    try t.press('?');
+    try std.testing.expectEqualStrings("?", t.tui.input[0..t.tui.input_len]);
+    try t.press(vaxis.Key.f1);
+    try std.testing.expect(try t.shows(1, "everywhere"));
+    try t.press(vaxis.Key.f1);
+    try std.testing.expectEqual(null, t.tui.help_scroll);
 }
 
 test "escapes from the console, and ends moving a border with a key" {
@@ -2653,6 +2891,11 @@ test "the colorForth editor, on a screen of its own" {
     try t.pressWith('6', .{ .alt = true });
     try std.testing.expect(try t.shows(0, "6 colorforth  block 0  test.cf"));
     try std.testing.expect(try t.shows(1, "An empty block"));
+    // the help opens at the editor's keys
+    try t.press('?');
+    try std.testing.expect(try t.shows(1, "colorForth editor"));
+    try t.press('q');
+    try std.testing.expect(try t.shows(0, "6 colorforth"));
     // typing a definition, and making its last word yellow
     for ("iinc 1 + ;") |c| try t.press(c);
     try std.testing.expect(try t.shows(29, "insert"));
