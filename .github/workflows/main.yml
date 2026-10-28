@@ -34,7 +34,7 @@ jobs:
       - run: nix develop -c zig env
 
       - name: Run tests 
-        run: nix develop -c zig build test -Dtarget=${{ matrix.target }} --summary all
+        run: nix develop -c zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --summary all
 
   build-windows:
     runs-on: windows-latest
@@ -49,7 +49,7 @@ jobs:
       - run: zig env
 
       - name: Run tests 
-        run: zig build test -Dtarget=x86_64-windows-gnu --summary all
+        run: zig build test -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe --summary all
 
   coverage:
     runs-on: ubuntu-latest
