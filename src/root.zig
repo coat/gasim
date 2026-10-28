@@ -15,6 +15,7 @@ pub const Console = @import("Console.zig");
 pub const Editor = @import("Editor.zig");
 pub const disassembler = @import("disassembler.zig");
 pub const ga144 = @import("ga144.zig");
+pub const rom = @import("rom.zig");
 
 const f18 = @import("f18.zig");
 pub const port = @import("port.zig");
@@ -32,5 +33,6 @@ test {
     _ = @import("ga144.zig");
     _ = @import("opcodes.zig");
     _ = @import("port.zig");
+    _ = @import("rom.zig");
     _ = @import("stack.zig");
 }

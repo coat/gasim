@@ -28,8 +28,13 @@ const usage =
     \\options:
     \\  --layout <rows>x<columns>  size of the array of nodes (default 8x18)
     \\  --console <node>:<port>    where the console is attached (default 000:up)
-    \\  --rom <file>               ROM dump to load into the nodes
-    \\                             (default rom/ga144.txt, if it exists)
+    \\  --rom <path>               ROM to load into the nodes: a dump of it, or
+    \\                             arrayForth 3's disk (sF/pFDISK.blk) or the
+    \\                             directory it is installed in, such as
+    \\                             GreenArrays, to assemble it from. Without
+    \\                             it, the ROM last assembled, or assembled
+    \\                             from arrayForth 3 installed in C:\GreenArrays
+    \\                             or Wine's C: drive, if it is.
     \\  --boot                     load programs with a boot stream through the
     \\                             SERDES port of node 001, which needs ROM
     \\  --break <node>:<address>   stop when the node is about to fetch the word
@@ -51,8 +56,6 @@ const usage =
     \\                             disassembly and source lines to stdout,
     \\                             instead of running
 ;
-
-const default_rom_path = "rom/ga144.txt";
 
 const max_source_len = 64 * 1024;
 
@@ -198,9 +201,9 @@ pub fn main(init: std.process.Init) !void {
     var chip: Chip = try .init(init.gpa, layout);
     defer chip.deinit(init.gpa);
 
-    const roms = readRom(io, arena, rom_path);
-    if (roms) |r| chip.loadRom(r) catch
-        fatal("{s}: has no ROM for node {d}, which nodes without their own ROM use", .{ rom_path orelse default_rom_path, ga144.basic_node });
+    const roms = readRom(io, arena, init.environ_map, rom_path);
+    // which readRom checks for
+    if (roms) |r| chip.loadRom(r) catch unreachable;
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     const descriptor_buffer = try arena.alloc(gasim.boot.Descriptor, layout.count());
@@ -569,15 +572,107 @@ fn logWaiting(chip: Chip) void {
     if (idle > 0) std.log.info("{d} {s} waiting on several ports, as after reset", .{ idle, if (idle == 1) "node" else "nodes" });
 }
 
-/// Reads a ROM dump from `path`, or the default dump if there is one
-fn readRom(io: Io, arena: std.mem.Allocator, path: ?[]const u8) ?[]const ga144.NodeRom {
-    const text = Io.Dir.cwd().readFileAlloc(io, path orelse default_rom_path, arena, .limited(1024 * 1024)) catch |err| {
-        if (path == null and err == error.FileNotFound) return null;
-        fatal("{s}: {t}", .{ path orelse default_rom_path, err });
+/// Reads the ROM from `path`: a dump of it, or arrayForth 3's disk or a
+/// directory it is installed in, to assemble the ROM from its source.
+/// Without a path, reads the ROM saved the last time it was assembled, or
+/// assembles it from arrayForth 3 where it is usually installed, if it is.
+/// A ROM assembled is saved for next time.
+fn readRom(io: Io, arena: Allocator, environ: *const std.process.Environ.Map, path: ?[]const u8) ?[]const ga144.NodeRom {
+    const saved = dataPath(arena, environ, "ga144.txt");
+    const disk = if (path) |p| disk: {
+        const stat = Io.Dir.cwd().statFile(io, p, .{}) catch |err| fatal("{s}: {t}", .{ p, err });
+        if (stat.kind == .directory) break :disk findDisk(io, arena, p) orelse
+            fatal("{s}: has no arrayForth 3 disk, {s}", .{ p, gasim.rom.disk_path });
+        if (std.mem.endsWith(u8, p, ".blk")) break :disk p;
+        return readDump(io, arena, p) catch |err| fatal("{s}: {t}", .{ p, err });
+    } else disk: {
+        if (saved) |s| if (readDump(io, arena, s)) |roms| return roms else |err| switch (err) {
+            error.FileNotFound => {},
+            else => fatal("{s}: {t}", .{ s, err }),
+        };
+        break :disk installedDisk(io, arena, environ) orelse return null;
     };
-    const roms = arena.alloc(ga144.NodeRom, 144) catch fatal("out of memory", .{});
-    return ga144.parseRom(text, roms) catch |err|
-        fatal("{s}: {t}", .{ path orelse default_rom_path, err });
+
+    const text = Io.Dir.cwd().readFileAlloc(io, disk, arena, .limited(max_blocks_len)) catch |err|
+        fatal("{s}: {t}", .{ disk, err });
+    const roms = arena.create([144]ga144.NodeRom) catch fatal("out of memory", .{});
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = gasim.rom.assemble(arena, text, roms, &diagnostic) catch |err| {
+        const where: Where = .{ .path = disk, .line = diagnostic.line, .kind = .blocks };
+        // arrayForth 3 found where it is usually installed is only used if
+        // it assembles
+        if (path == null) {
+            std.log.warn("{f}: {t} at '{s}', assembling the ROM", .{ where, err, diagnostic.token });
+            return null;
+        }
+        fatal("{f}: {t} at '{s}', assembling the ROM", .{ where, err, diagnostic.token });
+    };
+    if (!gasim.rom.isG144A12(assembled)) std.log.warn("{s}: assembles to a ROM that is not a G144A12's", .{disk});
+
+    const s = saved orelse return assembled;
+    var text_buffer: Io.Writer.Allocating = .init(arena);
+    gasim.rom.write(&text_buffer.writer, assembled) catch fatal("out of memory", .{});
+    if (std.fs.path.dirname(s)) |dir| Io.Dir.cwd().createDirPath(io, dir) catch |err| {
+        std.log.warn("{s}: {t}, saving the ROM", .{ dir, err });
+        return assembled;
+    };
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = s, .data = text_buffer.written() }) catch |err| {
+        std.log.warn("{s}: {t}, saving the ROM", .{ s, err });
+        return assembled;
+    };
+    std.log.info("assembled the ROM from {s}, and saved it in {s}", .{ disk, s });
+    return assembled;
+}
+
+/// Reads a ROM dump, which has to have the ROM of the node that nodes
+/// without their own ROM use
+fn readDump(io: Io, arena: Allocator, path: []const u8) ![]const ga144.NodeRom {
+    const text = try Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1024 * 1024));
+    const roms = try ga144.parseRom(text, try arena.alloc(ga144.NodeRom, 144));
+    for (roms) |rom| {
+        if (rom.node == ga144.basic_node) return roms;
+    } else return error.NoBasicNodeRom;
+}
+
+/// arrayForth 3's disk in a directory it is installed in, such as
+/// GreenArrays/EVB002, or in one of the directories of one, such as
+/// GreenArrays
+fn findDisk(io: Io, arena: Allocator, path: []const u8) ?[]const u8 {
+    const disk = std.fs.path.join(arena, &.{ path, gasim.rom.disk_path }) catch return null;
+    if (Io.Dir.cwd().access(io, disk, .{})) |_| return disk else |_| {}
+    var dir = Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    var entries = dir.iterate();
+    while (entries.next(io) catch return null) |entry| {
+        if (entry.kind != .directory) continue;
+        const nested = std.fs.path.join(arena, &.{ path, entry.name, gasim.rom.disk_path }) catch return null;
+        if (Io.Dir.cwd().access(io, nested, .{})) |_| return nested else |_| {}
+    }
+    return null;
+}
+
+/// arrayForth 3's disk where its installer puts it, in C:\GreenArrays, and
+/// so in Wine's C: drive, in WINEPREFIX or ~/.wine
+fn installedDisk(io: Io, arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u8 {
+    if (builtin.os.tag == .windows) return findDisk(io, arena, "C:\\GreenArrays");
+    if (environ.get("WINEPREFIX")) |prefix| {
+        const dir = std.fmt.allocPrint(arena, "{s}/drive_c/GreenArrays", .{prefix}) catch return null;
+        if (findDisk(io, arena, dir)) |disk| return disk;
+    }
+    const home = environ.get("HOME") orelse return null;
+    return findDisk(io, arena, std.fmt.allocPrint(arena, "{s}/.wine/drive_c/GreenArrays", .{home}) catch return null);
+}
+
+/// where gasim keeps a file of data: in gasim under XDG_DATA_HOME, or
+/// ~/.local/share, or on Windows LOCALAPPDATA
+fn dataPath(arena: Allocator, environ: *const std.process.Environ.Map, name: []const u8) ?[]const u8 {
+    const dir = if (environ.get("XDG_DATA_HOME")) |data|
+        std.fs.path.join(arena, &.{ data, "gasim" }) catch return null
+    else if (builtin.os.tag == .windows)
+        std.fs.path.join(arena, &.{ environ.get("LOCALAPPDATA") orelse return null, "gasim" }) catch return null
+    else
+        std.fs.path.join(arena, &.{ environ.get("HOME") orelse return null, ".local", "share", "gasim" }) catch return null;
+    return std.fs.path.join(arena, &.{ dir, name }) catch null;
 }
 
 /// Stops the console so its output is flushed. While it is blocked waiting

@@ -325,7 +325,7 @@ test "nodes that start early cannot write into a booting node's stream" {
 
 test "boot node 001 from ROM" {
     var roms: [144]ga144.NodeRom = undefined;
-    const parsed = try ga144.testRom(&roms);
+    const parsed = try testRom(&roms);
 
     var chip: Chip = try .init(std.testing.allocator, .ga144);
     defer chip.deinit(std.testing.allocator);
@@ -461,6 +461,7 @@ const assembler = @import("assembler.zig");
 const Program = assembler.Program;
 const Console = @import("Console.zig");
 const ga144 = @import("ga144.zig");
+const testRom = @import("rom.zig").testRom;
 const Chip = @import("Chip.zig");
 const f18 = @import("f18.zig");
 const Address = f18.Address;

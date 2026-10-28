@@ -42,8 +42,9 @@ Options:
   (default `8x18`)
 - `--console <node>:<port>`: where the console is attached, on a port facing
   off the edge of the array (default `000:up`)
-- `--rom <file>`: ROM dump to load into the nodes (default `rom/ga144.txt`,
-  if it exists)
+- `--rom <path>`: ROM to load into the nodes: a dump of it, or arrayForth
+  3's disk (`sF/pFDISK.blk`) or the directory it is installed in, to
+  assemble it from (see [ROM](#rom))
 - `--boot`: load programs with a boot stream through the SERDES port of node
   001, as one GA144 boots another, instead of writing them straight into RAM.
   This needs ROM.
@@ -316,10 +317,25 @@ goes back to before a line, as it does after a step.
 
 ### ROM
 
-The GA144's ROM, copyright GreenArrays, Inc., is in
-[`rom/ga144.txt`](rom/ga144.txt) and loaded by default when gasim runs from
-this directory. See [`rom/README.md`](rom/README.md) for where it came from and
-its format.
+The GA144's ROM is copyright GreenArrays, Inc., and not part of gasim. Its
+source is in `sF/pFDISK.blk` of GreenArrays'
+[arrayForth 3](https://www.greenarraychips.com/home/support/download-03d.php),
+which gasim assembles it from, as arrayForth 3 does. Without `--rom`, gasim
+looks for arrayForth 3 where its installer puts it, in `C:\GreenArrays`, or
+on Linux and macOS in Wine's C: drive, in `$WINEPREFIX` or `~/.wine`, such
+as `~/.wine/drive_c/GreenArrays/EVB002`. Elsewhere, `--rom` gives the
+directory it is installed in:
+
+```sh
+gasim --rom ~/GreenArrays
+```
+
+gasim assembles the ROM once, and saves it as `gasim/ga144.txt` in
+`$XDG_DATA_HOME`, `~/.local/share` by default, or `%LOCALAPPDATA%` on
+Windows, which it loads after that without needing arrayForth 3. `--rom` can
+also give a dump of the ROM in that format, which
+[`rom/README.md`](rom/README.md) describes. Deleting the saved ROM has gasim
+assemble it again.
 
 With ROM, each node gets the ROM of the GA144 node with the same number, and
 the boot nodes start in their boot code after reset, as on the real chip.

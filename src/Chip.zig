@@ -829,7 +829,7 @@ test "a node can send code to a neighbour" {
 
 test "warm in ROM goes to the ports each node is wired to" {
     var roms: [144]ga144.NodeRom = undefined;
-    const parsed = try ga144.testRom(&roms);
+    const parsed = try testRom(&roms);
 
     var chip: Chip = try .init(std.testing.allocator, .ga144);
     defer chip.deinit(std.testing.allocator);
@@ -862,7 +862,7 @@ test "boot nodes missing from a ROM dump wait for code" {
 
 test "the chip settles after reset with ROM" {
     var roms: [144]ga144.NodeRom = undefined;
-    const parsed = try ga144.testRom(&roms);
+    const parsed = try testRom(&roms);
 
     var chip: Chip = try .init(std.testing.allocator, .ga144);
     defer chip.deinit(std.testing.allocator);
@@ -1216,6 +1216,7 @@ const assembler = @import("assembler.zig");
 const boot = @import("boot.zig");
 const disassembler = @import("disassembler.zig");
 const ga144 = @import("ga144.zig");
+const testRom = @import("rom.zig").testRom;
 const Console = @import("Console.zig");
 const f18 = @import("f18.zig");
 const Address = f18.Address;
