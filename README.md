@@ -4,6 +4,8 @@ A cross-platform simulator for the [GreenArrays,
 Inc.](https://www.greenarraychips.com) [GA144 multi-computer
 chip](https://www.greenarraychips.com/home/documents/index.php#GA144).
 
+![The chip, console, forth and node panels](docs/screenshot-chip.png)
+
 ## Usage
 
 ```bash
@@ -131,6 +133,8 @@ $ gasim --load 2331 --load 2332 sF/pFDISK.blk
 ```
 
 ### colorForth blocks
+
+![The colorForth block editor](docs/screenshot-colorforth.png)
 
 `gasim blocks` writes the colorForth source in a file of blocks, as
 arrayForth 2 and colorForth keep it, as text. Each word is marked with its
