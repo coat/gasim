@@ -13,7 +13,23 @@ defaults:
     shell: bash
 
 jobs:
+  # The tag is the release's version, so it must agree with build.zig.zon
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Check tag matches version
+        run: |
+          version=$(sed -n 's/^ *\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match build.zig.zon version $version"
+            exit 1
+          fi
+
   build:
+    needs: check-version
     strategy:
       fail-fast: true
       matrix:
@@ -44,15 +60,6 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: "0.17.0"
-
-      # The tag is the release's version, so it must agree with build.zig.zon
-      - name: Check tag matches version
-        run: |
-          version=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match build.zig.zon version $version"
-            exit 1
-          fi
 
       # Only the targets the runner can execute are tested
       - name: Run tests
