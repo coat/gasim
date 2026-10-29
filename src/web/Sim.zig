@@ -890,3 +890,10 @@ test "editing colorForth, and loading what was typed" {
     try std.testing.expectEqual(.settled, try sim.run(10_000));
     try std.testing.expectEqualStrings("H", sim.takeConsoleOutput());
 }
+
+test "a file that is no ROM is refused" {
+    const sim = try testSim();
+    defer freeSim(sim);
+    try std.testing.expectError(error.InvalidRom, sim.setRom("not a rom\n"));
+    try std.testing.expectEqual(null, sim.roms);
+}

@@ -72,6 +72,9 @@ pub fn build(b: *std.Build) void {
     });
     wasm.entry = .disabled;
     wasm.rdynamic = true;
+    // arrayForth 3's interpreter is kept on the stack as it assembles, such as
+    // the ROM, which overflows wasm's default of 1 MiB
+    wasm.stack_size = 8 * 1024 * 1024;
     const wasm_step = b.step("wasm", "Build the core for wasm32-freestanding, as the web version uses it");
     wasm_step.dependOn(&wasm.step);
 

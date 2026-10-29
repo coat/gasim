@@ -22,7 +22,7 @@ looks.
 
 ## Where things stand
 
-Phases 0 and 1 are done:
+Phases 0 to 2 are done:
 
 - The core builds for wasm with no changes to how it works: the console
   takes input without a queue (`Console.give`), the editor's key map is
@@ -35,8 +35,14 @@ Phases 0 and 1 are done:
 - `src/web/main.zig` exports it, `web/engine.js` wraps the exports, and
   `zig build web` builds the module, 140 KB at ReleaseSmall, with `web/`
   and the examples into `zig-out/web`. `zig build serve` serves it.
-- `web/index.html` only checks the engine in a browser, loading an example,
-  running it and giving it input, until the app replaces it in phase 2.
+- The app shell, in `web/`: Mithril and Pico, vendored in `web/vendor/`,
+  with the map, the node panel, the console's output, run and step,
+  breakpoints, the ROM, the examples, and opening files from a button or by
+  dropping them. Borders can be dragged, and below 900 px the node and the
+  console are tabs under the map. `?example=hello.ga` opens an example.
+- The module has an 8 MiB stack, as arrayForth 3's interpreter is kept on
+  the stack as it assembles, and assembling the ROM from `pFDISK.blk`
+  overflows wasm's default of 1 MiB.
 
 ## Architecture
 
