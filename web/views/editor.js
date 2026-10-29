@@ -3,7 +3,9 @@
 // the editor is doing. Keys go to Editor.key through a hidden input, which
 // on-screen keyboards and input methods type into too.
 
-import { state, editorKey, editorGoTo, editorMoveTo, saveEditor, compileEditor, newEditorFile, toggleFormat, toggleMarks } from '../state.js';
+import {
+  state, editorKey, editorGoTo, editorMoveTo, saveEditor, compileEditor, newEditorFile, toggleFormat, toggleMarks, canPick,
+} from '../state.js';
 import { NodePanel } from './node.js';
 
 const { m } = window;
@@ -184,7 +186,11 @@ export const EditorView = {
             ]),
             m('button.secondary.outline', { onclick: newEditorFile, title: 'Start a new file of blocks' }, 'New'),
             m('button.secondary', { onclick: compileEditor, title: 'Compile the block and start the chip again with it (L)' }, 'Compile'),
-            m('button', { onclick: saveEditor, title: 'Save the blocks (ctrl+s)' }, 'Save'),
+            canPick ? m('button.secondary.outline', { onclick: () => saveEditor(true), title: 'Save the blocks to a file chosen' }, 'Save as…') : null,
+            m('button', {
+              onclick: () => saveEditor(),
+              title: file?.handle ? `Save the blocks to ${file.name} (ctrl+s)` : 'Save the blocks (ctrl+s)',
+            }, 'Save'),
           ]),
         ]),
         m('.panel-body', m(Block)),

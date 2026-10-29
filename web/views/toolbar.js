@@ -3,7 +3,7 @@
 
 import {
   state, examples, openFile, openExample, reload, hasBlocks, toggleRun, stepNext, stepRound, stepNode, back, reset,
-  giveRom, forgetRom,
+  giveRom, forgetRom, canPick, pickFile, openRecent, forgetRecent,
 } from '../state.js';
 
 const { m } = window;
@@ -28,17 +28,49 @@ function fileInput(accept, onfile, label, attrs = {}) {
   ]);
 }
 
+/** a menu item that closes its menu and does something */
+const item = (does, children) => m('li', m('a[href=#]', {
+  onclick: (e) => {
+    e.preventDefault();
+    e.target.closest('details').open = false;
+    does();
+  },
+}, children));
+
 function examplesMenu() {
   return m('details.dropdown.examples', [
     m('summary', { role: 'button', class: 'secondary outline' }, 'Examples'),
-    m('ul', examples.map((example) => m('li', m('a[href=#]', {
-      onclick: (e) => {
-        e.preventDefault();
-        e.target.closest('details').open = false;
-        openExample(example.name);
-      },
-    }, [m('strong', example.name), m('small', example.about)])))),
+    m('ul', examples.map((example) => item(() => openExample(example.name), [m('strong', example.name), m('small', example.about)]))),
   ]);
+}
+
+function recentMenu() {
+  if (state.recent.length === 0) return null;
+  return m('details.dropdown.examples', [
+    m('summary', { role: 'button', class: 'secondary outline' }, 'Recent'),
+    m('ul', [
+      state.recent.map((file) => item(async () => {
+        await openRecent(file.name);
+        m.redraw();
+      }, [
+        m('strong', file.name),
+        m('small', file.handle ? 'read again from where it was opened' : 'as it was opened'),
+      ])),
+      item(forgetRecent, m('small', 'Forget these files')),
+    ]),
+  ]);
+}
+
+/** Open, through the browser's picker where it can save in place too */
+function openButton() {
+  const accept = '.ga,.af,.blk,.cf,.txt';
+  if (!canPick) return fileInput(accept, openFile, 'Open…', { class: 'secondary' });
+  return m('button.secondary', {
+    onclick: async () => {
+      await pickFile();
+      m.redraw();
+    },
+  }, 'Open…');
 }
 
 function blocksField() {
@@ -53,7 +85,7 @@ function blocksField() {
         return;
       }
       file.loads = loads;
-      reload();
+      reload().then(m.redraw);
     },
   }, [
     m('label', { for: 'loads' }, 'Blocks'),
@@ -80,7 +112,8 @@ export const Toolbar = {
             title: route === '/editor' ? 'The colorForth editor (e)' : 'The chip (q in the editor)',
           }, label);
         })),
-        fileInput('.ga,.af,.blk,.cf,.txt', openFile, 'Open…', { class: 'secondary' }),
+        openButton(),
+        recentMenu(),
         examplesMenu(),
         state.file ? m('span.file', { title: state.file.name }, state.file.name) : null,
         blocksField(),

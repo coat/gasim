@@ -10,6 +10,9 @@ export const Stop = ['budget', 'settled', 'input', 'hit'];
 /** A node's status in statuses(), as Sim.Status numbers them. */
 export const Status = ['running', 'code', 'reading', 'writing'];
 
+/** What the chip was saved before, as Sim.Cause numbers them. */
+export const Cause = ['step', 'round', 'node', 'run', 'line', 'reset', 'compile'];
+
 /** Port directions, as gasim's Direction numbers them. */
 export const Direction = { right: 0, down: 1, left: 2, up: 3 };
 
@@ -91,9 +94,13 @@ export async function loadEngine(url = 'gasim.wasm') {
     stepNode: (i) => !!x.stepNode(i),
     reset: () => x.reset(),
     /** Saves the chip to go back to, before running it. */
-    remember: () => x.remember(),
+    remember: () => x.remember(Cause.indexOf('run')),
     /** Goes back before the last step or run; false with nothing to go back to. */
     back: () => !!x.back(),
+    /** Goes back before the `n`th step or run kept, the oldest 0. */
+    backTo: (n) => !!x.backTo(n),
+    /** The steps and runs to go back through, oldest first: { steps, cause }. */
+    history: () => json(x.historyView()) ?? [],
     /** Returns whether it is set now, or null with too many. */
     toggleBreakpoint(i, address) {
       const r = x.toggleBreakpoint(i, address);
@@ -102,6 +109,15 @@ export async function loadEngine(url = 'gasim.wasm') {
     toggleWatch(i, direction, write) {
       const r = x.toggleWatch(i, Direction[direction], write ? 1 : 0);
       return r < 0 ? null : !!r;
+    },
+    clearBreakpoints: () => x.clearBreakpoints(),
+    /** Starts or stops tracing; false out of memory. */
+    setTracing: (on) => !!x.setTracing(on ? 1 : 0),
+    /** The lines traced since last called, and whether older ones were dropped. */
+    takeTrace() {
+      const r = x.takeTrace() >>> 0;
+      const n = r & 0x7fffffff;
+      return { text: n ? out(n) : '', dropped: r >= 0x80000000 };
     },
     /**
      * Each node's status, a Status index, and the ports it moved words
@@ -157,6 +173,7 @@ export async function loadEngine(url = 'gasim.wasm') {
       return view(x.editorContentsPtr(), n).slice();
     },
     editorSaved: () => x.editorSaved(),
+    editorUnsaved: () => x.editorUnsaved(),
     /** Compiles the block and starts the chip again: { ok, message }. */
     editorCompile() {
       const ok = !!x.editorCompile();

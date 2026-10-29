@@ -1,6 +1,9 @@
-// The panels under the map: the arrayForth 3 prompt, and the console.
+// The panels under the map: the arrayForth 3 prompt, the console, and the
+// trace, breakpoints and history.
 
 import { state, nodeNumber, interpret, completions, sendInput, endInput } from '../state.js';
+import { follow } from './follow.js';
+import { Trace, traceHead, Breakpoints, breakpointsHead, History } from './debug.js';
 
 const { m } = window;
 
@@ -8,22 +11,6 @@ const pad = (n) => String(n).padStart(3, '0');
 
 /** an error's name as words, such as `undefined label` for UndefinedLabel */
 const words = (name) => name.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
-
-/**
- * Hooks that keep a scrolled element at its end as it grows, unless it was
- * scrolled back, which the element itself remembers.
- */
-const follow = {
-  oncreate: (vnode) => (vnode.dom.scrollTop = vnode.dom.scrollHeight),
-  onupdate(vnode) {
-    if (vnode.dom.atEnd !== false) vnode.dom.scrollTop = vnode.dom.scrollHeight;
-  },
-  onscroll(e) {
-    const el = e.target;
-    el.atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
-    e.redraw = false;
-  },
-};
 
 // ---------- the prompt ----------
 
@@ -206,29 +193,47 @@ export function showDock(tab) {
   if (tab === 'console') state.unseenOutput = false;
 }
 
+/** the dock's panels: the tab's label, what goes beside the tabs, and the panel */
+export const panels = {
+  forth: {
+    label: 'Forth',
+    head: () => m('button.secondary.outline.small', { onclick: () => (state.entries = []), disabled: state.entries.length === 0 }, 'Clear'),
+    body: Forth,
+  },
+  console: {
+    label: 'Console',
+    head: () => {
+      const { console_node: node, console_port: port } = state.chip;
+      return [
+        m('span.muted', `node ${pad(node)}, ${port} port`),
+        m('button.secondary.outline.small', { onclick: () => (state.console = ''), disabled: state.console === '' }, 'Clear'),
+      ];
+    },
+    body: Console,
+  },
+  trace: { label: 'Trace', head: traceHead, body: Trace },
+  breakpoints: { label: 'Breakpoints', head: breakpointsHead, body: Breakpoints },
+  history: { label: 'History', head: () => m('span.muted', `${state.moments.length} of 64 kept`), body: History },
+};
+
+/** a dot on the console's tab for output not yet seen */
+export const unseen = (name) => (name === 'console' && state.unseenOutput ? m('span.unseen', { 'aria-label': ', new output' }) : null);
+
 export const Dock = {
   view() {
-    const { console_node: node, console_port: port } = state.chip;
-    const tab = (name, label, extra) => m('button', {
+    const panel = panels[state.dock];
+    const tab = (name) => m('button', {
       role: 'tab',
       class: state.dock === name ? '' : 'secondary outline',
       'aria-selected': state.dock === name ? 'true' : 'false',
       onclick: () => showDock(name),
-    }, label, extra);
-    return m('section.panel.dock', { 'aria-label': state.dock === 'forth' ? 'Forth' : 'Console' }, [
+    }, panels[name].label, unseen(name));
+    return m('section.panel.dock', { 'aria-label': panel.label }, [
       m('header.panel-head', [
-        m('nav.dock-tabs', { role: 'tablist' }, [
-          tab('forth', 'Forth'),
-          tab('console', 'Console', state.unseenOutput ? m('span.unseen', { 'aria-label': ', new output' }) : null),
-        ]),
-        state.dock === 'console'
-          ? [
-            m('span.muted', `node ${pad(node)}, ${port} port`),
-            m('button.secondary.outline.small', { onclick: () => (state.console = ''), disabled: state.console === '' }, 'Clear'),
-          ]
-          : m('button.secondary.outline.small', { onclick: () => (state.entries = []), disabled: state.entries.length === 0 }, 'Clear'),
+        m('nav.dock-tabs', { role: 'tablist' }, Object.keys(panels).map(tab)),
+        m('.actions', panel.head()),
       ]),
-      m('.panel-body.dock-body', state.dock === 'forth' ? m(Forth) : m(Console)),
+      m('.panel-body.dock-body', { class: `dock-${state.dock}` }, m(panel.body)),
     ]);
   },
 };

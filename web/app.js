@@ -1,11 +1,13 @@
 // The app: the chip's view, with the map, the node and the console, in
 // regions whose borders can be dragged, or as tabs on a narrow screen.
 
-import { state, start, toggleRun, stepNext, stepRound, stepNode, back, move, openFile, openExample, examples } from './state.js';
+import {
+  state, start, toggleRun, stepNext, stepRound, stepNode, back, move, openFile, openExample, examples, flushWorkspace, workspaceKept,
+} from './state.js';
 import { Toolbar, StatusBar, RomDialog, HelpDialog, dialogs, applyTheme } from './views/toolbar.js';
 import { ChipMap } from './views/map.js';
 import { NodePanel } from './views/node.js';
-import { Dock, showDock } from './views/dock.js';
+import { Dock, showDock, panels, unseen } from './views/dock.js';
 import { EditorView } from './views/editor.js';
 
 const { m } = window;
@@ -83,9 +85,12 @@ function tabs() {
         if (dock) showDock(dock);
         saveLayout();
       },
-    }, label, dock === 'console' && state.unseenOutput ? m('span.unseen', { 'aria-label': ', new output' }) : null);
+    }, label, dock ? unseen(dock) : null);
   };
-  return m('nav.tabs', { role: 'tablist' }, [tab('node', null, 'Node'), tab('dock', 'forth', 'Forth'), tab('dock', 'console', 'Console')]);
+  return m('nav.tabs', { role: 'tablist' }, [
+    tab('node', null, 'Node'),
+    Object.entries(panels).map(([dock, panel]) => tab('dock', dock, panel.label)),
+  ]);
 }
 
 /** Shows a dock's tab, on a narrow screen too, and types into it. */
@@ -177,13 +182,24 @@ document.addEventListener('drop', async (e) => {
   const file = e.dataTransfer.files[0];
   if (!file || !state.chip) return;
   e.preventDefault();
-  await openFile(file);
+  // a handle to save to, where the browser gives one, asked for before the
+  // event ends
+  const handle = e.dataTransfer.items[0]?.getAsFileSystemHandle?.();
+  const h = await handle?.catch(() => null);
+  await openFile(file, h?.kind === 'file' ? h : null);
   m.redraw();
 });
 
-// a warning before leaving with blocks not saved
+// a warning before leaving with blocks not saved, unless the browser keeps
+// them for the next visit
 window.addEventListener('beforeunload', (e) => {
-  if (state.editor?.unsaved) e.preventDefault();
+  flushWorkspace();
+  if (state.editor?.unsaved && !workspaceKept()) e.preventDefault();
+});
+
+window.addEventListener('pagehide', flushWorkspace);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushWorkspace();
 });
 
 applyTheme();

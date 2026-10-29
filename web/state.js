@@ -30,6 +30,10 @@ const historyCapacity = 200;
 const entriesCapacity = 500;
 /** how long a frame spends running the chip, in milliseconds */
 const frameBudget = 8;
+/** lines of the trace kept */
+const traceCapacity = 5000;
+/** files kept to open again */
+const recentCapacity = 8;
 
 export const state = {
   gasim: null,
@@ -40,8 +44,13 @@ export const state = {
   waitingForInput: false,
   /** a line about what just happened, for the status bar */
   message: 'Open a file, or pick an example',
-  /** the file loaded: { name, kind, bytes, loads } */
+  /**
+   * the file loaded: { name, kind, bytes, loads, handle }, the handle where
+   * the browser gave one to read it again
+   */
   file: null,
+  /** files opened before, the latest first, as `file` */
+  recent: [],
   /** where the ROM came from: 'served', 'saved', 'given', or null */
   rom: null,
   console: '',
@@ -50,8 +59,15 @@ export const state = {
   /** each node's Status name, and the ports it moved words through */
   statuses: [],
   transfers: new Uint8Array(0),
-  /** the dock's tab: 'forth' or 'console' */
+  /** the dock's tab: 'forth', 'console', 'trace', 'breakpoints' or 'history' */
   dock: 'forth',
+  /**
+   * the trace: whether tracing, the lines kept, whether older ones were
+   * dropped, and whether only the selected node's are shown
+   */
+  trace: { on: false, lines: [], dropped: false, onlySelected: false },
+  /** the steps and runs to go back through, oldest first: { steps, cause } */
+  moments: [],
   /** console output arrived while the console's tab was not shown */
   unseenOutput: false,
   /** the prompt's answers: { target, line, answer } */
@@ -63,7 +79,7 @@ export const state = {
   inputEnded: false,
   /** the block being edited, as Sim.editorView has it */
   editor: null,
-  /** the editor's file: { name }, or null for a new one */
+  /** the editor's file: { name, handle }, or null for a new one */
   editorFile: null,
   /** the blocks of the editor's file, as text */
   blocks: [],
@@ -79,13 +95,15 @@ let rounds = 20000;
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
-/** Loads the engine and the ROM, and draws the chip as it is. */
+/** Loads the engine and the ROM, and comes back to where the last visit was. */
 export async function start() {
   state.gasim = await loadEngine();
   await findRom();
   state.history = (await store.get('history')) ?? [];
+  state.recent = (await store.get('recent')) ?? [];
   refresh();
   refreshEditor();
+  await restore();
 }
 
 /** Reads what the views show from the engine. */
@@ -96,6 +114,8 @@ export function refresh() {
   const { status, transfers } = g.statuses();
   state.statuses = Array.from(status, (s) => Status[s]);
   state.transfers = transfers.slice();
+  state.moments = g.history();
+  if (state.trace.on) takeTrace();
   givePending();
   const output = g.consoleOutput();
   if (output.length > 0) {
@@ -124,6 +144,7 @@ export function nodeIndex(number) {
 export function select(i) {
   state.selected = i;
   state.node = state.gasim.node(i);
+  keepWorkspace();
 }
 
 /** Moves the selection a node east, west, north or south, if there is one. */
@@ -145,8 +166,12 @@ export function kindOf(name) {
 /** whether a file of this kind has blocks to choose to load */
 export const hasBlocks = (kind) => kind === 'blk' || kind === 'cf';
 
-/** Loads a program, or a ROM if it is a dump or arrayForth 3's disk. */
-export async function openFile(file) {
+/**
+ * Loads a program, or a ROM if it is a dump or arrayForth 3's disk. With a
+ * handle, from the File System Access API, it can be read again and a .cf
+ * saved in place.
+ */
+export async function openFile(file, handle = null) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (/\.txt$/i.test(file.name) || /^pFDISK\.blk$/i.test(file.name)) return giveRom(bytes, file.name);
   const kind = kindOf(file.name);
@@ -154,7 +179,54 @@ export async function openFile(file) {
     state.message = `${file.name} is not a .ga, .af, .blk or .cf file`;
     return;
   }
-  load({ name: file.name, kind, bytes, loads: [0] });
+  const loads = state.recent.find((r) => r.name === file.name)?.loads ?? [0];
+  load({ name: file.name, kind, bytes, loads, handle });
+}
+
+/** whether the browser can open and save files in place */
+export const canPick = 'showOpenFilePicker' in window;
+
+const pickerTypes = [{ description: 'gasim files', accept: { 'application/octet-stream': ['.ga', '.af', '.blk', '.cf', '.txt'] } }];
+
+/** Opens a file through the browser's picker, keeping its handle. */
+export async function pickFile() {
+  let handle;
+  try {
+    [handle] = await window.showOpenFilePicker({ types: pickerTypes });
+  } catch {
+    // not chosen
+    return;
+  }
+  await openFile(await handle.getFile(), handle);
+}
+
+/** Opens a file opened before, read again where it can be. */
+export async function openRecent(name) {
+  const file = state.recent.find((r) => r.name === name);
+  if (file) load(await readAgain(file));
+}
+
+/** The file as it is now, if its handle can read it, or as it was kept. */
+async function readAgain(file) {
+  if (!file.handle) return file;
+  try {
+    if ((await file.handle.queryPermission()) !== 'granted' && (await file.handle.requestPermission()) !== 'granted') return file;
+    const bytes = new Uint8Array(await (await file.handle.getFile()).arrayBuffer());
+    return { ...file, bytes };
+  } catch {
+    return file;
+  }
+}
+
+/** Keeps a file to open again, the latest first. */
+function keepRecent(file) {
+  state.recent = [file, ...state.recent.filter((r) => r.name !== file.name)].slice(0, recentCapacity);
+  store.put('recent', state.recent);
+}
+
+export function forgetRecent() {
+  state.recent = [];
+  store.remove('recent');
 }
 
 export async function openExample(name) {
@@ -163,7 +235,7 @@ export async function openExample(name) {
     state.message = `Cannot fetch ${name}`;
     return m.redraw();
   }
-  load({ name, kind: kindOf(name), bytes: new Uint8Array(await response.arrayBuffer()), loads: [0] });
+  load({ name, kind: kindOf(name), bytes: new Uint8Array(await response.arrayBuffer()), loads: [0], example: true });
   m.redraw();
 }
 
@@ -171,20 +243,25 @@ export async function openExample(name) {
 export function load(file) {
   pause();
   state.file = file;
+  if (!file.example) keepRecent(file);
   forgetInput();
   const error = state.gasim.load(Kind[file.kind], file.bytes, hasBlocks(file.kind) ? file.loads : []);
   state.message = error ? `${file.name}: ${error}` : `Loaded ${file.name}`;
   // the engine opens colorForth in the editor too
   if (file.kind === 'cf') {
-    state.editorFile = { name: file.name };
+    state.editorFile = { name: file.name, handle: file.handle ?? null };
     refreshEditor();
   }
   refresh();
+  keepWorkspace();
 }
 
-/** Loads the file again, such as with other blocks or a new ROM. */
-export function reload() {
-  if (state.file) load(state.file);
+/**
+ * Loads the file again, such as with other blocks or a new ROM, as it is
+ * now if it can be read again.
+ */
+export async function reload() {
+  if (state.file) load(await readAgain(state.file));
 }
 
 // ---------- the ROM ----------
@@ -207,7 +284,7 @@ export async function giveRom(bytes, name) {
     return m.redraw();
   }
   state.rom = (await store.put('rom', bytes)) ? 'saved' : 'given';
-  reload();
+  await reload();
   state.message = `ROM read from ${name}${state.file ? `, and ${state.file.name} loaded again` : ''}`;
   m.redraw();
 }
@@ -299,7 +376,14 @@ export function stepNode() {
 
 export function back() {
   if (state.running) return;
-  state.message = state.gasim.back() ? `Back to ${state.gasim.chip().steps} steps` : 'Nothing to go back to';
+  state.message = state.gasim.back() ? `Back to ${state.gasim.chip().steps.toLocaleString()} steps` : 'Nothing to go back to';
+  refresh();
+}
+
+/** Goes back before the `n`th step or run kept, forgetting those after it. */
+export function backTo(n) {
+  if (state.running) return;
+  if (state.gasim.backTo(n)) state.message = `Back to ${state.gasim.chip().steps.toLocaleString()} steps`;
   refresh();
 }
 
@@ -311,10 +395,148 @@ export function reset() {
   refresh();
 }
 
-export function toggleBreakpoint(address) {
-  const set = state.gasim.toggleBreakpoint(state.selected, address);
+export function toggleBreakpoint(address, i = state.selected) {
+  const set = state.gasim.toggleBreakpoint(i, address);
   if (set === null) state.message = 'There are too many breakpoints';
   refresh();
+  keepWorkspace();
+}
+
+/** Watches a node's reads or writes through a port, or stops watching. */
+export function toggleWatch(i, port, write) {
+  const set = state.gasim.toggleWatch(i, port, write);
+  if (set === null) state.message = 'There are too many watches';
+  refresh();
+  keepWorkspace();
+}
+
+export function clearBreakpoints() {
+  state.gasim.clearBreakpoints();
+  state.message = 'The breakpoints and watches are removed';
+  refresh();
+  keepWorkspace();
+}
+
+// ---------- the trace ----------
+
+export function toggleTracing() {
+  const on = !state.trace.on;
+  if (!state.gasim.setTracing(on)) {
+    state.message = 'There is not the memory to trace';
+    return;
+  }
+  state.trace.on = on;
+  state.message = on ? 'Tracing each step that runs code' : 'Not tracing';
+  keepWorkspace();
+}
+
+/** Takes what was traced, keeping the last lines. */
+function takeTrace() {
+  const { text, dropped } = state.gasim.takeTrace();
+  if (!text) return;
+  const t = state.trace;
+  const lines = text.split('\n');
+  // the text ends a line
+  lines.pop();
+  t.lines = t.lines.concat(lines);
+  if (dropped || t.lines.length > traceCapacity) t.dropped = true;
+  if (t.lines.length > traceCapacity) t.lines = t.lines.slice(-traceCapacity);
+}
+
+export function clearTrace() {
+  state.trace.lines = [];
+  state.trace.dropped = false;
+}
+
+/** The lines of the trace shown: all, or the selected node's. */
+export function traceShown() {
+  const { lines, onlySelected } = state.trace;
+  if (!onlySelected) return lines;
+  const prefix = `${String(nodeNumber(state.selected)).padStart(3, '0')} `;
+  return lines.filter((line) => line.startsWith(prefix));
+}
+
+export function saveTrace() {
+  const lines = traceShown();
+  download(new TextEncoder().encode(lines.map((line) => `${line}\n`).join('')), 'trace.txt', 'text/plain');
+  state.message = `Saved ${lines.length.toLocaleString()} lines as trace.txt`;
+}
+
+/** Gives the user bytes as a file to save, wherever downloads go. */
+function download(bytes, name, type = 'application/octet-stream') {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(new Blob([bytes], { type }));
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+// ---------- the workspace ----------
+
+let workspaceTimer = null;
+/** not until the last visit's workspace is back, so as not to lose it */
+let restored = false;
+/** whether the workspace is kept as it is now, and which keeping was last */
+let kept = true;
+let keepings = 0;
+
+/** Keeps where the page is for the next visit, soon after it changes. */
+function keepWorkspace() {
+  if (!restored) return;
+  kept = false;
+  clearTimeout(workspaceTimer);
+  workspaceTimer = setTimeout(flushWorkspace, 500);
+}
+
+/** Keeps the workspace now, such as as the page is left. */
+export function flushWorkspace() {
+  if (!restored || kept) return;
+  clearTimeout(workspaceTimer);
+  const keeping = ++keepings;
+  const { file, chip, editor, editorFile } = state;
+  store.put('workspace', {
+    file,
+    selected: state.selected,
+    breakpoints: chip.breakpoints,
+    watches: chip.watches,
+    tracing: state.trace.on,
+    editor: { name: editorFile?.name ?? null, handle: editorFile?.handle ?? null, bytes: state.gasim.editorContents(), unsaved: editor.unsaved, block: editor.block },
+  }).then((ok) => {
+    if (ok && keeping === keepings) kept = true;
+  });
+}
+
+/** whether the blocks not saved are at least kept in the browser */
+export const workspaceKept = () => kept;
+
+/** Comes back to where the last visit was: its file, editor and breakpoints. */
+async function restore() {
+  const w = await store.get('workspace');
+  if (!w) {
+    restored = true;
+    return;
+  }
+  const g = state.gasim;
+  if (w.tracing && g.setTracing(true)) state.trace.on = true;
+  if (w.file) load(w.file);
+  for (const b of w.breakpoints ?? []) {
+    const i = nodeIndex(b.node);
+    if (i !== null && !state.chip.breakpoints.some((k) => k.node === b.node && k.address === b.address)) g.toggleBreakpoint(i, b.address);
+  }
+  for (const watch of w.watches ?? []) {
+    const i = nodeIndex(watch.node);
+    if (i !== null && !state.chip.watches.some((k) => k.node === watch.node && k.port === watch.port && k.write === watch.write)) g.toggleWatch(i, watch.port, watch.write);
+  }
+  if (w.editor?.bytes?.length > 0 && !g.editorOpen(w.editor.bytes)) {
+    if (w.editor.unsaved) g.editorUnsaved();
+    g.editorGoTo(w.editor.block);
+    state.editorFile = w.editor.name ? { name: w.editor.name, handle: w.editor.handle } : null;
+  }
+  if (w.selected < state.chip.rows * state.chip.columns) select(w.selected);
+  if (w.file) state.message = `Back to ${w.file.name}`;
+  restored = true;
+  refresh();
+  refreshEditor();
 }
 
 // ---------- the prompt ----------
@@ -398,6 +620,7 @@ let blocksTimer = null;
 /** Reads the block being edited, and soon after, the blocks as text. */
 export function refreshEditor() {
   state.editor = state.gasim.editor();
+  keepWorkspace();
   clearTimeout(blocksTimer);
   blocksTimer = setTimeout(() => {
     state.blocks = state.gasim.editorBlocks();
@@ -440,20 +663,49 @@ export function toggleMarks() {
   state.showMarks = !state.showMarks;
 }
 
-/** Saves the editor's blocks as a download, as they are in the file. */
-export function saveEditor() {
+/**
+ * Saves the editor's blocks: in place, to the file they were opened from or
+ * last saved to, where the browser can, or else as a download. `as` asks
+ * where to save them first.
+ */
+export async function saveEditor(as = false) {
   const bytes = state.gasim.editorContents();
   const name = state.editorFile?.name ?? 'blocks.cf';
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
-  link.download = name;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-  state.gasim.editorSaved();
-  state.editorFile = { name };
+  let handle = as ? null : state.editorFile?.handle ?? null;
+  if (!handle && 'showSaveFilePicker' in window) {
+    try {
+      handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'colorForth blocks', accept: { 'application/octet-stream': ['.cf'] } }] });
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      handle = null;
+    }
+  }
   const compressed = state.editor.compressed ? ', uncompressed' : '';
-  state.message = `Saved ${bytes.length / 1024} blocks as ${name}${compressed}`;
+  const count = bytes.length / 1024;
+  const blocks = `${count} block${count === 1 ? '' : 's'}`;
+  if (handle) {
+    try {
+      const mode = { mode: 'readwrite' };
+      if ((await handle.queryPermission(mode)) !== 'granted' && (await handle.requestPermission(mode)) !== 'granted') {
+        throw new Error('the browser was not allowed to');
+      }
+      const writable = await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+    } catch (error) {
+      state.message = `Cannot save ${handle.name}: ${error.message}`;
+      return m.redraw();
+    }
+    state.editorFile = { name: handle.name, handle };
+    state.message = `Saved ${blocks} to ${handle.name}${compressed}`;
+  } else {
+    download(bytes, name);
+    state.editorFile = { name, handle: null };
+    state.message = `Saved ${blocks} as ${name}${compressed}, wherever downloads go`;
+  }
+  state.gasim.editorSaved();
   refreshEditor();
+  m.redraw();
 }
 
 /** Compiles the block, and starts the chip again with its code. */

@@ -94,12 +94,21 @@ export fn reset() void {
     sim.reset();
 }
 
-export fn remember() void {
-    sim.remember();
+/// saves the chip before a run, a `Sim.Cause`
+export fn remember(cause: u8) void {
+    sim.remember(std.enums.fromInt(Sim.Cause, cause) orelse .run);
 }
 
 export fn back() bool {
     return sim.back();
+}
+
+export fn backTo(n: usize) bool {
+    return sim.backTo(n);
+}
+
+export fn historyView() usize {
+    return written(sim.historyView());
 }
 
 /// 1 if the breakpoint is set now, 0 if not, -1 if there are too many
@@ -111,6 +120,24 @@ export fn toggleBreakpoint(i: u16, address: u16) i32 {
 export fn toggleWatch(i: u16, direction: u8, write: bool) i32 {
     const d = std.enums.fromInt(gasim.Direction, direction) orelse return -1;
     return @intFromBool(sim.toggleWatch(i, d, write) catch return -1);
+}
+
+export fn clearBreakpoints() void {
+    sim.clearBreakpoints();
+}
+
+// ---------- the trace ----------
+
+export fn setTracing(on: bool) bool {
+    sim.setTracing(on) catch return false;
+    return true;
+}
+
+/// What was traced since last called, in `out`. Returns its length, with
+/// the top bit set if older lines were dropped.
+export fn takeTrace() u32 {
+    const dropped = sim.takeTrace();
+    return @as(u32, @intCast(sim.out.written().len)) | @as(u32, @intFromBool(dropped)) << 31;
 }
 
 /// each node's `Sim.Status`, then the ports it moved words through, as
@@ -205,6 +232,12 @@ export fn editorContentsPtr() [*]const u8 {
 
 export fn editorSaved() void {
     sim.editor.saved();
+}
+
+/// notes that the blocks opened were not saved, as when they are kept in
+/// the browser between visits
+export fn editorUnsaved() void {
+    sim.editor.modified = true;
 }
 
 /// Compiles the block being edited and starts the chip again with it, as

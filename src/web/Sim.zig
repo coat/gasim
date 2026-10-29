@@ -27,6 +27,8 @@ start: Chip.Snapshot,
 /// the chip before each step or run, the oldest first, with one more saved
 /// before it is kept, as the TUI keeps them
 history: [history_capacity + 1]?Chip.Snapshot = @splat(null),
+/// what each snapshot in `history` was saved before
+causes: [history_capacity + 1]Cause = @splat(.run),
 history_start: usize = 0,
 history_len: usize = 0,
 pending: bool = false,
@@ -35,6 +37,8 @@ editor: Editor = undefined,
 editor_blocks: []u8 = &.{},
 /// the editor's file was a compressed arrayForth 2 image
 editor_compressed: bool = false,
+/// the trace, while tracing
+trace: ?*Tail = null,
 /// text and JSON for JavaScript to read
 out: Writer.Allocating,
 
@@ -42,6 +46,8 @@ pub const layout: Chip.Layout = .ga144;
 pub const console_node = 0;
 pub const console_port: Direction = .up;
 pub const history_capacity = 64;
+/// how much of the trace is kept between `takeTrace`s
+pub const trace_capacity = 256 * 1024;
 /// blocks the editor's file can grow to, as the TUI's
 pub const editor_capacity = 256;
 
@@ -67,6 +73,18 @@ pub const Stop = enum(u8) {
     input,
     /// a breakpoint or watch was hit, as `out` describes
     hit,
+};
+
+/// what the chip was saved before, in the history
+pub const Cause = enum(u8) {
+    step,
+    round,
+    node,
+    run,
+    /// a line at the prompt
+    line,
+    reset,
+    compile,
 };
 
 pub fn init(self: *Sim, gpa: Allocator) Allocator.Error!void {
@@ -106,6 +124,7 @@ pub fn deinit(self: *Sim) void {
     gpa.free(self.descriptors);
     gpa.free(self.editor_blocks);
     self.sources.deinit();
+    self.setTracing(false) catch unreachable;
     self.console_out.deinit();
     self.forth_out.deinit();
     self.out.deinit();
@@ -114,6 +133,7 @@ pub fn deinit(self: *Sim) void {
 fn attach(self: *Sim) void {
     self.console = .{ .output = &self.console_out.writer };
     self.chip.attachConsole(&self.console, console_node, console_port) catch unreachable;
+    self.chip.trace = if (self.trace) |t| &t.writer else null;
 }
 
 fn newSession(self: *Sim, blocks: ?[]const u8) void {
@@ -148,10 +168,17 @@ pub fn setRom(self: *Sim, bytes: []const u8) error{ InvalidRom, OutOfMemory }!vo
 /// editor. On an error, `out` says what and where.
 pub fn load(self: *Sim, kind: Kind, file: []const u8, loads: []const u32) error{ LoadFailed, OutOfMemory }!void {
     self.out.clearRetainingCapacity();
+    // the breakpoints and watches stay, as the chip starts again
+    var chip: Chip = try .init(self.gpa, layout);
+    chip.breakpoints = self.chip.breakpoints;
+    chip.watches = self.chip.watches;
     self.chip.deinit(self.gpa);
-    self.chip = try .init(self.gpa, layout);
+    self.chip = chip;
     self.attach();
     if (self.roms) |roms| self.chip.loadRom(roms) catch unreachable;
+    // a file that fails to load leaves the chip empty to go back to, rather
+    // than as the last file set it up
+    self.chip.save(&self.start);
     _ = self.sources.reset(.retain_capacity);
     self.forth_out.clearRetainingCapacity();
     self.console_out.clearRetainingCapacity();
@@ -287,20 +314,20 @@ fn stopped(self: *Sim) error{OutOfMemory}!Stop {
 /// Steps the next node to run, returning its index, or null when every node
 /// is waiting
 pub fn stepNext(self: *Sim) error{OutOfMemory}!?u16 {
-    self.remember();
+    self.remember(.step);
     return self.chip.stepNext() catch error.OutOfMemory;
 }
 
 /// Steps each runnable node once. Returns false when every node is waiting.
 pub fn stepRound(self: *Sim) error{OutOfMemory}!bool {
-    self.remember();
+    self.remember(.round);
     return self.chip.advance() catch error.OutOfMemory;
 }
 
 /// Steps one node, even one that is waiting, which then tries again.
 /// Returns false if it is still waiting.
 pub fn stepNode(self: *Sim, i: u16) error{OutOfMemory}!bool {
-    self.remember();
+    self.remember(.node);
     _ = self.chip.service() catch return error.OutOfMemory;
     self.chip.stepNode(i);
     return !self.chip.nodes[i].suspended;
@@ -309,7 +336,7 @@ pub fn stepNode(self: *Sim, i: u16) error{OutOfMemory}!bool {
 /// Goes back to the chip as it was set up, with the console's input not
 /// yet read forgotten, and not ended
 pub fn reset(self: *Sim) void {
-    self.remember();
+    self.remember(.reset);
     self.chip.restore(&self.start);
     self.console.taken_start = 0;
     self.console.taken_end = 0;
@@ -318,11 +345,13 @@ pub fn reset(self: *Sim) void {
 
 /// Saves the chip, before stepping or running it, to go back to if it
 /// changes
-pub fn remember(self: *Sim) void {
+pub fn remember(self: *Sim, cause: Cause) void {
     self.keepPending();
-    const snapshot = &self.history[self.historyIndex(self.history_len)];
+    const index = self.historyIndex(self.history_len);
+    const snapshot = &self.history[index];
     if (snapshot.* == null) snapshot.* = Chip.Snapshot.init(self.gpa, layout) catch return;
     self.chip.save(&snapshot.*.?);
+    self.causes[index] = cause;
     self.pending = true;
 }
 
@@ -352,6 +381,34 @@ pub fn historyLen(self: *Sim) usize {
     return self.history_len;
 }
 
+/// Goes back to before the `n`th step or run kept, the oldest 0, forgetting
+/// those after it. Returns false if there is no such step.
+pub fn backTo(self: *Sim, n: usize) bool {
+    if (n >= self.historyLen()) return false;
+    while (self.history_len > n) _ = self.back();
+    return true;
+}
+
+const Moment = struct {
+    /// the steps taken by then
+    steps: u64,
+    cause: Cause,
+};
+
+/// Writes the steps and runs to go back through into `out` as JSON, the
+/// oldest first
+pub fn historyView(self: *Sim) error{OutOfMemory}![]const u8 {
+    var moments: [history_capacity]Moment = undefined;
+    const len = self.historyLen();
+    for (moments[0..len], 0..) |*moment, k| {
+        const index = self.historyIndex(k);
+        moment.* = .{ .steps = self.history[index].?.steps, .cause = self.causes[index] };
+    }
+    self.out.clearRetainingCapacity();
+    try self.writeJson(moments[0..len]);
+    return self.out.written();
+}
+
 fn historyIndex(self: Sim, i: usize) usize {
     return (self.history_start + i) % self.history.len;
 }
@@ -372,6 +429,62 @@ pub fn toggleBreakpoint(self: *Sim, i: u16, address: u9) error{Full}!bool {
 pub fn toggleWatch(self: *Sim, i: u16, direction: Direction, write: bool) error{Full}!bool {
     return self.chip.watches.toggle(.{ .index = i, .direction = direction, .write = write });
 }
+
+/// Removes every breakpoint and watch
+pub fn clearBreakpoints(self: *Sim) void {
+    self.chip.breakpoints = .{};
+    self.chip.watches = .{};
+}
+
+// ---------- the trace ----------
+
+/// Starts writing a line for each step that executes code, as `--trace`
+/// does, or stops
+pub fn setTracing(self: *Sim, on: bool) error{OutOfMemory}!void {
+    if (on and self.trace == null) {
+        const t = try self.gpa.create(Tail);
+        errdefer self.gpa.destroy(t);
+        t.* = .{ .writer = .{ .vtable = &.{ .drain = Tail.drain }, .buffer = try self.gpa.alloc(u8, trace_capacity) } };
+        self.trace = t;
+    } else if (!on) if (self.trace) |t| {
+        self.gpa.free(t.writer.buffer);
+        self.gpa.destroy(t);
+        self.trace = null;
+    };
+    self.chip.trace = if (self.trace) |t| &t.writer else null;
+}
+
+/// Writes what was traced since this was last called into `out`, and
+/// returns whether older lines were dropped to make room
+pub fn takeTrace(self: *Sim) bool {
+    self.out.clearRetainingCapacity();
+    const t = self.trace orelse return false;
+    self.out.writer.writeAll(t.writer.buffered()) catch {};
+    t.writer.end = 0;
+    defer t.dropped = false;
+    return t.dropped;
+}
+
+/// A writer that keeps the last of what is written to it, dropping the
+/// older half of its lines whenever its buffer is full
+const Tail = struct {
+    writer: Writer,
+    dropped: bool = false,
+
+    fn drain(w: *Writer, data: []const []const u8, splat: usize) Writer.Error!usize {
+        const self: *Tail = @alignCast(@fieldParentPtr("writer", w));
+        self.dropped = true;
+        const kept = w.buffer[w.end / 2 .. w.end];
+        const lines = if (std.mem.indexOfScalar(u8, kept, '\n')) |nl| kept[nl + 1 ..] else kept[kept.len..];
+        @memmove(w.buffer[0..lines.len], lines);
+        w.end = lines.len;
+        // what cannot fit even so is dropped too
+        if (data[0].len <= w.buffer.len - w.end) return 0;
+        var len: usize = 0;
+        for (data[0 .. data.len - 1]) |d| len += d.len;
+        return len + data[data.len - 1].len * splat;
+    }
+};
 
 // ---------- views ----------
 
@@ -572,7 +685,7 @@ const Answer = struct {
 /// Interprets a line at the arrayForth 3 prompt with node `target` as the
 /// IDE's, and writes what came of it into `out` as JSON
 pub fn interpret(self: *Sim, line: []const u8, target: u16) error{OutOfMemory}![]const u8 {
-    self.remember();
+    self.remember(.line);
     self.forth_out.clearRetainingCapacity();
     self.session.setTarget(target);
     const kept = try self.sources.allocator().dupe(u8, line);
@@ -669,7 +782,7 @@ pub fn compile(self: *Sim) error{ CompileFailed, OutOfMemory }!void {
         self.out.writer.print("{t} at {s} in block {d}", .{ err, self.diagnostic.token, place.block }) catch return error.OutOfMemory;
         return error.CompileFailed;
     };
-    self.remember();
+    self.remember(.compile);
     self.chip.restore(&self.start);
     const assembled = self.session.assembled();
     var nodes: usize = 0;
@@ -867,6 +980,16 @@ test "errors say where they are" {
     try std.testing.expectEqualStrings("the file has fewer blocks than are loaded", sim.out.written());
 }
 
+test "a file that fails to load leaves nothing of the last to reset to" {
+    const sim = try testSim();
+    defer freeSim(sim);
+    try sim.load(.ga, hello, &.{});
+    try std.testing.expectError(error.LoadFailed, sim.load(.ga, ": main\n  frob", &.{}));
+    sim.reset();
+    try std.testing.expectEqual(.settled, try sim.run(10_000));
+    try std.testing.expectEqualStrings("", sim.takeConsoleOutput());
+}
+
 test "stepping, breakpoints, and going back" {
     const sim = try testSim();
     defer freeSim(sim);
@@ -1017,4 +1140,62 @@ test "blocks as text" {
     try std.testing.expectEqual(1, views.value.len);
     try std.testing.expectEqualStrings(":one ]two\n", views.value[0].text);
     try std.testing.expect(!views.value[0].read_only);
+}
+
+test "tracing" {
+    const sim = try testSim();
+    defer freeSim(sim);
+    try sim.setTracing(true);
+    try sim.load(.ga, hello, &.{});
+    _ = try sim.stepNext();
+    try std.testing.expect(!sim.takeTrace());
+    try std.testing.expectStringStartsWith(sim.out.written(), "000 000 ");
+    _ = sim.takeTrace();
+    try std.testing.expectEqualStrings("", sim.out.written());
+
+    try sim.setTracing(false);
+    _ = try sim.stepNext();
+    try std.testing.expect(!sim.takeTrace());
+    try std.testing.expectEqualStrings("", sim.out.written());
+}
+
+test "a trace bigger than its buffer keeps whole lines" {
+    var buffer: [64]u8 = undefined;
+    var tail: Tail = .{ .writer = .{ .vtable = &.{ .drain = Tail.drain }, .buffer = &buffer } };
+    for (0..20) |k| try tail.writer.print("line {d:0>3}\n", .{k});
+    try std.testing.expect(tail.dropped);
+    const kept = tail.writer.buffered();
+    try std.testing.expectStringStartsWith(kept, "line ");
+    try std.testing.expectStringEndsWith(kept, "line 019\n");
+}
+
+test "the history, and going back to a step in it" {
+    const sim = try testSim();
+    defer freeSim(sim);
+    try sim.load(.ga, hello, &.{});
+    _ = try sim.stepNext();
+    _ = try sim.stepRound();
+    _ = try sim.stepNode(0);
+    const moments = try std.json.parseFromSlice([]const Moment, std.testing.allocator, try sim.historyView(), .{});
+    defer moments.deinit();
+    try std.testing.expectEqual(3, moments.value.len);
+    try std.testing.expectEqual(.step, moments.value[0].cause);
+    try std.testing.expectEqual(0, moments.value[0].steps);
+    try std.testing.expectEqual(.node, moments.value[2].cause);
+
+    try std.testing.expect(sim.backTo(1));
+    try std.testing.expectEqual(1, sim.historyLen());
+    try std.testing.expectEqual(moments.value[1].steps, sim.chip.steps);
+    try std.testing.expect(!sim.backTo(1));
+}
+
+test "breakpoints stay as a file is loaded again" {
+    const sim = try testSim();
+    defer freeSim(sim);
+    try sim.load(.ga, hello, &.{});
+    _ = try sim.toggleBreakpoint(0, 4);
+    try sim.load(.ga, hello, &.{});
+    try std.testing.expectEqual(.hit, try sim.run(10_000));
+    sim.clearBreakpoints();
+    try std.testing.expectEqual(.settled, try sim.run(10_000));
 }
