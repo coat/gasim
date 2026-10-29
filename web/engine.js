@@ -34,7 +34,13 @@ export async function loadEngine(url = 'gasim.wasm') {
   if (!x.init()) throw new Error('gasim: out of memory');
 
   const out = (n = x.outLen()) => text(x.outPtr(), n);
-  const json = (n) => (n ? JSON.parse(out(n)) : null);
+  // a view of nothing is out of memory, as JSON is never empty
+  const json = (n) => {
+    if (!n) throw new Error('gasim: out of memory');
+    return JSON.parse(out(n));
+  };
+  // why a call failed, which only running out of memory leaves unsaid
+  const why = () => out() || 'gasim: out of memory';
 
   /** Calls f with bytes (a Uint8Array or a string) copied into wasm memory. */
   function withBytes(bytes, f) {
@@ -71,7 +77,7 @@ export async function loadEngine(url = 'gasim.wasm') {
     load(kind, bytes, loads = []) {
       const l = new Uint32Array(loads);
       return withBytes(bytes, (p, n) =>
-        withBytes(new Uint8Array(l.buffer), (lp) => (x.load(kind, p, n, lp, l.length) ? null : out())),
+        withBytes(new Uint8Array(l.buffer), (lp) => (x.load(kind, p, n, lp, l.length) ? null : why())),
       );
     },
     /**
@@ -100,7 +106,7 @@ export async function loadEngine(url = 'gasim.wasm') {
     /** Goes back before the `n`th step or run kept, the oldest 0. */
     backTo: (n) => !!x.backTo(n),
     /** The steps and runs to go back through, oldest first: { steps, cause }. */
-    history: () => json(x.historyView()) ?? [],
+    history: () => json(x.historyView()),
     /** Returns whether it is set now, or null with too many. */
     toggleBreakpoint(i, address) {
       const r = x.toggleBreakpoint(i, address);
@@ -135,7 +141,7 @@ export async function loadEngine(url = 'gasim.wasm') {
 
     /** Interprets a line with node `target` as the IDE's. */
     interpret: (line, target) => withBytes(line, (p, n) => json(x.interpret(p, n, target))),
-    complete: (prefix) => withBytes(prefix, (p, n) => json(x.complete(p, n)) ?? []),
+    complete: (prefix) => withBytes(prefix, (p, n) => json(x.complete(p, n))),
 
     // ---------- the console ----------
 
@@ -152,7 +158,7 @@ export async function loadEngine(url = 'gasim.wasm') {
     // ---------- the editor ----------
 
     /** Opens colorForth blocks; returns null, or why it could not. */
-    editorOpen: (bytes) => withBytes(bytes, (p, n) => (x.editorOpen(p, n) ? null : out())),
+    editorOpen: (bytes) => withBytes(bytes, (p, n) => (x.editorOpen(p, n) ? null : why())),
     /**
      * Gives the editor a key: a character, or a name such as 'enter'.
      * Returns the Action, or { error } with its message.
@@ -161,8 +167,10 @@ export async function loadEngine(url = 'gasim.wasm') {
       const named = editorKeys.indexOf(key);
       const code = named > 0 ? named : 0;
       const char = named > 0 ? 0 : key.charCodeAt(0);
+      // colorForth has no characters beyond ASCII, and the editor takes a byte
+      if (char >= 0x80) return 'none';
       const r = x.editorKey(code, char, ctrl ? 1 : 0);
-      return r < 0 ? { error: out() } : Action[r];
+      return r < 0 ? { error: why() } : Action[r];
     },
     editor: () => json(x.editorView()),
     editorMoveTo: (i) => x.editorMoveTo(i),
@@ -177,9 +185,9 @@ export async function loadEngine(url = 'gasim.wasm') {
     /** Compiles the block and starts the chip again: { ok, message }. */
     editorCompile() {
       const ok = !!x.editorCompile();
-      return { ok, message: out() };
+      return { ok, message: ok ? out() : why() };
     },
     /** Each block of the file: { block, read_only, empty, text }. */
-    editorBlocks: () => json(x.editorBlocks()) ?? [],
+    editorBlocks: () => json(x.editorBlocks()),
   };
 }
