@@ -78,11 +78,12 @@ const Screen = enum { chip, editor };
 const Border = enum { columns, rows };
 
 const colors = struct {
-    const label: vaxis.Style = .{ .fg = .{ .index = 6 }, .bold = true };
+    const label: vaxis.Style = .{ .fg = .{ .index = 4 }, .bold = true };
     const address: vaxis.Style = .{ .fg = .{ .index = 4 } };
     const raw: vaxis.Style = .{ .fg = .{ .index = 8 } };
     const literal: vaxis.Style = .{ .fg = .{ .index = 3 } };
     const heading: vaxis.Style = .{ .bold = true };
+    const focused: vaxis.Style = .{ .fg = .{ .index = 4 } };
     const dim: vaxis.Style = .{ .dim = true };
     const breakpoint: vaxis.Style = .{ .fg = .{ .index = 1 }, .bold = true };
 };
@@ -1000,7 +1001,7 @@ const Tui = struct {
 
     /// Draws a bordered panel with a title, returning the window inside it
     fn drawPanel(self: *Tui, win: vaxis.Window, which: Panel, x: u16, y: u16, width: u16, height: u16, title: []const u8) vaxis.Window {
-        const style: vaxis.Style = if (self.focus == which) .{ .fg = .{ .index = 6 } } else colors.dim;
+        const style: vaxis.Style = if (self.focus == which) colors.focused else colors.dim;
         const inside = win.child(.{ .x_off = x, .y_off = y, .width = width, .height = height, .border = .{ .where = .all, .style = style } });
         // within the top border
         const heading = win.child(.{ .x_off = x + 2, .y_off = y, .width = width -| 3, .height = 1 });
@@ -1348,7 +1349,7 @@ const Tui = struct {
         const cf = self.options.colorforth.?;
         const editor = cf.editor;
         const body_height = win.height - 1;
-        const inside = win.child(.{ .height = body_height, .border = .{ .where = .all, .style = .{ .fg = .{ .index = 6 } } } });
+        const inside = win.child(.{ .height = body_height, .border = .{ .where = .all, .style = colors.focused } });
         const title = self.print("5 colorforth  block {d}{s}  {s}", .{ editor.block, if (editor.unsaved()) " +" else "", std.fs.path.basename(cf.path) });
         _ = win.child(.{ .x_off = 2, .width = win.width -| 3, .height = 1 }).printSegment(.{ .text = title, .style = .{ .bold = true } }, .{ .wrap = .none });
 
