@@ -656,6 +656,71 @@ pub fn editorKey(self: *Sim, k: Editor.Key) Editor.Error!Editor.Action {
     };
 }
 
+/// Compiles the block being edited, and the blocks it loads, and starts the
+/// chip again as it was set up, with the code compiled so far, the block's
+/// replacing what it compiled before, as `L` does in the TUI. `out` says
+/// what came of it; an error in the block moves the cursor to its word.
+pub fn compile(self: *Sim) error{ CompileFailed, OutOfMemory }!void {
+    const editor = &self.editor;
+    self.out.clearRetainingCapacity();
+    self.session.loadColorForth(editor.contents(), @intCast(editor.block)) catch |err| {
+        const place = colorforth.place(self.diagnostic.line);
+        if (place.block == editor.block and place.token <= editor.len) editor.cursor = place.token - 1;
+        self.out.writer.print("{t} at {s} in block {d}", .{ err, self.diagnostic.token, place.block }) catch return error.OutOfMemory;
+        return error.CompileFailed;
+    };
+    self.remember();
+    self.chip.restore(&self.start);
+    const assembled = self.session.assembled();
+    var nodes: usize = 0;
+    for (assembled.programs) |program| if (program.bin == null) {
+        self.chip.setUp(.ofProgram(program), assembled.programs) catch continue;
+        nodes += 1;
+    };
+    const w = &self.out.writer;
+    if (assembled.first_difference) |first| {
+        w.print("compiled, and started the chip again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{
+            nodes, assembled.feedback_differs, first.noted, first.found,
+        }) catch return error.OutOfMemory;
+    } else w.print("compiled, and started the chip again with {d} nodes' code", .{nodes}) catch return error.OutOfMemory;
+}
+
+const BlockView = struct {
+    block: usize,
+    /// not colorForth source, such as an arrayForth 2 kernel's
+    read_only: bool,
+    empty: bool,
+    /// the block as text, as `gasim blocks` lists it
+    text: []const u8,
+};
+
+/// Writes each block of the editor's file into `out` as JSON, up to the
+/// last that holds anything, or the file's own count
+pub fn blocksView(self: *Sim) error{OutOfMemory}![]const u8 {
+    var arena: std.heap.ArenaAllocator = .init(self.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const editor = &self.editor;
+    const bytes = editor.contents();
+    const count = bytes.len / colorforth.block_size;
+    const views = try a.alloc(BlockView, count);
+    var tokens: [colorforth.cells_per_block]colorforth.Token = undefined;
+    for (views, 0..) |*view, b| {
+        const block = bytes[b * colorforth.block_size ..][0..colorforth.block_size];
+        view.* = .{ .block = b, .read_only = true, .empty = false, .text = "" };
+        const decoded = colorforth.decode(block, &tokens) catch continue;
+        var encoded: [colorforth.block_size]u8 = undefined;
+        colorforth.encode(decoded, &encoded) catch continue;
+        if (!std.mem.eql(u8, block, &encoded)) continue;
+        var text: Writer.Allocating = .init(a);
+        colorforth.writeText(decoded, &text.writer) catch return error.OutOfMemory;
+        view.* = .{ .block = b, .read_only = false, .empty = decoded.len == 0, .text = text.written() };
+    }
+    self.out.clearRetainingCapacity();
+    try self.writeJson(views);
+    return self.out.written();
+}
+
 const TokenView = struct {
     text: []const u8,
     color: colorforth.Color,
@@ -907,4 +972,49 @@ test "a file that is no ROM is refused" {
     defer freeSim(sim);
     try std.testing.expectError(error.InvalidRom, sim.setRom("not a rom\n"));
     try std.testing.expectEqual(null, sim.roms);
+}
+
+test "compiling the block being edited starts the chip again with its code" {
+    const sim = try testSim();
+    defer freeSim(sim);
+    try sim.load(.ga, hello, &.{});
+    _ = try sim.run(10_000);
+    try std.testing.expectEqualStrings("Hello", sim.takeConsoleOutput());
+
+    const ctrl_y: Editor.Key = .{ .code = .{ .char = 'y' }, .ctrl = true };
+    _ = try sim.editorKey(.char('i'));
+    _ = try sim.editorKey(ctrl_y);
+    for ("1 node 0 org") |c| _ = try sim.editorKey(.char(c));
+    _ = try sim.editorKey(.{ .code = .enter });
+    for ("main up b! 72 !b left b! @b") |c| _ = try sim.editorKey(.char(c));
+    _ = try sim.editorKey(.{ .code = .escape });
+    try sim.compile();
+    try std.testing.expectEqualStrings("compiled, and started the chip again with 1 nodes' code", sim.out.written());
+
+    // node 000 is as it started, and node 001 has the block's code
+    try std.testing.expect(sim.chip.nodes[1].mem[0] != 0);
+    try std.testing.expectEqual(.settled, try sim.run(10_000));
+    try std.testing.expectEqualStrings("Hello", sim.takeConsoleOutput());
+
+    // an error moves the cursor to the word
+    _ = try sim.editorKey(.char('a'));
+    for (" frob") |c| _ = try sim.editorKey(.char(c));
+    _ = try sim.editorKey(.{ .code = .escape });
+    try std.testing.expectError(error.CompileFailed, sim.compile());
+    try std.testing.expectEqualStrings("frob", sim.editor.current().?.text());
+}
+
+test "blocks as text" {
+    const sim = try testSim();
+    defer freeSim(sim);
+    _ = try sim.editorKey(.char('i'));
+    for ("one two") |c| _ = try sim.editorKey(.char(c));
+    _ = try sim.editorKey(.{ .code = .escape });
+    _ = try sim.editorKey(.char(']'));
+
+    const views = try std.json.parseFromSlice([]const BlockView, std.testing.allocator, try sim.blocksView(), .{});
+    defer views.deinit();
+    try std.testing.expectEqual(1, views.value.len);
+    try std.testing.expectEqualStrings(":one ]two\n", views.value[0].text);
+    try std.testing.expect(!views.value[0].read_only);
 }

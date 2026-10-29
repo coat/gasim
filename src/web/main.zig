@@ -206,3 +206,15 @@ export fn editorContentsPtr() [*]const u8 {
 export fn editorSaved() void {
     sim.editor.saved();
 }
+
+/// Compiles the block being edited and starts the chip again with it, as
+/// `L` does. `out` says what came of it.
+export fn editorCompile() bool {
+    sim.compile() catch return false;
+    return true;
+}
+
+/// each block of the editor's file, as text
+export fn editorBlocks() usize {
+    return written(sim.blocksView());
+}

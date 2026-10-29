@@ -157,5 +157,12 @@ export async function loadEngine(url = 'gasim.wasm') {
       return view(x.editorContentsPtr(), n).slice();
     },
     editorSaved: () => x.editorSaved(),
+    /** Compiles the block and starts the chip again: { ok, message }. */
+    editorCompile() {
+      const ok = !!x.editorCompile();
+      return { ok, message: out() };
+    },
+    /** Each block of the file: { block, read_only, empty, text }. */
+    editorBlocks: () => json(x.editorBlocks()) ?? [],
   };
 }

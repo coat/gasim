@@ -70,6 +70,16 @@ export const Toolbar = {
     return m('header.toolbar', [
       m('.group.files', [
         m('strong.brand', 'gasim'),
+        m('nav.views', { role: 'tablist', 'aria-label': 'Views' }, [['/chip', 'Chip'], ['/editor', 'Editor']].map(([route, label]) => {
+          const current = m.route.get() === route;
+          return m(m.route.Link, {
+            href: route,
+            role: 'tab',
+            class: current ? 'current' : '',
+            'aria-selected': current ? 'true' : 'false',
+            title: route === '/editor' ? 'The colorForth editor (e)' : 'The chip (q in the editor)',
+          }, label);
+        })),
         fileInput('.ga,.af,.blk,.cf,.txt', openFile, 'Open…', { class: 'secondary' }),
         examplesMenu(),
         state.file ? m('span.file', { title: state.file.name }, state.file.name) : null,
@@ -177,6 +187,7 @@ const keys = [
   ['n', 'Step the selected node'],
   ['z', 'Go back before the last step or run'],
   ['arrows or h j k l', 'Select a node'],
+  ['e', 'The colorForth editor, and q in it to come back'],
   ['f', 'Type at the Forth prompt'],
   ['c', 'Type into the console'],
   ['esc', 'Stop typing'],
@@ -185,11 +196,35 @@ const keys = [
   ['?', 'Show these keys'],
 ];
 
+const editorKeys = [
+  ['h l, or left right', 'The word before or after'],
+  ['j k, or down up', 'The next or last red word'],
+  ['0 $, or home end', 'The first or last word'],
+  ['[ ], or page up down', 'The block before or after'],
+  ['a number, then g', 'Go to that block'],
+  ['i a', 'Type a word before or after this one'],
+  ['o O', 'Type a red word on a line after or before'],
+  ['space, enter, esc', 'The next word, a new line, done typing'],
+  ['x X', 'Cut this word, or the one before'],
+  ['y p P', 'Copy, and put after or before'],
+  ['u U', 'Undo and redo'],
+  ['R Y G W C M B', 'Color this word'],
+  ['ctrl or alt + r y g w t v b', 'Color the word, as it is typed too'],
+  ['L', 'Compile the block and start the chip again'],
+  ['ctrl+s, or s', 'Save'],
+  ['f', 'Show or hide blue words'],
+  ['q', 'Back to the chip'],
+];
+
+const table = (rows) => m('table', m('tbody', rows.map(([key, what]) => m('tr', [m('td', m('kbd', key)), m('td', what)]))));
+
 export const HelpDialog = {
   view() {
-    return dialog('help', 'Keys', [
-      m('table', m('tbody', keys.map(([key, what]) => m('tr', [m('td', m('kbd', key)), m('td', what)])))),
-      m('p.muted', 'Drop a file anywhere on the page to open it. A .txt file, or pFDISK.blk, is taken as the ROM.'),
+    const editing = m.route.get() === '/editor';
+    return dialog('help', editing ? 'The editor\'s keys' : 'Keys', [
+      table(editing ? editorKeys : keys),
+      editing ? m('p.muted', 'Browsers keep ctrl+w and ctrl+t, so alt+w and alt+t color white and cyan, as do the buttons below the block.') : null,
+      editing ? null : m('p.muted', 'Drop a file anywhere on the page to open it. A .txt file, or pFDISK.blk, is taken as the ROM.'),
     ]);
   },
 };

@@ -6,6 +6,7 @@ import { Toolbar, StatusBar, RomDialog, HelpDialog, dialogs, applyTheme } from '
 import { ChipMap } from './views/map.js';
 import { NodePanel } from './views/node.js';
 import { Dock, showDock } from './views/dock.js';
+import { EditorView } from './views/editor.js';
 
 const { m } = window;
 
@@ -111,11 +112,17 @@ const ChipView = {
   },
 };
 
-const App = {
-  view() {
+/** the page around a view: the toolbar, the status bar and the dialogs */
+const Page = {
+  view(vnode) {
     if (!state.chip) return m('p.loading', 'Loading gasim…');
-    return [m(Toolbar), m(ChipView), m(StatusBar), m(RomDialog), m(HelpDialog)];
+    return [m(Toolbar), vnode.children, m(StatusBar), m(RomDialog), m(HelpDialog)];
   },
+};
+
+const routes = {
+  '/chip': { render: () => m(Page, m(ChipView)) },
+  '/editor': { render: () => m(Page, m(EditorView)) },
 };
 
 // ---------- keys and files ----------
@@ -123,6 +130,7 @@ const App = {
 /** whether a key is being typed into something, rather than for the app */
 const typing = (e) => e.target.closest('input, textarea, select, [contenteditable]') !== null;
 
+/** keys for the chip's view */
 const keys = {
   ' ': toggleRun,
   s: stepNext,
@@ -139,6 +147,11 @@ const keys = {
   j: () => move(0, -1),
   f: () => typeInto('forth'),
   c: () => typeInto('console'),
+  e: () => m.route.set('/editor'),
+};
+
+/** keys for any view */
+const anywhere = {
   '?': () => (dialogs.open = 'help'),
   Escape: () => (dialogs.open = null),
 };
@@ -149,7 +162,7 @@ document.addEventListener('keydown', (e) => {
   // keys act on the chip only where nothing else takes them
   if (e.target.closest('button, a, summary, [role=separator]') && (e.key === ' ' || e.key.startsWith('Arrow'))) return;
   if (dialogs.open && e.key !== 'Escape') return;
-  const action = keys[e.key];
+  const action = anywhere[e.key] ?? (m.route.get() === '/chip' ? keys[e.key] : undefined);
   if (!action) return;
   e.preventDefault();
   action();
@@ -168,8 +181,14 @@ document.addEventListener('drop', async (e) => {
   m.redraw();
 });
 
+// a warning before leaving with blocks not saved
+window.addEventListener('beforeunload', (e) => {
+  if (state.editor?.unsaved) e.preventDefault();
+});
+
 applyTheme();
-m.mount(document.getElementById('app'), App);
+m.route.prefix = '#';
+m.route(document.getElementById('app'), '/chip', routes);
 start().then(async () => {
   // ?example=hello.ga opens an example, so a link can show one
   const example = new URLSearchParams(location.search).get('example');

@@ -12,6 +12,17 @@
   --literal: #8a5a00;
   --gutter-size: 6px;
   --tile-text: #1c2128;
+  /* colorForth's colors, darker to read on white */
+  --cf-background: #ffffff;
+  --cf-red: #c4122f;
+  --cf-yellow: #8a6200;
+  --cf-green: #1a7f37;
+  --cf-cyan: #0b7285;
+  --cf-white: #3b3f45;
+  --cf-magenta: #a3268f;
+  --cf-gray: #8a8f98;
+  --cf-blue: #2f5bd3;
+  --cf-cursor: #e7ebf0;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -24,6 +35,16 @@
     --here: #4a4120;
     --literal: #e3b65c;
     --tile-text: #e6e9ee;
+    --cf-background: #050505;
+    --cf-red: #ff5f5f;
+    --cf-yellow: #ffd75f;
+    --cf-green: #5fd75f;
+    --cf-cyan: #5fd7ff;
+    --cf-white: #e8e8e8;
+    --cf-magenta: #ff7fd4;
+    --cf-gray: #8f8f8f;
+    --cf-blue: #7f9cff;
+    --cf-cursor: #303540;
   }
 }
 
@@ -36,6 +57,16 @@
   --here: #4a4120;
   --literal: #e3b65c;
   --tile-text: #e6e9ee;
+  --cf-background: #050505;
+  --cf-red: #ff5f5f;
+  --cf-yellow: #ffd75f;
+  --cf-green: #5fd75f;
+  --cf-cyan: #5fd7ff;
+  --cf-white: #e8e8e8;
+  --cf-magenta: #ff7fd4;
+  --cf-gray: #8f8f8f;
+  --cf-blue: #7f9cff;
+  --cf-cursor: #303540;
 }
 
 :root {
@@ -111,6 +142,28 @@ code,
 
 .brand {
   margin-right: 0.25rem;
+}
+
+.views {
+  display: flex;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  overflow: hidden;
+}
+
+.views a {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 0.875rem;
+  font-size: 0.875rem;
+  color: var(--pico-muted-color);
+  text-decoration: none;
+}
+
+.views a.current {
+  background: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
 }
 
 .file {
@@ -858,6 +911,271 @@ dialog .actions {
   font-size: 0.875rem;
 }
 
+/* ---------- the colorForth editor ---------- */
+
+.editor-view {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr) 24rem;
+  grid-template-areas: "blocks editing node";
+  gap: 0.5rem;
+  padding: 0.5rem;
+  min-height: 0;
+}
+
+.editor-view .block-index {
+  grid-area: blocks;
+}
+
+.editor-view .editing {
+  grid-area: editing;
+}
+
+.editor-view .node {
+  grid-area: node;
+}
+
+.editor-view .tabs {
+  grid-area: tabs;
+}
+
+/* the node beside the editor is narrower, so it goes below 1200 px */
+@media (max-width: 1200px) and (min-width: 901px) {
+  .editor-view {
+    grid-template-columns: 13rem minmax(0, 1fr);
+    grid-template-areas: "blocks editing";
+  }
+
+  .editor-view .node {
+    display: none;
+  }
+}
+
+.editing .panel-head .actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  margin-left: auto;
+}
+
+.editing .panel-head .actions button {
+  margin: 0;
+  min-height: 2.5rem;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.toggle input {
+  margin: 0;
+}
+
+.badge {
+  font-size: 0.75rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--pico-muted-border-color);
+  color: var(--pico-muted-color);
+}
+
+.editing .panel-body {
+  padding: 0;
+  background: var(--cf-background);
+}
+
+.cf-block {
+  position: relative;
+  min-height: 100%;
+  padding: 0.75rem 1rem;
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  cursor: text;
+}
+
+.cf-block:focus-within {
+  outline: 2px solid var(--pico-primary-focus);
+  outline-offset: -2px;
+}
+
+.cf-block.read-only {
+  opacity: 0.7;
+}
+
+/* the input that keys go through, there to be typed into but not seen */
+.cf-block .keys {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  font-size: 16px;
+}
+
+.cf-line {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 0.6em;
+  min-height: 1.6em;
+}
+
+.cf {
+  border-radius: 3px;
+  padding: 0 0.125em;
+  margin: 0 -0.125em;
+  white-space: pre;
+}
+
+.cf.cursor {
+  background: var(--cf-cursor);
+  box-shadow: 0 0 0 1px currentColor;
+}
+
+.cf.typing {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+/* the caret after the word being typed */
+.cf.typing::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: blink 1s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.cf .mark {
+  opacity: 0.6;
+}
+
+.cf-red { color: var(--cf-red); }
+.cf-yellow { color: var(--cf-yellow); }
+.cf-green { color: var(--cf-green); }
+.cf-cyan { color: var(--cf-cyan); }
+.cf-white { color: var(--cf-white); }
+.cf-magenta { color: var(--cf-magenta); }
+.cf-gray { color: var(--cf-gray); }
+.cf-blue { color: var(--cf-blue); }
+.cf-none { color: var(--cf-gray); }
+
+.color-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem 0.75rem;
+  padding: 0.375rem 0.75rem;
+  border-top: 1px solid var(--pico-muted-border-color);
+  font-size: 0.875rem;
+}
+
+.colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.swatch {
+  margin: 0;
+  min-height: 2.75rem;
+  padding: 0.25rem 0.625rem;
+  width: auto;
+  border: 1px solid var(--pico-muted-border-color);
+  background: var(--cf-background);
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.8125rem;
+}
+
+.swatch:hover {
+  border-color: currentColor;
+}
+
+.mode {
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--pico-muted-border-color);
+}
+
+.mode.insert {
+  background: var(--running);
+}
+
+.prefix {
+  font-family: var(--pico-font-family-monospace);
+}
+
+.block-index .panel-body input[type="search"] {
+  margin-bottom: 0.5rem;
+}
+
+.block-list {
+  margin: 0;
+  padding: 0;
+}
+
+.block-list li {
+  list-style: none;
+  margin: 0;
+}
+
+.block-list button {
+  display: flex;
+  gap: 0.5rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.375rem 0.5rem;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  text-align: left;
+  font-size: 0.8125rem;
+}
+
+.block-list button:hover {
+  background: var(--pico-muted-border-color);
+}
+
+.block-list button.current {
+  background: var(--here);
+}
+
+.block-list button.muted {
+  color: var(--pico-muted-color);
+}
+
+.block-list .number {
+  min-width: 2rem;
+  font-family: var(--pico-font-family-monospace);
+  color: var(--pico-muted-color);
+}
+
+.block-list .first-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--pico-font-family-monospace);
+}
+
 /* narrow screens, after the rules they change: map rows tall enough to
    tap, columns that fit a tablet held upright, and the tabs under the map
    choosing between the dock's panels */
@@ -869,6 +1187,33 @@ dialog .actions {
   }
 
   .dock-tabs {
+    display: none;
+  }
+
+  .editor-view {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-areas: "tabs" "panel";
+  }
+
+  .editor-view .tabs {
+    display: flex;
+  }
+
+  .editor-view > .panel {
+    grid-area: panel;
+  }
+
+  .tab-editing .block-index,
+  .tab-editing .node,
+  .tab-blocks .editing,
+  .tab-blocks .node,
+  .tab-node .editing,
+  .tab-node .block-index {
+    display: none;
+  }
+
+  .hints {
     display: none;
   }
 }

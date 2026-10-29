@@ -61,6 +61,18 @@ export const state = {
   /** console input that did not fit yet, given as the node reads */
   pendingInput: new Uint8Array(0),
   inputEnded: false,
+  /** the block being edited, as Sim.editorView has it */
+  editor: null,
+  /** the editor's file: { name }, or null for a new one */
+  editorFile: null,
+  /** the blocks of the editor's file, as text */
+  blocks: [],
+  blockQuery: '',
+  /** whether blue words show, and the marks where colors change */
+  showFormat: true,
+  showMarks: false,
+  /** on a narrow screen, what the editor's view shows */
+  editorTab: 'editing',
 };
 
 let rounds = 20000;
@@ -73,6 +85,7 @@ export async function start() {
   await findRom();
   state.history = (await store.get('history')) ?? [];
   refresh();
+  refreshEditor();
 }
 
 /** Reads what the views show from the engine. */
@@ -161,6 +174,11 @@ export function load(file) {
   forgetInput();
   const error = state.gasim.load(Kind[file.kind], file.bytes, hasBlocks(file.kind) ? file.loads : []);
   state.message = error ? `${file.name}: ${error}` : `Loaded ${file.name}`;
+  // the engine opens colorForth in the editor too
+  if (file.kind === 'cf') {
+    state.editorFile = { name: file.name };
+    refreshEditor();
+  }
   refresh();
 }
 
@@ -371,4 +389,87 @@ function forgetInput() {
   state.unseenOutput = false;
   state.pendingInput = new Uint8Array(0);
   state.inputEnded = false;
+}
+
+// ---------- the editor ----------
+
+let blocksTimer = null;
+
+/** Reads the block being edited, and soon after, the blocks as text. */
+export function refreshEditor() {
+  state.editor = state.gasim.editor();
+  clearTimeout(blocksTimer);
+  blocksTimer = setTimeout(() => {
+    state.blocks = state.gasim.editorBlocks();
+    m.redraw();
+  }, 250);
+}
+
+/** Gives the editor a key, and does what it asks, as the TUI does. */
+export function editorKey(key, ctrl) {
+  const action = state.gasim.editorKey(key, ctrl);
+  if (action.error) {
+    state.message = sentence(action.error);
+  } else if (action === 'save') {
+    saveEditor();
+  } else if (action === 'compile') {
+    compileEditor();
+  } else if (action === 'toggle_format') {
+    toggleFormat();
+  } else if (action === 'quit') {
+    m.route.set('/chip');
+  }
+  refreshEditor();
+}
+
+export function editorGoTo(block) {
+  if (!state.gasim.editorGoTo(block)) state.message = 'There is no such block';
+  refreshEditor();
+}
+
+export function editorMoveTo(i) {
+  state.gasim.editorMoveTo(i);
+  refreshEditor();
+}
+
+export function toggleFormat() {
+  state.showFormat = !state.showFormat;
+}
+
+export function toggleMarks() {
+  state.showMarks = !state.showMarks;
+}
+
+/** Saves the editor's blocks as a download, as they are in the file. */
+export function saveEditor() {
+  const bytes = state.gasim.editorContents();
+  const name = state.editorFile?.name ?? 'blocks.cf';
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  state.gasim.editorSaved();
+  state.editorFile = { name };
+  const compressed = state.editor.compressed ? ', uncompressed' : '';
+  state.message = `Saved ${bytes.length / 1024} blocks as ${name}${compressed}`;
+  refreshEditor();
+}
+
+/** Compiles the block, and starts the chip again with its code. */
+export function compileEditor() {
+  pause();
+  const { message } = state.gasim.editorCompile();
+  state.message = sentence(message);
+  refresh();
+  refreshEditor();
+}
+
+/** Starts a new file of blocks, once unsaved changes are let go. */
+export function newEditorFile() {
+  if (state.editor.unsaved && !confirm('The blocks are not saved. Start a new file anyway?')) return;
+  state.gasim.editorOpen(new Uint8Array(0));
+  state.editorFile = null;
+  state.message = 'A new file of blocks';
+  refreshEditor();
 }
