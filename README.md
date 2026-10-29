@@ -166,7 +166,7 @@ programs cannot call ROM words.
 
 ## Download
 
-Download a static binary for your operating system on the [GitHub
+Download a prebuilt binary for your operating system on the [GitHub
 Releases](https://github.com/coat/gasim/releases) page.
 
 If you have Nix installed, try `nix run github:coat/gasim`.
