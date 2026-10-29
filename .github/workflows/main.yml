@@ -36,6 +36,11 @@ jobs:
       - name: Run tests 
         run: nix develop -c zig build test -Dtarget=${{ matrix.target }} --summary all
 
+      # the core must build for the web, with no I/O and no libc
+      - name: Build for wasm
+        if: matrix.os == 'ubuntu-latest'
+        run: nix develop -c zig build wasm --summary all
+
   build-windows:
     runs-on: windows-latest
     steps:

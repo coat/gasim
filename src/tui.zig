@@ -154,8 +154,6 @@ const Tui = struct {
     quit_confirmed: bool = false,
     /// the first row of the editor's block in view
     editor_scroll: u16 = 0,
-    /// a number typed in the editor, such as a block to go to
-    editor_count: ?usize = null,
     /// whether the editor shows blue words, which lay out the block
     show_format: bool = true,
     /// the chip as it started, which compiling colorForth starts it from
@@ -396,83 +394,56 @@ const Tui = struct {
     /// Handles keys in the colorForth editor, returning false to quit
     fn editorKey(self: *Tui, k: vaxis.Key) !bool {
         const editor = self.options.colorforth.?.editor;
-        const keep = self.editKey(editor, k) catch |err| {
-            self.message = switch (err) {
-                error.BlockFull => "the block is full",
-                error.ReadOnly => "this block is not colorForth source, so it cannot be edited",
-                error.InvalidWord => "colorForth has no such character here, or names a variable in one cell",
-                error.NumberOutOfRange => "a white number fits in 27 bits",
-                error.HexWord => "a hex number can only be yellow, green or white",
-                error.NoSuchBlock => "there is no such block",
-            };
-            return true;
-        };
-        return keep;
+        // a key with a name, or the text typed, a character at a time
+        var chars: []const u8 = &.{};
+        var named: ?Editor.Key = null;
+        if (k.mods.alt or k.mods.super or k.mods.hyper or k.mods.meta) return true;
+        if (k.mods.ctrl) {
+            if (k.codepoint < 0x80) named = .{ .code = .{ .char = @intCast(k.codepoint) }, .ctrl = true };
+        } else if (editorKeyCode(k)) |code| {
+            named = .{ .code = code };
+        } else if (k.text) |text| {
+            // text pasted in normal mode is not keys of the map
+            if (editor.mode == .insert or text.len == 1) chars = text;
+        }
+
+        if (named) |one| return self.editorAction(editor, one);
+        for (chars) |c| if (!self.editorAction(editor, .char(c))) return false;
+        return true;
     }
 
-    fn editKey(self: *Tui, editor: *Editor, k: vaxis.Key) Editor.Error!bool {
-        // a color with ctrl, as it is typed or afterwards
-        for ("rygwtvb", [_]Color{ .red, .yellow, .green, .white, .cyan, .magenta, .blue }) |letter, color| {
-            if (k.matches(letter, .{ .ctrl = true })) {
-                try editor.setColor(color);
-                return true;
-            }
-        }
-        if (k.matches('s', .{ .ctrl = true })) {
-            try editor.escape();
-            self.save();
-            return true;
-        }
+    /// the editor's name for a key, unless it is a character
+    fn editorKeyCode(k: vaxis.Key) ?Editor.Key.Code {
+        if (k.mods.shift) return null;
+        return switch (k.codepoint) {
+            vaxis.Key.left => .left,
+            vaxis.Key.right => .right,
+            vaxis.Key.up => .up,
+            vaxis.Key.down => .down,
+            vaxis.Key.home => .home,
+            vaxis.Key.end => .end,
+            vaxis.Key.page_up => .page_up,
+            vaxis.Key.page_down => .page_down,
+            vaxis.Key.escape => .escape,
+            vaxis.Key.enter => .enter,
+            vaxis.Key.backspace => .backspace,
+            else => null,
+        };
+    }
 
-        if (editor.mode == .insert) {
-            if (k.matches(vaxis.Key.escape, .{})) {
-                try editor.escape();
-            } else if (k.matches(vaxis.Key.enter, .{})) {
-                try editor.enter();
-            } else if (k.matches(vaxis.Key.backspace, .{})) {
-                editor.backspace();
-            } else if (k.text) |text| {
-                for (text) |c| if (c == ' ') try editor.space() else if (c > ' ' and c < 0x7f) try editor.typeChar(c);
-            }
-            return true;
-        }
-
-        // a count typed before a key, such as a block to go to before g
-        if (k.text) |text| if (text.len == 1 and std.ascii.isDigit(text[0]) and (text[0] != '0' or self.editor_count != null)) {
-            self.editor_count = (self.editor_count orelse 0) *| 10 +| (text[0] - '0');
+    /// Gives the editor a key and does what it asks, returning false to quit
+    fn editorAction(self: *Tui, editor: *Editor, k: Editor.Key) bool {
+        const action = editor.key(k) catch |err| {
+            self.message = Editor.describe(err);
             return true;
         };
-        const count = self.editor_count;
-        self.editor_count = null;
-
-        // a color with shift
-        for ("RYGWCMB", [_]Color{ .red, .yellow, .green, .white, .cyan, .magenta, .blue }) |letter, color| {
-            if (k.matches(letter, .{})) try editor.setColor(color);
+        switch (action) {
+            .none => {},
+            .save => self.save(),
+            .compile => self.compile(),
+            .toggle_format => self.show_format = !self.show_format,
+            .quit => return self.keepOnQuit(),
         }
-        if (k.matchesAny(&.{ vaxis.Key.left, 'h', 'b' }, .{})) editor.left();
-        if (k.matchesAny(&.{ vaxis.Key.right, 'l', 'w' }, .{})) editor.right();
-        if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) editor.nextDefinition();
-        if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) editor.previousDefinition();
-        if (k.matchesAny(&.{ vaxis.Key.home, '0' }, .{})) editor.first();
-        if (k.matchesAny(&.{ vaxis.Key.end, '$' }, .{})) editor.last();
-        if (k.matchesAny(&.{ vaxis.Key.page_down, ']' }, .{})) try editor.goTo(editor.block + 1);
-        if (k.matchesAny(&.{ vaxis.Key.page_up, '[' }, .{}) and editor.block > 0) try editor.goTo(editor.block - 1);
-        if (k.matches('g', .{})) if (count) |block| try editor.goTo(block) else editor.first();
-        if (k.matches('i', .{})) try editor.insert(false);
-        if (k.matches('a', .{})) try editor.insert(true);
-        if (k.matches('o', .{})) try editor.openLine(false);
-        if (k.matches('O', .{})) try editor.openLine(true);
-        if (k.matches('x', .{})) try editor.delete(false);
-        if (k.matches('X', .{})) try editor.delete(true);
-        if (k.matches('y', .{})) editor.yank();
-        if (k.matches('p', .{})) try editor.put(true);
-        if (k.matches('P', .{})) try editor.put(false);
-        if (k.matches('u', .{})) editor.undo();
-        if (k.matches('U', .{})) editor.redo();
-        if (k.matches('f', .{})) self.show_format = !self.show_format;
-        if (k.matches('s', .{})) self.save();
-        if (k.matches('L', .{})) self.compile();
-        if (k.matches('q', .{})) return self.keepOnQuit();
         return true;
     }
 
@@ -545,7 +516,7 @@ const Tui = struct {
             if (self.input_len > 0) {
                 try self.send();
             } else {
-                self.options.console.input.close(self.io);
+                self.options.console.input.?.queue.close(self.io);
                 self.message = "the console's input has ended";
             }
         } else if (k.text) |text| {
@@ -668,7 +639,7 @@ const Tui = struct {
         self.input_len = 0;
         self.console_scroll = 0;
         // the queue is full when the node is not reading its input
-        const sent = self.options.console.input.put(self.io, text, 0) catch |err| switch (err) {
+        const sent = self.options.console.input.?.queue.put(self.io, text, 0) catch |err| switch (err) {
             error.Closed => {
                 self.message = "the console's input has ended";
                 return;
@@ -1430,7 +1401,7 @@ const Tui = struct {
         len += 1;
         segments[len] = .{ .text = self.print(" {d}/{d} cells ", .{ editor.cells(), gasim.colorforth.cells_per_block }), .style = colors.dim };
         len += 1;
-        if (self.editor_count) |count| {
+        if (editor.prefix) |count| {
             segments[len] = .{ .text = self.print(" {d} ", .{count}), .style = colors.label };
             len += 1;
         }
@@ -1703,7 +1674,7 @@ const TestTui = struct {
 
         self.input = .init(&self.input_buffer);
         self.output = .fixed(&self.output_buffer);
-        self.console = .{ .io = std.testing.io, .input = &self.input, .output = &self.output };
+        self.console = .{ .input = .{ .io = std.testing.io, .queue = &self.input }, .output = &self.output };
         try self.chip.attachConsole(&self.console, 0, .up);
         self.screen = try .init(gpa, .{ .rows = 30, .cols = 120, .x_pixel = 0, .y_pixel = 0 });
         self.tui = .init(std.testing.io, gpa, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up });
@@ -2276,6 +2247,22 @@ test "the colorForth editor, on a screen of its own" {
     try t.press('g');
     try std.testing.expect(try t.shows(0, "block 1 +"));
     try std.testing.expect(t.tui.shown.contains(.map));
+    // named keys, and not keys with alt, or text pasted in normal mode
+    try t.press(vaxis.Key.page_up);
+    try std.testing.expect(try t.shows(0, "block 0 +"));
+    try t.press(vaxis.Key.end);
+    try std.testing.expectEqual(3, editor.cursor);
+    try t.pressWith('h', .{ .alt = true });
+    try std.testing.expectEqual(3, editor.cursor);
+    try std.testing.expect(try t.tui.handle(.{ .key_press = .{ .codepoint = 'x', .text = "xxx" } }));
+    try std.testing.expectEqual(4, editor.len);
+    // what the editor cannot do is said, and f hides blue words
+    try t.press('9');
+    try t.press('g');
+    try std.testing.expect(try t.shows(29, "there is no such block"));
+    try t.press('f');
+    try std.testing.expect(!t.tui.show_format);
+    try t.press('f');
 
     // and back to the chip, until alt+5 again
     try t.pressWith('1', .{ .alt = true });

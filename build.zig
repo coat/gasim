@@ -52,6 +52,26 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run gasim");
     run_step.dependOn(&run_cmd.step);
 
+    // the core for the web: wasm32-freestanding, with no I/O and no libc
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const wasm = b.addExecutable(.{
+        .name = "gasim-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/web/check.zig"),
+            .target = wasm_target,
+            .optimize = if (optimize == .debug) .small else optimize,
+            .imports = &.{.{ .name = "gasim", .module = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = wasm_target,
+                .optimize = if (optimize == .debug) .small else optimize,
+            }) }},
+        }),
+    });
+    wasm.entry = .disabled;
+    wasm.rdynamic = true;
+    const wasm_step = b.step("wasm", "Build the core for wasm32-freestanding, as the web version will");
+    wasm_step.dependOn(&wasm.step);
+
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .use_llvm = if (coverage) true else null,

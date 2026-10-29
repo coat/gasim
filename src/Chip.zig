@@ -737,7 +737,7 @@ fn expectRun(chip: *Chip, input: []const u8, expected: []const u8) !void {
     var input_queue = try Console.testInput(&input_buffer, input);
     var buffer: [256]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .io = std.testing.io, .input = &input_queue, .output = &writer };
+    var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input_queue }, .output = &writer };
     try chip.attachConsole(&console, 0, .up);
 
     try chip.run();
@@ -903,7 +903,7 @@ test attachConsole {
 
     var input: Io.Queue(u8) = .init(&.{});
     var writer: Io.Writer = .fixed(&.{});
-    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
     try std.testing.expectError(error.PortConnected, chip.attachConsole(&console, 0, .right));
     try std.testing.expectError(error.NoSuchNode, chip.attachConsole(&console, 100, .up));
     try chip.attachConsole(&console, 1, .left);
@@ -935,7 +935,7 @@ test "waits for input that has not arrived" {
     var input: Io.Queue(u8) = .init(&input_buffer);
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
     try chip.attachConsole(&console, 0, .up);
 
     // input arrives once the chip is waiting for it
@@ -963,7 +963,7 @@ test advance {
     var input: Io.Queue(u8) = .init(&input_buffer);
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
     try chip.attachConsole(&console, 0, .up);
 
     // the node settles waiting for input, without advance waiting for it
@@ -1198,7 +1198,7 @@ test "stops when interrupted" {
     var input = try Console.testInput(&.{}, "");
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
     try chip.attachConsole(&console, 0, .up);
 
     // run the program up to its endless loop

@@ -25,6 +25,8 @@ len: usize = 0,
 /// the token the cursor is on, which is `len` only when there are none
 cursor: usize = 0,
 mode: Mode = .normal,
+/// a number typed in normal mode before a key, such as a block to go to
+prefix: ?usize = null,
 /// the block is not colorForth source, and cannot be edited
 read_only: bool = false,
 /// a block left has changed since it was opened or saved, which
@@ -313,6 +315,153 @@ pub fn redo(self: *Editor) void {
     const s = self.redos.pop() orelse return;
     self.undos.push(self.snapshot());
     self.restore(s);
+}
+
+/// Moves the cursor to the token at `i`, or the last, finishing any being
+/// typed, as clicking on a token does
+pub fn moveTo(self: *Editor, i: usize) Error!void {
+    try self.escape();
+    self.cursor = @min(i, self.len -| 1);
+}
+
+/// A key pressed in the editor, as a front end tells of it: a character as
+/// typed, with shift giving upper case, or a key with a name. Keys with alt
+/// or other modifiers are not the editor's.
+pub const Key = struct {
+    code: Code,
+    ctrl: bool = false,
+
+    pub const Code = union(enum) {
+        char: u8,
+        left,
+        right,
+        up,
+        down,
+        home,
+        end,
+        page_up,
+        page_down,
+        escape,
+        enter,
+        backspace,
+    };
+
+    pub fn char(c: u8) Key {
+        return .{ .code = .{ .char = c } };
+    }
+};
+
+/// What a key asks the front end to do, as the editor cannot
+pub const Action = enum {
+    none,
+    /// save `contents` to the file
+    save,
+    /// compile the block being edited
+    compile,
+    /// show or hide blue words
+    toggle_format,
+    quit,
+};
+
+/// Handles a key as the editor's key map has it: vim-like moving and
+/// editing in normal mode, typing in insert mode, and colors with ctrl, or
+/// with shift in normal mode. A number typed before `g` is a block to go to.
+pub fn key(self: *Editor, k: Key) Error!Action {
+    if (k.ctrl) {
+        const c = switch (k.code) {
+            .char => |c| c,
+            else => return .none,
+        };
+        // a color, as it is typed or afterwards
+        if (colorOfKey("rygwtvb", c)) |color| try self.setColor(color);
+        if (c == 's') {
+            try self.escape();
+            return .save;
+        }
+        return .none;
+    }
+
+    if (self.mode == .insert) {
+        switch (k.code) {
+            .escape => try self.escape(),
+            .enter => try self.enter(),
+            .backspace => self.backspace(),
+            .char => |c| if (c == ' ') try self.space() else if (c > ' ' and c < 0x7f) try self.typeChar(c),
+            else => {},
+        }
+        return .none;
+    }
+
+    // a number typed before a key, such as a block to go to before g
+    if (k.code == .char and std.ascii.isDigit(k.code.char) and (k.code.char != '0' or self.prefix != null)) {
+        self.prefix = (self.prefix orelse 0) *| 10 +| (k.code.char - '0');
+        return .none;
+    }
+    const prefix = self.prefix;
+    self.prefix = null;
+
+    switch (k.code) {
+        .left => self.left(),
+        .right => self.right(),
+        .down => self.nextDefinition(),
+        .up => self.previousDefinition(),
+        .home => self.first(),
+        .end => self.last(),
+        .page_down => try self.goTo(self.block + 1),
+        .page_up => if (self.block > 0) try self.goTo(self.block - 1),
+        .escape, .enter, .backspace => {},
+        .char => |c| {
+            if (colorOfKey("RYGWCMB", c)) |color| try self.setColor(color);
+            switch (c) {
+                'h', 'b' => self.left(),
+                'l', 'w' => self.right(),
+                'j' => self.nextDefinition(),
+                'k' => self.previousDefinition(),
+                '0' => self.first(),
+                '$' => self.last(),
+                ']' => try self.goTo(self.block + 1),
+                '[' => if (self.block > 0) try self.goTo(self.block - 1),
+                'g' => if (prefix) |block| try self.goTo(block) else self.first(),
+                'i' => try self.insert(false),
+                'a' => try self.insert(true),
+                'o' => try self.openLine(false),
+                'O' => try self.openLine(true),
+                'x' => try self.delete(false),
+                'X' => try self.delete(true),
+                'y' => self.yank(),
+                'p' => try self.put(true),
+                'P' => try self.put(false),
+                'u' => self.undo(),
+                'U' => self.redo(),
+                'f' => return .toggle_format,
+                's' => return .save,
+                'L' => return .compile,
+                'q' => return .quit,
+                else => {},
+            }
+        },
+    }
+    return .none;
+}
+
+/// the color a letter of `letters` stands for, in the order of `key_colors`
+fn colorOfKey(letters: *const [key_colors.len]u8, c: u8) ?Color {
+    const i = std.mem.indexOfScalar(u8, letters, c) orelse return null;
+    return key_colors[i];
+}
+
+const key_colors = [_]Color{ .red, .yellow, .green, .white, .cyan, .magenta, .blue };
+
+/// what went wrong, to tell whoever is editing
+pub fn describe(err: Error) []const u8 {
+    return switch (err) {
+        error.BlockFull => "the block is full",
+        error.ReadOnly => "this block is not colorForth source, so it cannot be edited",
+        error.InvalidWord => "colorForth has no such character here, or names a variable in one cell",
+        error.NumberOutOfRange => "a white number fits in 27 bits",
+        error.HexWord => "a hex number can only be yellow, green or white",
+        error.NoSuchBlock => "there is no such block",
+    };
 }
 
 fn editable(self: Editor) Error!void {
@@ -723,4 +872,139 @@ test "numbers as typed" {
     try std.testing.expectEqual(null, parseNumber("-"));
     try std.testing.expectEqual(null, parseNumber("1,"));
     try std.testing.expectEqual(null, parseNumber("$"));
+}
+
+/// gives the editor each character of `text` as a key
+fn keys(editor: *Editor, text: []const u8) !Action {
+    var action: Action = .none;
+    for (text) |c| action = try editor.key(.char(c));
+    return action;
+}
+
+test key {
+    const editor, const bytes = try testEditor(3);
+    defer freeEditor(editor, bytes);
+
+    // typing, with ctrl for a color as it is typed
+    try std.testing.expectEqual(.none, try keys(editor, "iinc 1 + ; x"));
+    try std.testing.expectEqual(.none, try editor.key(.{ .code = .{ .char = 'y' }, .ctrl = true }));
+    _ = try editor.key(.{ .code = .escape });
+    try std.testing.expectEqual(.normal, editor.mode);
+    try expectText(editor, ":inc ]1 + ; [x\n");
+
+    // moving and changing a color with shift
+    _ = try keys(editor, "0lW");
+    try expectText(editor, ":inc (1 ]+ ; [x\n");
+    _ = try editor.key(.{ .code = .end });
+    try std.testing.expectEqual(4, editor.cursor);
+
+    // a number before g is a block to go to, and g alone the first token
+    _ = try keys(editor, "2g");
+    try std.testing.expectEqual(2, editor.block);
+    try std.testing.expectEqual(null, editor.prefix);
+    _ = try editor.key(.{ .code = .page_up });
+    try std.testing.expectEqual(1, editor.block);
+    _ = try keys(editor, "[");
+    _ = try keys(editor, "$g");
+    try std.testing.expectEqual(0, editor.cursor);
+
+    // what the front end does, saving with ctrl+s from typing too
+    try std.testing.expectEqual(.save, try keys(editor, "s"));
+    try std.testing.expectEqual(.compile, try keys(editor, "L"));
+    try std.testing.expectEqual(.toggle_format, try keys(editor, "f"));
+    try std.testing.expectEqual(.quit, try keys(editor, "q"));
+    _ = try keys(editor, "a");
+    try std.testing.expectEqual(.save, try editor.key(.{ .code = .{ .char = 's' }, .ctrl = true }));
+    try std.testing.expectEqual(.normal, editor.mode);
+
+    try std.testing.expectError(error.NoSuchBlock, keys(editor, "9g"));
+}
+
+test "the rest of the key map" {
+    const editor, const bytes = try testEditor(1);
+    defer freeEditor(editor, bytes);
+
+    // two definitions, with backspace and enter as typed
+    _ = try keys(editor, "ia 1 ;x");
+    _ = try editor.key(.{ .code = .backspace });
+    _ = try editor.key(.{ .code = .enter });
+    _ = try editor.key(.{ .code = .{ .char = 'r' }, .ctrl = true });
+    _ = try keys(editor, "b 2 ;");
+    _ = try editor.key(.{ .code = .escape });
+    try expectText(editor, ":a ]1 ; ~cr\n:b ]2 ;\n");
+
+    // moving by token and by definition, with letters and named keys
+    _ = try keys(editor, "0j");
+    try std.testing.expectEqual(4, editor.cursor);
+    _ = try keys(editor, "k");
+    try std.testing.expectEqual(0, editor.cursor);
+    _ = try editor.key(.{ .code = .down });
+    try std.testing.expectEqual(4, editor.cursor);
+    _ = try editor.key(.{ .code = .up });
+    try std.testing.expectEqual(0, editor.cursor);
+    _ = try keys(editor, "lw");
+    try std.testing.expectEqual(2, editor.cursor);
+    _ = try keys(editor, "h");
+    _ = try editor.key(.{ .code = .right });
+    try std.testing.expectEqual(2, editor.cursor);
+    _ = try keys(editor, "b");
+    _ = try editor.key(.{ .code = .left });
+    try std.testing.expectEqual(0, editor.cursor);
+    _ = try editor.key(.{ .code = .end });
+    _ = try editor.key(.{ .code = .home });
+    try std.testing.expectEqual(0, editor.cursor);
+
+    // escape, enter and backspace do nothing out of insert mode, nor ctrl
+    // with a key that is not a character, and a number before another key
+    // is forgotten
+    for ([_]Key.Code{ .escape, .enter, .backspace }) |code| _ = try editor.key(.{ .code = code });
+    try std.testing.expectEqual(.none, try editor.key(.{ .code = .left, .ctrl = true }));
+    _ = try keys(editor, "3l");
+    try std.testing.expectEqual(null, editor.prefix);
+    try std.testing.expectEqual(1, editor.cursor);
+
+    // deleting, undoing and redoing
+    _ = try keys(editor, "0x");
+    try expectText(editor, "]1 ; ~cr\n:b ]2 ;\n");
+    _ = try keys(editor, "u");
+    try expectText(editor, ":a ]1 ; ~cr\n:b ]2 ;\n");
+    _ = try keys(editor, "U");
+    try expectText(editor, "]1 ; ~cr\n:b ]2 ;\n");
+    _ = try keys(editor, "uX");
+    try expectText(editor, ":a ]1 ; ~cr\n:b ]2 ;\n");
+    _ = try keys(editor, "lX");
+    try expectText(editor, "]1 ; ~cr\n:b ]2 ;\n");
+
+    // copying and putting after and before
+    _ = try keys(editor, "0yp");
+    try expectText(editor, "]1 ; 1 ~cr\n:b ]2 ;\n");
+    _ = try keys(editor, "yP");
+    try expectText(editor, "]1 ; 1 1 ~cr\n:b ]2 ;\n");
+
+    // opening a line below and above, to type in
+    _ = try keys(editor, "o");
+    try std.testing.expectEqual(.insert, editor.mode);
+    _ = try keys(editor, "c");
+    _ = try editor.key(.{ .code = .escape });
+    _ = try keys(editor, "0O");
+    try std.testing.expectEqual(.insert, editor.mode);
+    _ = try keys(editor, "d");
+    _ = try editor.key(.{ .code = .escape });
+    try expectText(editor, ":d ~cr\n]1 ; 1 1 ~cr\n:c\n:b ]2 ;\n");
+}
+
+test describe {
+    try std.testing.expectEqualStrings("the block is full", describe(error.BlockFull));
+    try std.testing.expectEqualStrings("there is no such block", describe(error.NoSuchBlock));
+}
+
+test moveTo {
+    const editor, const bytes = try testEditor(1);
+    defer freeEditor(editor, bytes);
+    _ = try keys(editor, "ia b c");
+    try editor.moveTo(1);
+    try std.testing.expectEqual(.normal, editor.mode);
+    try std.testing.expectEqual(1, editor.cursor);
+    try editor.moveTo(10);
+    try std.testing.expectEqual(2, editor.cursor);
 }

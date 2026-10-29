@@ -331,8 +331,7 @@ pub fn main(init: std.process.Init) !void {
     var input_buffer: [1024]u8 = undefined;
     var input: Io.Queue(u8) = .init(&input_buffer);
     var console: Console = .{
-        .io = io,
-        .input = &input,
+        .input = .{ .io = io, .queue = &input },
         .output = switch (command) {
             .run => &stdout_file_writer.interface,
             .tui => &screen,
