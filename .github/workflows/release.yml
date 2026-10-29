@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The tag is the release's version, so it must agree with build.zig.zon
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Check tag matches version
+        run: |
+          version=$(sed -n 's/^ *\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match build.zig.zon version $version"
+            exit 1
+          fi
+
+  build:
+    needs: check-version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux-musl
+            name: x86_64-linux
+            test: true
+          - os: ubuntu-latest
+            target: aarch64-linux-musl
+            name: aarch64-linux
+          - os: macos-latest
+            target: aarch64-macos
+            name: aarch64-macos
+            test: true
+          - os: macos-latest
+            target: x86_64-macos
+            name: x86_64-macos
+          - os: windows-latest
+            target: x86_64-windows-gnu
+            name: x86_64-windows
+            test: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: "0.17.0"
+
+      # Only the targets the runner can execute are tested
+      - name: Run tests
+        if: matrix.test
+        run: zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --summary all
+
+      - name: Build
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast --prefix out
+
+      - name: Package
+        run: |
+          dir=gasim-$GITHUB_REF_NAME-${{ matrix.name }}
+          mkdir "$dir"
+          rm -f out/bin/*.pdb
+          cp out/bin/* README.md LICENSE "$dir"
+          if [ "${{ runner.os }}" = Windows ]; then
+            7z a "$dir.zip" "$dir"
+          else
+            tar czf "$dir.tar.gz" "$dir"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            gasim-*.tar.gz
+            gasim-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" ./* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

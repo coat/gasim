@@ -166,9 +166,10 @@ programs cannot call ROM words.
 
 ## Download
 
-[Download](https://sadbeast.com/gasim/download.html) a static binary for your operating system.
+Download a prebuilt binary for your operating system on the [GitHub
+Releases](https://github.com/coat/gasim/releases) page.
 
-If you have Nix installed, try `nix run github:coat/gasim#`.
+If you have Nix installed, try `nix run github:coat/gasim`.
 
 ## Building
 
@@ -186,7 +187,8 @@ zig build -Doptimize=ReleaseFast
 distribution](https://www.greenarraychips.com/home/support/download-03d.php).
 Works well under wine.
 - [AshleyF/Color](https://github.com/AshleyF/Color) - A colorForth editor,
-assembler and F18 simulator written in F#.
+assembler and F18 simulator written in F#. gasim's colorForth editor is heavily
+based on the vim-like editor.
 - [mschuldt/ga144-sim](https://github.com/mschuldt/ga144-sim) - GA144 simulator
 from an [alternative toolchain](https://github.com/mschuldt/ga-tools).
 
