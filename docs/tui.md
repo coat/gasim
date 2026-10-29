@@ -1,0 +1,49 @@
+# TUI
+
+The chip panel at the top right shows all nodes. Running nodes are green, nodes waiting on a
+port yellow, and nodes waiting for code dim. Unless the panel is small, it
+shows each node as a tile with what it is waiting on and its registers,
+scrolling to follow the selected node when they do not all fit, with arrows
+in its title for the nodes out of view. Arrows between tiles show what the
+ports between nodes are doing: green for a word that went across, yellow for
+a node waiting to read or write, and dim for one waiting for code, with none
+where the nodes on both sides wait to read. The node panel shows the
+selected node's registers, stacks, and RAM and ROM around the word it is
+executing.
+
+| Key | |
+| --- | --- |
+| `space` | run or pause |
+| `s` | step the next node to run, and select it |
+| `S` | step every node once |
+| `n` | step the selected node |
+| `z` | go back to before the last step or run, up to 64 times |
+| `hjkl`, arrows | select a node on the map, or move through memory in the node panel |
+| `tab`, `shift+tab` | move to the next or previous panel, from the map and node panels |
+| `alt+1`-`4` | move to the map, console, node or forth panel from any panel, showing it, as does `ctrl` in terminals that report it |
+| `1` `2` `3` `4` | show or hide the map, console, node and forth panels |
+| `f`, `esc` | fill the screen with the panel, and go back |
+| `<` `>` `-` `+` | resize the panels, as can dragging their borders |
+| `pgup` `pgdn` | page through memory, or scroll the console or forth panel |
+| `b` | set or clear a breakpoint on the word in memory under the cursor |
+| `w` | watch the selected node's reads from a port, with `r` `d` `l` `u`, or its writes to one, with `R` `D` `L` `U`, or stop watching it |
+| `g` | follow the word the node is executing again |
+| `q`, `ctrl+c` | quit |
+
+Clicking a node on the map to select it.
+Clicking a word in memory moves the cursor to it, and clicking to its left
+sets or clears a breakpoint, shown as a red dot. Running pauses when a node
+is about to fetch a word with a breakpoint, or makes a watched transfer,
+and selects that node. Going back leaves the console as it is: its output
+stays, and input that nodes have read is not read again.
+Borders between panels can be dragged, or on touch screens, which turn drags
+into scrolling, tapped and then tapped again where they should go. In
+the console, typed text is sent as input with `enter`, `ctrl+d` ends the
+input as the end of a pipe would, and `esc` goes back to the map. Long lines
+of output wrap.
+
+The forth panel takes lines of arrayForth 3, as `gasim repl` does, with the
+selected node as the target of the IDE's words: `x15. LIT` pushes onto its
+stack, and `NODE` selects another node. `up` and `down` recall lines typed
+before, `tab` completes a word or lists the words it could be, and `z`
+goes back to before a line, as it does after a step.
