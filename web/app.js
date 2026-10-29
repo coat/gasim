@@ -5,7 +5,7 @@ import { state, start, toggleRun, stepNext, stepRound, stepNode, back, move, ope
 import { Toolbar, StatusBar, RomDialog, HelpDialog, dialogs, applyTheme } from './views/toolbar.js';
 import { ChipMap } from './views/map.js';
 import { NodePanel } from './views/node.js';
-import { Dock } from './views/dock.js';
+import { Dock, showDock } from './views/dock.js';
 
 const { m } = window;
 
@@ -56,7 +56,12 @@ function gutter(name, vertical, min, max) {
     onpointerup: saveLayout,
     onkeydown: (e) => {
       const step = { ArrowLeft: 2, ArrowUp: 2, ArrowRight: -2, ArrowDown: -2 }[e.key];
-      if (step === undefined) return (e.redraw = false);
+      // Mithril prevents the default when a handler returns false, so this
+      // one never does
+      if (step === undefined) {
+        e.redraw = false;
+        return;
+      }
       e.preventDefault();
       layout[name] = Math.max(min, Math.min(max, layout[name] + step));
       saveLayout();
@@ -64,18 +69,30 @@ function gutter(name, vertical, min, max) {
   });
 }
 
-/** the tabs below the map on a narrow screen */
+/** the tabs below the map on a narrow screen: the node, or a dock's tab */
 function tabs() {
-  const tab = (name, label) => m('button', {
-    role: 'tab',
-    class: layout.tab === name ? '' : 'secondary outline',
-    'aria-selected': layout.tab === name ? 'true' : 'false',
-    onclick: () => {
-      layout.tab = name;
-      saveLayout();
-    },
-  }, label);
-  return m('nav.tabs', { role: 'tablist' }, [tab('node', 'Node'), tab('dock', 'Console')]);
+  const tab = (name, dock, label) => {
+    const selected = layout.tab === name && (dock === null || state.dock === dock);
+    return m('button', {
+      role: 'tab',
+      class: selected ? '' : 'secondary outline',
+      'aria-selected': selected ? 'true' : 'false',
+      onclick: () => {
+        layout.tab = name;
+        if (dock) showDock(dock);
+        saveLayout();
+      },
+    }, label, dock === 'console' && state.unseenOutput ? m('span.unseen', { 'aria-label': ', new output' }) : null);
+  };
+  return m('nav.tabs', { role: 'tablist' }, [tab('node', null, 'Node'), tab('dock', 'forth', 'Forth'), tab('dock', 'console', 'Console')]);
+}
+
+/** Shows a dock's tab, on a narrow screen too, and types into it. */
+function typeInto(dock) {
+  layout.tab = 'dock';
+  showDock(dock);
+  m.redraw.sync();
+  document.getElementById(dock === 'forth' ? 'forth-input' : 'console-input')?.focus();
 }
 
 const ChipView = {
@@ -120,6 +137,8 @@ const keys = {
   l: () => move(1, 0),
   k: () => move(0, 1),
   j: () => move(0, -1),
+  f: () => typeInto('forth'),
+  c: () => typeInto('console'),
   '?': () => (dialogs.open = 'help'),
   Escape: () => (dialogs.open = null),
 };

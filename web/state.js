@@ -25,6 +25,9 @@ export const examples = [
 
 /** console output kept, in characters */
 const consoleCapacity = 64 * 1024;
+/** lines typed at the prompt kept, and the prompt's answers shown */
+const historyCapacity = 200;
+const entriesCapacity = 500;
 /** how long a frame spends running the chip, in milliseconds */
 const frameBudget = 8;
 
@@ -47,15 +50,28 @@ export const state = {
   /** each node's Status name, and the ports it moved words through */
   statuses: [],
   transfers: new Uint8Array(0),
+  /** the dock's tab: 'forth' or 'console' */
+  dock: 'forth',
+  /** console output arrived while the console's tab was not shown */
+  unseenOutput: false,
+  /** the prompt's answers: { target, line, answer } */
+  entries: [],
+  /** lines typed at the prompt, the latest last */
+  history: [],
+  /** console input that did not fit yet, given as the node reads */
+  pendingInput: new Uint8Array(0),
+  inputEnded: false,
 };
 
 let rounds = 20000;
 const decoder = new TextDecoder();
+const encoder = new TextEncoder();
 
 /** Loads the engine and the ROM, and draws the chip as it is. */
 export async function start() {
   state.gasim = await loadEngine();
   await findRom();
+  state.history = (await store.get('history')) ?? [];
   refresh();
 }
 
@@ -67,8 +83,10 @@ export function refresh() {
   const { status, transfers } = g.statuses();
   state.statuses = Array.from(status, (s) => Status[s]);
   state.transfers = transfers.slice();
+  givePending();
   const output = g.consoleOutput();
   if (output.length > 0) {
+    if (state.dock !== 'console') state.unseenOutput = true;
     state.console += decoder.decode(output, { stream: true });
     if (state.console.length > consoleCapacity) state.console = state.console.slice(-consoleCapacity / 2);
   }
@@ -140,7 +158,7 @@ export async function openExample(name) {
 export function load(file) {
   pause();
   state.file = file;
-  state.console = '';
+  forgetInput();
   const error = state.gasim.load(Kind[file.kind], file.bytes, hasBlocks(file.kind) ? file.loads : []);
   state.message = error ? `${file.name}: ${error}` : `Loaded ${file.name}`;
   refresh();
@@ -270,7 +288,7 @@ export function back() {
 export function reset() {
   pause();
   state.gasim.reset();
-  state.console = '';
+  forgetInput();
   state.message = 'Back to the start';
   refresh();
 }
@@ -279,4 +297,78 @@ export function toggleBreakpoint(address) {
   const set = state.gasim.toggleBreakpoint(state.selected, address);
   if (set === null) state.message = 'There are too many breakpoints';
   refresh();
+}
+
+// ---------- the prompt ----------
+
+/**
+ * Interprets a line of arrayForth 3 with the selected node as the IDE's
+ * target, keeping it in the history, and selects the node the line made
+ * the target, such as with 708 NODE.
+ */
+export function interpret(line) {
+  const target = nodeNumber(state.selected);
+  const answer = state.gasim.interpret(line, target);
+  state.entries.push({ target, line, answer });
+  if (state.entries.length > entriesCapacity) state.entries.splice(0, state.entries.length - entriesCapacity);
+  if (line.trim() !== '' && state.history.at(-1) !== line) {
+    state.history.push(line);
+    if (state.history.length > historyCapacity) state.history.splice(0, state.history.length - historyCapacity);
+    store.put('history', state.history);
+  }
+  if (answer.target !== null && answer.target !== target) {
+    const i = nodeIndex(answer.target);
+    if (i !== null) state.selected = i;
+  }
+  refresh();
+}
+
+/** The words that could complete the last word of `text`. */
+export function completions(text) {
+  const start = text.search(/\S*$/);
+  const partial = text.slice(start);
+  return { start, partial, words: partial === '' ? [] : state.gasim.complete(partial) };
+}
+
+// ---------- the console ----------
+
+/** Gives the console input, keeping what does not fit for when it does. */
+export function sendInput(text) {
+  if (state.inputEnded) {
+    state.message = "The console's input has ended";
+    return;
+  }
+  const bytes = encoder.encode(text);
+  const pending = new Uint8Array(state.pendingInput.length + bytes.length);
+  pending.set(state.pendingInput);
+  pending.set(bytes, state.pendingInput.length);
+  state.pendingInput = pending;
+  givePending();
+  if (state.pendingInput.length > 0) state.message = `${state.pendingInput.length} bytes wait for the node to read`;
+}
+
+function givePending() {
+  if (state.pendingInput.length === 0) return;
+  const given = state.gasim.give(state.pendingInput);
+  state.pendingInput = state.pendingInput.slice(given);
+}
+
+/** Ends the console's input, once what is pending has been given. */
+export function endInput() {
+  givePending();
+  if (state.pendingInput.length > 0) {
+    state.message = 'Input can end once the node has read what is pending';
+    return;
+  }
+  state.gasim.endInput();
+  state.inputEnded = true;
+  state.message = "The console's input has ended";
+}
+
+/** Forgets the console's output and input, as the chip starts again. */
+function forgetInput() {
+  state.console = '';
+  state.unseenOutput = false;
+  state.pendingInput = new Uint8Array(0);
+  state.inputEnded = false;
 }

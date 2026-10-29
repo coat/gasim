@@ -306,10 +306,14 @@ pub fn stepNode(self: *Sim, i: u16) error{OutOfMemory}!bool {
     return !self.chip.nodes[i].suspended;
 }
 
-/// Goes back to the chip as it was set up
+/// Goes back to the chip as it was set up, with the console's input not
+/// yet read forgotten, and not ended
 pub fn reset(self: *Sim) void {
     self.remember();
     self.chip.restore(&self.start);
+    self.console.taken_start = 0;
+    self.console.taken_end = 0;
+    self.console.ended = false;
 }
 
 /// Saves the chip, before stepping or running it, to go back to if it
@@ -780,6 +784,13 @@ test "input given to the console" {
     sim.console.end();
     try std.testing.expectEqual(.input, try sim.run(10_000));
     try std.testing.expectEqual(0, sim.give("x"));
+
+    // until it starts again, forgetting input not read
+    sim.reset();
+    try std.testing.expectEqual(1, sim.give("y"));
+    sim.reset();
+    try std.testing.expectEqual(.input, try sim.run(10_000));
+    try std.testing.expectEqualStrings("", sim.takeConsoleOutput());
 }
 
 test "errors say where they are" {

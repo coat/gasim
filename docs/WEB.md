@@ -22,7 +22,7 @@ looks.
 
 ## Where things stand
 
-Phases 0 to 2 are done:
+Phases 0 to 3 are done:
 
 - The core builds for wasm with no changes to how it works: the console
   takes input without a queue (`Console.give`), the editor's key map is
@@ -40,6 +40,11 @@ Phases 0 to 2 are done:
   breakpoints, the ROM, the examples, and opening files from a button or by
   dropping them. Borders can be dragged, and below 900 px the node and the
   console are tabs under the map. `?example=hello.ga` opens an example.
+- The dock has the arrayForth 3 prompt, answering each line with what it
+  printed and the stack, or the error and the word it was at, with Tab
+  completion and history kept in IndexedDB; and the console, taking a line
+  at a time or each key as it is typed, and ending its input. `f` and `c`
+  type into them.
 - The module has an 8 MiB stack, as arrayForth 3's interpreter is kept on
   the stack as it assembles, and assembling the ROM from `pFDISK.blk`
   overflows wasm's default of 1 MiB.

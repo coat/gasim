@@ -177,6 +177,11 @@ const keys = [
   ['n', 'Step the selected node'],
   ['z', 'Go back before the last step or run'],
   ['arrows or h j k l', 'Select a node'],
+  ['f', 'Type at the Forth prompt'],
+  ['c', 'Type into the console'],
+  ['esc', 'Stop typing'],
+  ['tab', 'Complete a word at the prompt'],
+  ['up and down', 'Lines typed before, at the prompt'],
   ['?', 'Show these keys'],
 ];
 
