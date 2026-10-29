@@ -22,25 +22,21 @@ looks.
 
 ## Where things stand
 
-The core already builds for wasm. A small program that makes a `Chip`, an
-`arrayforth.Session` attached to it and an `Editor`, interprets a line, types
-into the editor and steps the chip, built with no changes to `src/`:
+Phases 0 and 1 are done:
 
-```
-zig build-exe -target wasm32-freestanding -fno-entry -rdynamic -OReleaseSmall \
-  --dep gasim -Mroot=probe.zig -Mgasim=src/root.zig
-```
-
-It is 63 KB at ReleaseSmall. What is missing:
-
-- `Console.zig` is host side as it stands: it takes input through an
-  `Io.Queue` filled by another task, and uses atomics to be interrupted. The
-  web needs a console with a plain byte buffer that JavaScript fills, with
-  `run` stopping when a node waits on it for input.
-- Some types the export layer needs are private aliases, such as
-  `arrayforth.Program` and `Diagnostic`.
-- The editor's key map is in `tui.zig` (see [The colorForth
-  editor](#the-colorforth-editor)).
+- The core builds for wasm with no changes to how it works: the console
+  takes input without a queue (`Console.give`), the editor's key map is
+  `Editor.key`, which the TUI uses too, and CI builds the module with
+  `zig build wasm`.
+- `src/web/Sim.zig` is what the web runs: the chip with a console on node
+  000's up port, an arrayForth 3 session, the editor, and the chip's
+  history. It loads `.ga`, `.af`, `.blk` and `.cf` files as the CLI does,
+  and is tested natively with the rest.
+- `src/web/main.zig` exports it, `web/engine.js` wraps the exports, and
+  `zig build web` builds the module, 140 KB at ReleaseSmall, with `web/`
+  and the examples into `zig-out/web`. `zig build serve` serves it.
+- `web/index.html` only checks the engine in a browser, loading an example,
+  running it and giving it input, until the app replaces it in phase 2.
 
 ## Architecture
 
@@ -61,20 +57,21 @@ module's memory, and the only import is a log function for panics.
 ### The exports
 
 - Memory: `alloc`, `free`.
-- The chip: `init(layout)`, `reset(warm)`, `setRom(bytes)`, `load(kind,
-  bytes)` for `.ga`, `.af`, `.blk` and `.cf`, and `run(budget)`, which steps
-  until the budget is spent, a breakpoint or watch is hit, or every running
-  node waits on the console, and says which.
-- Stepping: `step`, `stepNode(i)`, `back`, and snapshots kept as
-  `Chip.Snapshot`s, as the TUI keeps them.
+- The chip: `setRom(bytes)`, `load(kind, bytes, loads)` for `.ga`, `.af`,
+  `.blk` and `.cf`, `reset`, and `run(budget)`, which steps until the
+  budget is spent, a breakpoint or watch is hit, a node waits on the
+  console for input, or every node is waiting, and says which.
+- Stepping: `stepNext`, `stepRound`, `stepNode(i)`, `remember` before a
+  run, and `back`, with snapshots kept as `Chip.Snapshot`s, as the TUI
+  keeps them.
 - The debugger: breakpoints, port watches, the trace log, and why a node
   is waiting (`--why`).
 - The session: `interpret(line)`, its output, `stack`, `complete(prefix)`,
   `setTarget(node)`.
-- The console: `consoleWrite(bytes)`, `consoleEnd`, and its output since it
-  was last read.
-- The editor: `open(blocks)`, `key(k)`, `moveTo(i)`, `goTo(block)`,
-  `contents` to save, `unsaved`.
+- The console: `give(bytes)`, `endInput`, `wantsInput`, and its output
+  since it was last read.
+- The editor: `editorOpen(blocks)`, `editorKey(k)`, `editorMoveTo(i)`,
+  `editorGoTo(block)`, and `editorContents` to save.
 
 State comes back two ways. What the map needs every frame, a status byte
 per node and the port activity between them, is a flat buffer read in place

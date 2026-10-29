@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gasim</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1rem; }
+    pre { background: #f4f4f5; padding: 0.5rem; min-height: 4rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <!-- A check that the engine works in a browser, until the app replaces it
+       (docs/WEB.md, phase 2). -->
+  <h1>gasim</h1>
+  <p id="rom">Looking for the ROM…</p>
+  <p>
+    <select id="example"></select>
+    <button id="run">Load and run</button>
+    <input id="input" placeholder="console input">
+    <button id="send">Send</button>
+  </p>
+  <p id="status"></p>
+  <pre id="console"></pre>
+  <script type="module">
+    import { loadEngine, Kind } from './engine.js';
+
+    const examples = ['hello.ga', 'hello.af', 'hello.cf', 'echo.ga', 'echo.af', 'echo.cf', 'upcase.ga', 'upcase.af',
+      'upcase.cf', 'alphabet.cf', 'variables.cf', 'multiply.cf'];
+    const $ = (id) => document.getElementById(id);
+    const gasim = await loadEngine();
+    const dec = new TextDecoder();
+
+    const rom = await fetch('ga144.txt').then((r) => (r.ok ? r.arrayBuffer() : null), () => null);
+    $('rom').textContent = rom && gasim.setRom(new Uint8Array(rom)) ? 'ROM loaded from ga144.txt' : 'No ROM: code that calls into ROM will not load';
+
+    for (const name of examples) $('example').append(new Option(name));
+
+    let running = false;
+    function frame() {
+      const { stop, hit } = gasim.run(20000);
+      $('console').textContent += dec.decode(gasim.consoleOutput(), { stream: true });
+      $('status').textContent = `${stop}${hit ? `: ${hit}` : ''} after ${gasim.chip().steps} steps`;
+      running = stop === 'budget';
+      if (running) requestAnimationFrame(frame);
+    }
+    const go = () => !running && requestAnimationFrame(frame);
+
+    $('run').onclick = async () => {
+      const name = $('example').value;
+      const bytes = new Uint8Array(await (await fetch(`examples/${name}`)).arrayBuffer());
+      const error = gasim.load(Kind[name.split('.').pop()], bytes, [0]);
+      $('console').textContent = '';
+      if (error) return ($('status').textContent = error);
+      go();
+    };
+    $('send').onclick = () => {
+      gasim.give($('input').value + '\n');
+      $('input').value = '';
+      go();
+    };
+  </script>
+</body>
+</html>

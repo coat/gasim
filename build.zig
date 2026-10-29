@@ -52,25 +52,57 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run gasim");
     run_step.dependOn(&run_cmd.step);
 
-    // the core for the web: wasm32-freestanding, with no I/O and no libc
+    // the web version: the core as a wasm32-freestanding module, with no
+    // I/O and no libc, and web/, in zig-out/web. Debug builds are slow, so it
+    // is ReleaseSmall unless another release mode is asked for.
     const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const wasm_optimize: std.lang.Optimize = if (optimize == .debug) .small else optimize;
     const wasm = b.addExecutable(.{
-        .name = "gasim-check",
+        .name = "gasim",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/web/check.zig"),
+            .root_source_file = b.path("src/web/main.zig"),
             .target = wasm_target,
-            .optimize = if (optimize == .debug) .small else optimize,
+            .optimize = wasm_optimize,
             .imports = &.{.{ .name = "gasim", .module = b.createModule(.{
                 .root_source_file = b.path("src/root.zig"),
                 .target = wasm_target,
-                .optimize = if (optimize == .debug) .small else optimize,
+                .optimize = wasm_optimize,
             }) }},
         }),
     });
     wasm.entry = .disabled;
     wasm.rdynamic = true;
-    const wasm_step = b.step("wasm", "Build the core for wasm32-freestanding, as the web version will");
+    const wasm_step = b.step("wasm", "Build the core for wasm32-freestanding, as the web version uses it");
     wasm_step.dependOn(&wasm.step);
+
+    const web_step = b.step("web", "Build the web version into zig-out/web");
+    web_step.dependOn(&b.addInstallDirectory(.{ .source_dir = b.path("web"), .install_dir = .prefix, .install_subdir = "web" }).step);
+    web_step.dependOn(&b.addInstallArtifact(wasm, .{ .dest_dir = .{ .override = .{ .custom = "web" } } }).step);
+    web_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("examples"),
+        .install_dir = .prefix,
+        .install_subdir = "web/examples",
+        .include_extensions = &.{ ".ga", ".af", ".cf" },
+    }).step);
+    // the ROM is GreenArrays', and not in the repository: the page looks for
+    // ga144.txt beside it, and otherwise asks for one
+    if (b.option([]const u8, "rom", "A ROM dump to serve with the web version as ga144.txt")) |rom|
+        web_step.dependOn(&b.addInstallFileWithDir(.{ .cwd_relative = rom }, .{ .custom = "web" }, "ga144.txt").step);
+
+    const serve = b.addExecutable(.{
+        .name = "serve",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/serve/main.zig"),
+            .target = b.graph.host,
+            .optimize = .safe,
+        }),
+    });
+    const serve_cmd = b.addRunArtifact(serve);
+    serve_cmd.addDirectoryArg(.{ .relative = .{ .base = .install_prefix, .sub_path = "web" } });
+    serve_cmd.addPassthruArgs();
+    serve_cmd.step.dependOn(web_step);
+    const serve_step = b.step("serve", "Build the web version and serve it on http://localhost:8080 (-- PORT for another)");
+    serve_step.dependOn(&serve_cmd.step);
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
@@ -99,7 +131,21 @@ pub fn build(b: *std.Build) void {
 
     const run_example_tests = b.addRunArtifact(example_tests);
 
+    // the web version's Sim, natively
+    const web_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/web/Sim.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "gasim", .module = mod }},
+        }),
+        .use_llvm = if (coverage) true else null,
+    });
+
+    const run_web_tests = b.addRunArtifact(web_tests);
+
     const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_web_tests.step);
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_example_tests.step);
@@ -108,6 +154,7 @@ pub fn build(b: *std.Build) void {
         var run_test_steps: std.ArrayList(*std.Build.Step.Run) = .empty;
         run_test_steps.append(b.allocator, run_mod_tests) catch @panic("OOM");
         run_test_steps.append(b.allocator, run_exe_tests) catch @panic("OOM");
+        run_test_steps.append(b.allocator, run_web_tests) catch @panic("OOM");
 
         const kcov_bin = b.findProgram(.{ .names = &.{"kcov"} }) orelse "kcov";
 
