@@ -2799,8 +2799,8 @@ fn eql(a: []const u8, b: []const u8) bool {
 
 const assembler = @import("assembler.zig");
 const colorforth = @import("colorforth.zig");
-const Diagnostic = assembler.Diagnostic;
-const Program = assembler.Program;
+pub const Diagnostic = assembler.Diagnostic;
+pub const Program = assembler.Program;
 const boot = @import("boot.zig");
 const Builder = @import("Builder.zig");
 const Chip = @import("Chip.zig");

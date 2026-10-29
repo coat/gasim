@@ -349,7 +349,7 @@ test "boot node 001 from ROM" {
     var input = try Console.testInput(&input_buffer, "boot me");
     var output_buffer: [16]u8 = undefined;
     var output: Io.Writer = .fixed(&output_buffer);
-    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &output };
+    var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &output };
     try chip.attachConsole(&console, 0, .up);
 
     try chip.run();

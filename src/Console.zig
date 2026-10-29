@@ -3,16 +3,18 @@
 //! the next byte of input.
 //!
 //! Input arrives through a queue, so that the chip can keep running while
-//! another task waits for it. See `readInput`.
+//! another task waits for it (see `readInput`), or without one, as bytes
+//! given with `give` by a host with no tasks, such as the web's.
 
 port: Port = .{},
-io: Io,
-/// closed at the end of input
-input: *Io.Queue(u8),
-/// input taken from `input` in one go, but not yet read by the node
+/// where input comes from; without a queue, only what is given with `give`
+input: ?Queue = null,
+/// input taken from `input` in one go, or given, but not yet read by the node
 taken: [512]u8 = undefined,
 taken_start: u16 = 0,
 taken_end: u16 = 0,
+/// set by `end`, when input is given rather than queued
+ended: bool = false,
 output: *Io.Writer,
 /// set, for example from a signal handler, to stop `Chip.run`
 interrupted: std.atomic.Value(bool) = .init(false),
@@ -22,6 +24,12 @@ waiting: std.atomic.Value(bool) = .init(false),
 used: bool = false,
 
 const Console = @This();
+
+/// a queue of input, closed at the end of it, and the `Io` it is used with
+pub const Queue = struct {
+    io: Io,
+    queue: *Io.Queue(u8),
+};
 
 /// the console's side of the port; the node uses the other one
 const side: Side = .b;
@@ -72,6 +80,35 @@ pub fn service(self: *Console, wait: bool) !bool {
     return false;
 }
 
+/// Gives the node input, without a queue. Returns how much of `bytes` there
+/// was room for: the rest can be given once the node has read some.
+pub fn give(self: *Console, bytes: []const u8) usize {
+    if (self.ended) return 0;
+    if (self.taken_start > 0) {
+        const left = self.taken[self.taken_start..self.taken_end];
+        @memmove(self.taken[0..left.len], left);
+        self.taken_start = 0;
+        self.taken_end = @intCast(left.len);
+    }
+    const n = @min(bytes.len, self.taken.len - self.taken_end);
+    @memcpy(self.taken[self.taken_end..][0..n], bytes[0..n]);
+    self.taken_end += @intCast(n);
+    return n;
+}
+
+/// Ends input given with `give`, as closing the queue ends queued input
+pub fn end(self: *Console) void {
+    self.ended = true;
+}
+
+/// Whether the node is waiting on the console for input it does not have
+pub fn wantsInput(self: Console) bool {
+    return switch (self.port.state) {
+        .reading => |r| r != side and self.taken_start == self.taken_end,
+        else => false,
+    };
+}
+
 /// Fills `buffer` with all of `bytes` as input for tests, ending the input
 pub fn testInput(buffer: []u8, bytes: []const u8) !Io.Queue(u8) {
     var input: Io.Queue(u8) = .init(buffer);
@@ -83,7 +120,8 @@ pub fn testInput(buffer: []u8, bytes: []const u8) !Io.Queue(u8) {
 /// Takes as much input as has arrived, waiting for some if `wait` is set.
 /// Returns false if there is none, or at the end of input.
 fn take(self: *Console, wait: bool) !bool {
-    var got = self.input.get(self.io, &self.taken, 0) catch |err| switch (err) {
+    const input = self.input orelse return false;
+    var got = input.queue.get(input.io, &self.taken, 0) catch |err| switch (err) {
         error.Closed => return false,
         else => |e| return e,
     };
@@ -93,7 +131,7 @@ fn take(self: *Console, wait: bool) !bool {
         try self.output.flush();
         self.waiting.store(true, .release);
         defer self.waiting.store(false, .release);
-        got = self.input.get(self.io, &self.taken, 1) catch |err| switch (err) {
+        got = input.queue.get(input.io, &self.taken, 1) catch |err| switch (err) {
             error.Closed => return false,
             else => |e| return e,
         };
@@ -108,7 +146,7 @@ test service {
     var input = try testInput(&input_buffer, "a");
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
 
     // nothing to do
     try std.testing.expect(!try console.service(true));
@@ -136,12 +174,40 @@ test "service does not wait for input unless asked" {
     var input: Io.Queue(u8) = .init(&.{});
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    var console: Console = .{ .io = std.testing.io, .input = &input, .output = &writer };
+    var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
 
     try std.testing.expectEqual(null, console.port.read(.a));
     try std.testing.expect(!try console.service(false));
     // the node is still waiting
     try std.testing.expect(console.port.otherReading(.b));
+}
+
+test give {
+    var buffer: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var console: Console = .{ .output = &writer };
+
+    // the node waits for input that has not been given
+    try std.testing.expectEqual(null, console.port.read(.a));
+    try std.testing.expect(console.wantsInput());
+    try std.testing.expect(!try console.service(true));
+
+    try std.testing.expectEqual(2, console.give("ab"));
+    try std.testing.expect(!console.wantsInput());
+    try std.testing.expect(try console.service(false));
+    try std.testing.expectEqual('a', console.port.read(.a));
+
+    // what is left is kept as more is given, until there is no room
+    var lots: [600]u8 = @splat('c');
+    try std.testing.expectEqual(console.taken.len - 1, console.give(&lots));
+    try std.testing.expectEqual(0, console.give("d"));
+    try std.testing.expectEqual(null, console.port.read(.a));
+    try std.testing.expect(try console.service(false));
+    try std.testing.expectEqual('b', console.port.read(.a));
+
+    // nothing is taken after the end
+    console.end();
+    try std.testing.expectEqual(0, console.give("e"));
 }
 
 test readInput {
