@@ -185,10 +185,11 @@ zig build -Doptimize=ReleaseFast
 test-web` runs its tests, which need [Deno](https://deno.com/) (in the Nix dev
 shell).
 
-`zig build test --fuzz` fuzzes the assemblers and colorForth's blocks and
-images, with a web UI showing coverage, or `--fuzz=1M` for a million inputs
-each. The examples seed the fuzzer, as does arrayForth 3's disk if it is in
-`rom/` (see [rom/README.md](rom/README.md)).
+`zig build test -Dfuzz --fuzz` fuzzes the assemblers and colorForth's blocks
+and images, with a web UI showing coverage, or `--fuzz=1M` for a million
+inputs each. `-Dfuzz` builds the tests with LLVM, which the fuzzer needs for
+its coverage. The examples seed the fuzzer, as does arrayForth 3's disk if it
+is in `rom/` (see [rom/README.md](rom/README.md)).
 
 ## Prior Art
 

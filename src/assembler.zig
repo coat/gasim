@@ -802,7 +802,7 @@ test "fuzz assembling" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var seeds: std.ArrayList([]const u8) = .empty;
-    try fuzz.addFiles(arena.allocator(), &seeds, &.{ "examples/echo.ga", "examples/hello.ga", "examples/upcase.ga" }, null);
+    try fuzz.addFiles(arena.allocator(), &seeds, &.{ "examples/echo.ga", "examples/hello.ga", "examples/upcase.ga" }, null, 4096);
     try std.testing.fuzz({}, fuzzAssemble, .{ .corpus = seeds.items });
 }
 

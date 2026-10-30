@@ -3768,7 +3768,7 @@ test "fuzz source" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var seeds: std.ArrayList([]const u8) = .empty;
-    try fuzz.addFiles(arena.allocator(), &seeds, &.{ "examples/echo.af", "examples/hello.af", "examples/upcase.af" }, null);
+    try fuzz.addFiles(arena.allocator(), &seeds, &.{ "examples/echo.af", "examples/hello.af", "examples/upcase.af" }, null, 4096);
     try std.testing.fuzz({}, fuzzSource, .{ .corpus = seeds.items });
 }
 
@@ -3787,7 +3787,7 @@ test "fuzz blocks" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var seeds: std.ArrayList([]const u8) = .empty;
-    try fuzz.addFiles(arena.allocator(), &seeds, &.{"rom/pFDISK.blk"}, block_size);
+    try fuzz.addFiles(arena.allocator(), &seeds, &.{"rom/pFDISK.blk"}, block_size, 4 * block_size);
     try std.testing.fuzz({}, fuzzBlocks, .{ .corpus = seeds.items });
 }
 
@@ -3808,7 +3808,7 @@ test "fuzz colorForth" {
     try fuzz.addFiles(arena.allocator(), &seeds, &.{
         "examples/alphabet.cf", "examples/echo.cf",   "examples/hello.cf",
         "examples/multiply.cf", "examples/upcase.cf", "examples/variables.cf",
-    }, null);
+    }, null, 4 * block_size);
     try std.testing.fuzz({}, fuzzColorForth, .{ .corpus = seeds.items });
 }
 
