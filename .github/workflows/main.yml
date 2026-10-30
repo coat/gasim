@@ -67,6 +67,33 @@ jobs:
       - name: Run tests 
         run: zig build test -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe --summary all
 
+  # the GUI's SDL3 built from source, as the releases build it, so a
+  # release does not find it broken. Its tests need a display, so are not run
+  build-gui:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux-gnu
+          - os: macos-latest
+            target: aarch64-macos
+          - os: macos-latest
+            target: x86_64-macos
+          - os: windows-latest
+            target: x86_64-windows-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: "0.17.0"
+
+      - name: Build the GUI
+        run: zig build -Dgui -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstrip -fno-sys=sdl3 --summary all
+
   coverage:
     runs-on: ubuntu-latest
     steps:

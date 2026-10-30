@@ -389,7 +389,7 @@ pub fn backTo(self: *Sim, n: usize) bool {
     return true;
 }
 
-const Moment = struct {
+pub const Moment = struct {
     /// the steps taken by then
     steps: u64,
     cause: Cause,
@@ -398,15 +398,20 @@ const Moment = struct {
 /// Writes the steps and runs to go back through into `out` as JSON, the
 /// oldest first
 pub fn historyView(self: *Sim) error{OutOfMemory}![]const u8 {
-    var moments: [history_capacity]Moment = undefined;
+    var buffer: [history_capacity]Moment = undefined;
+    self.out.clearRetainingCapacity();
+    try self.writeJson(self.moments(&buffer));
+    return self.out.written();
+}
+
+/// the steps and runs to go back through, the oldest first, in `buffer`
+pub fn moments(self: *Sim, buffer: *[history_capacity]Moment) []Moment {
     const len = self.historyLen();
-    for (moments[0..len], 0..) |*moment, k| {
+    for (buffer[0..len], 0..) |*moment, k| {
         const index = self.historyIndex(k);
         moment.* = .{ .steps = self.history[index].?.steps, .cause = self.causes[index] };
     }
-    self.out.clearRetainingCapacity();
-    try self.writeJson(moments[0..len]);
-    return self.out.written();
+    return buffer[0..len];
 }
 
 fn historyIndex(self: Sim, i: usize) usize {
@@ -515,7 +520,7 @@ pub fn statuses(self: Sim, out_statuses: []u8, out_transfers: []u8) void {
     }
 }
 
-const Line = struct {
+pub const Line = struct {
     address: u9,
     value: u18,
     code: []const u8,
@@ -523,7 +528,7 @@ const Line = struct {
     breakpoint: bool,
 };
 
-const NodeView = struct {
+pub const NodeView = struct {
     number: u16,
     status: Status,
     /// what it waits on, such as `right`
@@ -555,7 +560,12 @@ pub fn nodeView(self: *Sim, i: u16) error{OutOfMemory}![]const u8 {
     self.out.clearRetainingCapacity();
     var arena: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena.deinit();
-    const a = arena.allocator();
+    try self.writeJson(try self.node(arena.allocator(), i));
+    return self.out.written();
+}
+
+/// Node `i` as the node panel shows it, its text allocated with `a`
+pub fn node(self: *Sim, a: Allocator, i: u16) error{OutOfMemory}!NodeView {
     const n = &self.chip.nodes[i];
     const status = n.status();
     const word = n.current();
@@ -610,8 +620,7 @@ pub fn nodeView(self: *Sim, i: u16) error{OutOfMemory}![]const u8 {
             .breakpoint = self.chip.breakpoints.contains(.init(i, address)),
         };
     }
-    try self.writeJson(view);
-    return self.out.written();
+    return view;
 }
 
 fn code(a: Allocator, word: Word, address: u9) error{OutOfMemory}![]const u8 {
@@ -671,7 +680,7 @@ fn writeJson(self: *Sim, value: anytype) error{OutOfMemory}!void {
 
 // ---------- the prompt ----------
 
-const Answer = struct {
+pub const Answer = struct {
     ok: bool,
     /// what the line wrote, such as with `.`
     output: []const u8,
@@ -685,6 +694,15 @@ const Answer = struct {
 /// Interprets a line at the arrayForth 3 prompt with node `target` as the
 /// IDE's, and writes what came of it into `out` as JSON
 pub fn interpret(self: *Sim, line: []const u8, target: u16) error{OutOfMemory}![]const u8 {
+    const result = try self.answer(line, target);
+    self.out.clearRetainingCapacity();
+    try self.writeJson(result);
+    return self.out.written();
+}
+
+/// Interprets a line at the arrayForth 3 prompt with node `target` as the
+/// IDE's. What it answers lasts until the next line.
+pub fn answer(self: *Sim, line: []const u8, target: u16) error{OutOfMemory}!Answer {
     self.remember(.line);
     self.forth_out.clearRetainingCapacity();
     self.session.setTarget(target);
@@ -693,29 +711,34 @@ pub fn interpret(self: *Sim, line: []const u8, target: u16) error{OutOfMemory}![
     self.session.interpret(kept) catch |err| {
         name = @errorName(err);
     };
-    self.out.clearRetainingCapacity();
-    try self.writeJson(Answer{
+    return .{
         .ok = name == null,
         .output = self.forth_out.written(),
         .@"error" = name,
         .token = if (name != null) self.diagnostic.token else null,
         .stack = self.session.stack(),
         .target = self.session.target(),
-    });
-    return self.out.written();
+    };
 }
 
 /// Writes the words that could complete `prefix` into `out` as a JSON
 /// array, up to as many as `Completions` keeps
 pub fn complete(self: *Sim, prefix: []const u8) error{OutOfMemory}![]const u8 {
-    var words: Completions = .{};
-    self.session.complete(prefix, &words);
+    const words = self.completions(prefix);
     self.out.clearRetainingCapacity();
     try self.writeJson(words.found[0..words.len]);
     return self.out.written();
 }
 
-const Completions = struct {
+/// the words that could complete `prefix`, up to as many as `Completions`
+/// keeps
+pub fn completions(self: *Sim, prefix: []const u8) Completions {
+    var words: Completions = .{};
+    self.session.complete(prefix, &words);
+    return words;
+}
+
+pub const Completions = struct {
     found: [64][]const u8 = undefined,
     len: usize = 0,
 
@@ -725,6 +748,10 @@ const Completions = struct {
         if (self.len == self.found.len) return;
         self.found[self.len] = word;
         self.len += 1;
+    }
+
+    pub fn words(self: *const Completions) []const []const u8 {
+        return self.found[0..self.len];
     }
 };
 
@@ -798,7 +825,7 @@ pub fn compile(self: *Sim) error{ CompileFailed, OutOfMemory }!void {
     } else w.print("compiled, and started the chip again with {d} nodes' code", .{nodes}) catch return error.OutOfMemory;
 }
 
-const BlockView = struct {
+pub const BlockView = struct {
     block: usize,
     /// not colorForth source, such as an arrayForth 2 kernel's
     read_only: bool,
@@ -812,7 +839,14 @@ const BlockView = struct {
 pub fn blocksView(self: *Sim) error{OutOfMemory}![]const u8 {
     var arena: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena.deinit();
-    const a = arena.allocator();
+    self.out.clearRetainingCapacity();
+    try self.writeJson(try self.editorBlocks(arena.allocator()));
+    return self.out.written();
+}
+
+/// Each block of the editor's file, up to the last that holds anything, or
+/// the file's own count, its text allocated with `a`
+pub fn editorBlocks(self: *Sim, a: Allocator) error{OutOfMemory}![]BlockView {
     const editor = &self.editor;
     const bytes = editor.contents();
     const count = bytes.len / colorforth.block_size;
@@ -829,12 +863,10 @@ pub fn blocksView(self: *Sim) error{OutOfMemory}![]const u8 {
         colorforth.writeText(decoded, &text.writer) catch return error.OutOfMemory;
         view.* = .{ .block = b, .read_only = false, .empty = decoded.len == 0, .text = text.written() };
     }
-    self.out.clearRetainingCapacity();
-    try self.writeJson(views);
-    return self.out.written();
+    return views;
 }
 
-const TokenView = struct {
+pub const TokenView = struct {
     text: []const u8,
     color: colorforth.Color,
     /// a variable's value
@@ -843,7 +875,7 @@ const TokenView = struct {
     line: usize,
 };
 
-const EditorView = struct {
+pub const EditorView = struct {
     block: usize,
     blocks: usize,
     capacity: usize,
@@ -861,7 +893,13 @@ const EditorView = struct {
 pub fn editorView(self: *Sim) error{OutOfMemory}![]const u8 {
     var arena: std.heap.ArenaAllocator = .init(self.gpa);
     defer arena.deinit();
-    const a = arena.allocator();
+    self.out.clearRetainingCapacity();
+    try self.writeJson(try self.editing(arena.allocator()));
+    return self.out.written();
+}
+
+/// The block being edited, its words' text allocated with `a`
+pub fn editing(self: *Sim, a: Allocator) error{OutOfMemory}!EditorView {
     const editor = &self.editor;
     const tokens = try a.alloc(TokenView, editor.len);
     var lines: colorforth.Lines = .{};
@@ -874,8 +912,7 @@ pub fn editorView(self: *Sim) error{OutOfMemory}![]const u8 {
             .line = lines.of(token.*),
         };
     }
-    self.out.clearRetainingCapacity();
-    try self.writeJson(EditorView{
+    return .{
         .block = editor.block,
         .blocks = editor.count,
         .capacity = editor.capacity(),
@@ -887,8 +924,7 @@ pub fn editorView(self: *Sim) error{OutOfMemory}![]const u8 {
         .unsaved = editor.unsaved(),
         .compressed = self.editor_compressed,
         .tokens = tokens,
-    });
-    return self.out.written();
+    };
 }
 
 const std = @import("std");
@@ -1029,11 +1065,11 @@ test "views as JSON" {
     try std.testing.expectEqual(@backingInt(Status.reading), statuses_[0]);
     try std.testing.expectEqual(@backingInt(Status.code), statuses_[1]);
 
-    const node = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.nodeView(0), .{});
-    defer node.deinit();
-    try std.testing.expectEqualStrings("reading", node.value.object.get("status").?.string);
-    try std.testing.expectEqualStrings("left", node.value.object.get("waiting_on").?.string);
-    try std.testing.expectEqual(128, node.value.object.get("memory").?.array.items.len);
+    const node_ = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.nodeView(0), .{});
+    defer node_.deinit();
+    try std.testing.expectEqualStrings("reading", node_.value.object.get("status").?.string);
+    try std.testing.expectEqualStrings("left", node_.value.object.get("waiting_on").?.string);
+    try std.testing.expectEqual(128, node_.value.object.get("memory").?.array.items.len);
 
     const chip = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.chipView(), .{});
     defer chip.deinit();
@@ -1044,10 +1080,10 @@ test "views as JSON" {
 test "the prompt" {
     const sim = try testSim();
     defer freeSim(sim);
-    const answer = try std.json.parseFromSlice(Answer, std.testing.allocator, try sim.interpret("1 2 + 5", 0), .{});
-    defer answer.deinit();
-    try std.testing.expect(answer.value.ok);
-    try std.testing.expectEqualSlices(i32, &.{ 3, 5 }, answer.value.stack);
+    const answer_ = try std.json.parseFromSlice(Answer, std.testing.allocator, try sim.interpret("1 2 + 5", 0), .{});
+    defer answer_.deinit();
+    try std.testing.expect(answer_.value.ok);
+    try std.testing.expectEqualSlices(i32, &.{ 3, 5 }, answer_.value.stack);
 
     const failed = try std.json.parseFromSlice(Answer, std.testing.allocator, try sim.interpret("frob", 0), .{});
     defer failed.deinit();
@@ -1176,16 +1212,16 @@ test "the history, and going back to a step in it" {
     _ = try sim.stepNext();
     _ = try sim.stepRound();
     _ = try sim.stepNode(0);
-    const moments = try std.json.parseFromSlice([]const Moment, std.testing.allocator, try sim.historyView(), .{});
-    defer moments.deinit();
-    try std.testing.expectEqual(3, moments.value.len);
-    try std.testing.expectEqual(.step, moments.value[0].cause);
-    try std.testing.expectEqual(0, moments.value[0].steps);
-    try std.testing.expectEqual(.node, moments.value[2].cause);
+    const moments_ = try std.json.parseFromSlice([]const Moment, std.testing.allocator, try sim.historyView(), .{});
+    defer moments_.deinit();
+    try std.testing.expectEqual(3, moments_.value.len);
+    try std.testing.expectEqual(.step, moments_.value[0].cause);
+    try std.testing.expectEqual(0, moments_.value[0].steps);
+    try std.testing.expectEqual(.node, moments_.value[2].cause);
 
     try std.testing.expect(sim.backTo(1));
     try std.testing.expectEqual(1, sim.historyLen());
-    try std.testing.expectEqual(moments.value[1].steps, sim.chip.steps);
+    try std.testing.expectEqual(moments_.value[1].steps, sim.chip.steps);
     try std.testing.expect(!sim.backTo(1));
 }
 

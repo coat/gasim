@@ -7,6 +7,9 @@ pub fn build(b: *std.Build) void {
     const coverage = b.option(bool, "coverage", "Generate a coverage report with kcov") orelse false;
     const fuzz = b.option(bool, "fuzz", "Build the tests with LLVM, which --fuzz needs for its coverage") orelse false;
     const isocline = b.option(bool, "isocline", "Edit lines at the repl with isocline, which links libc (default true)") orelse true;
+    const strip = b.option(bool, "strip", "Leave out debug info, as the releases do");
+    // only with it are dvui, and SDL3's source, fetched
+    const with_gui = b.option(bool, "gui", "Build the GUI, gasim-gui, too, with dvui and SDL3") orelse false;
 
     const mod = b.addModule("gasim", .{
         .root_source_file = b.path("src/root.zig"),
@@ -29,6 +32,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip,
             // isocline is C, and only the executable uses it
             .link_libc = if (isocline) true else null,
             .imports = &.{
@@ -107,6 +111,59 @@ pub fn build(b: *std.Build) void {
     test_web.addArtifactArg(wasm);
     const test_web_step = b.step("test-web", "Run the web version's tests, with Deno");
     test_web_step.dependOn(&test_web.step);
+
+    // the GUI: the web version's Sim drawn with dvui in an SDL3 window,
+    // installed beside gasim with -Dgui. Only an option can say so, not a
+    // step, as dvui is fetched as the build is configured, before the steps
+    // asked for are known. On Linux it links the system's SDL3, as SDL3 built from source
+    // finds no display on NixOS; -fno-sys=sdl3 builds it anyway. Declared
+    // here, before dvui asks, so dvui gets this default.
+    _ = b.systemIntegrationOption("sdl3", .{ .default = target.result.os.tag == .linux });
+    const run_gui_step = b.step("run-gui", "Run the GUI (with -Dgui)");
+    // its tests open a hidden window, so they need a display, and are not
+    // part of `test`
+    const test_gui_step = b.step("test-gui", "Run the GUI's tests, in a hidden window (with -Dgui)");
+    const gui_options = b.addOptions();
+    gui_options.addOption(?[]const u8, "gui_images", b.option([]const u8, "gui-images", "A directory for test-gui to save what it draws in, as PNGs"));
+    if (!with_gui) {
+        const fail = b.addFail("the GUI is built with -Dgui, which fetches dvui and SDL3");
+        run_gui_step.dependOn(&fail.step);
+        test_gui_step.dependOn(&fail.step);
+    } else if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 })) |dvui| {
+        const gui_imports: []const std.Build.Module.Import = &.{
+            .{ .name = "gasim", .module = mod },
+            .{ .name = "Sim", .module = b.createModule(.{
+                .root_source_file = b.path("src/web/Sim.zig"),
+                .imports = &.{.{ .name = "gasim", .module = mod }},
+            }) },
+            .{ .name = "dvui", .module = dvui.module("dvui_sdl3") },
+            .{ .name = "build_options", .module = gui_options.createModule() },
+            // embedded, for its Examples menu
+            .{ .name = "examples", .module = b.createModule(.{ .root_source_file = b.path("examples/examples.zig") }) },
+        };
+        const gui_mod = b.createModule(.{
+            .root_source_file = b.path("src/gui/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+            .imports = gui_imports,
+        });
+        const gui = b.addExecutable(.{ .name = "gasim-gui", .root_module = gui_mod });
+        const install_gui = b.addInstallArtifact(gui, .{});
+        b.getInstallStep().dependOn(&install_gui.step);
+        const run_gui = b.addRunArtifact(gui);
+        run_gui.step.dependOn(&install_gui.step);
+        run_gui.addPassthruArgs();
+        run_gui_step.dependOn(&run_gui.step);
+
+        const gui_tests = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gui/ui.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = gui_imports,
+        }) });
+        test_gui_step.dependOn(&b.addRunArtifact(gui_tests).step);
+    }
 
     const serve = b.addExecutable(.{
         .name = "serve",
