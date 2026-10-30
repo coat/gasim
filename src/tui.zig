@@ -78,7 +78,7 @@ const Screen = enum { chip, editor };
 const Border = enum { columns, rows };
 
 const colors = struct {
-    const label: vaxis.Style = .{ .fg = .{ .index = 4 }, .bold = true };
+    const label: vaxis.Style = .{ .fg = .{ .index = 4 } };
     const address: vaxis.Style = .{ .fg = .{ .index = 4 } };
     const raw: vaxis.Style = .{ .fg = .{ .index = 8 } };
     const literal: vaxis.Style = .{ .fg = .{ .index = 3 } };
