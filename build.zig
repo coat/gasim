@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const coverage = b.option(bool, "coverage", "Generate a coverage report with kcov") orelse false;
+    const fuzz = b.option(bool, "fuzz", "Build the tests with LLVM, which --fuzz needs for its coverage") orelse false;
     const isocline = b.option(bool, "isocline", "Edit lines at the repl with isocline, which links libc (default true)") orelse true;
 
     const mod = b.addModule("gasim", .{
@@ -124,14 +125,14 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
-        .use_llvm = if (coverage) true else null,
+        .use_llvm = if (coverage or fuzz) true else null,
     });
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
-        .use_llvm = if (coverage) true else null,
+        .use_llvm = if (coverage or fuzz) true else null,
     });
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -157,7 +158,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{.{ .name = "gasim", .module = mod }},
         }),
-        .use_llvm = if (coverage) true else null,
+        .use_llvm = if (coverage or fuzz) true else null,
     });
 
     const run_web_tests = b.addRunArtifact(web_tests);
