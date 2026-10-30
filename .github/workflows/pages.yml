@@ -7,6 +7,12 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - LICENSE
+      - .gitignore
+      - .envrc
   workflow_dispatch:
 
 permissions:
