@@ -6,6 +6,16 @@ chip](https://www.greenarraychips.com/home/documents/index.php#GA144).
 
 ![The chip, console, forth and node panels](docs/screenshot-chip.png)
 
+## Running
+
+Download a pre-built binary for your operating system on the [GitHub
+Releases](https://github.com/coat/gasim/releases) page, and see the Usage
+section below.
+
+Try out the [web based version](https://coat.github.io/gasim/).
+
+If you have Nix installed: `nix run github:coat/gasim`.
+
 ## Usage
 
 ```bash
@@ -163,13 +173,6 @@ Programs can also call ROM words such as `*.17` and `warm` by name.
 
 Without ROM, nodes without a program wait for code on their ports, and
 programs cannot call ROM words.
-
-## Download
-
-Download a prebuilt binary for your operating system on the [GitHub
-Releases](https://github.com/coat/gasim/releases) page.
-
-If you have Nix installed, try `nix run github:coat/gasim`.
 
 ## Building
 
