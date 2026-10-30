@@ -181,6 +181,10 @@ zig build -Doptimize=ReleaseFast
 
 `gasim` will be available in `./zig-out/bin/gasim`.
 
+`zig build web` builds the web version into `./zig-out/web`, and `zig build
+test-web` runs its tests, which need [Deno](https://deno.com/) (in the Nix dev
+shell).
+
 ## Prior Art
 
 - GreenArrays' own SOFTSIM available in their free [arrayForth

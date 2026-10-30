@@ -80,7 +80,12 @@ pub fn build(b: *std.Build) void {
     wasm_step.dependOn(&wasm.step);
 
     const web_step = b.step("web", "Build the web version into zig-out/web");
-    web_step.dependOn(&b.addInstallDirectory(.{ .source_dir = b.path("web"), .install_dir = .prefix, .install_subdir = "web" }).step);
+    web_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("web"),
+        .install_dir = .prefix,
+        .install_subdir = "web",
+        .exclude_extensions = &.{".test.js"},
+    }).step);
     web_step.dependOn(&b.addInstallArtifact(wasm, .{ .dest_dir = .{ .override = .{ .custom = "web" } } }).step);
     web_step.dependOn(&b.addInstallDirectory(.{
         .source_dir = b.path("examples"),
@@ -92,6 +97,15 @@ pub fn build(b: *std.Build) void {
     // ga144.txt beside it, and otherwise asks for one
     if (b.option([]const u8, "rom", "A ROM dump to serve with the web version as ga144.txt")) |rom|
         web_step.dependOn(&b.addInstallFileWithDir(.{ .cwd_relative = rom }, .{ .custom = "web" }, "ga144.txt").step);
+
+    // Deno runs the page's modules as they are, and the wasm too
+    const test_web = b.addSystemCommand(&.{ "deno", "test", "--allow-read" });
+    test_web.addPrefixedFileArg("--config=", b.path("deno.json"));
+    test_web.addDirectoryArg(b.path("web"));
+    test_web.addArg("--");
+    test_web.addArtifactArg(wasm);
+    const test_web_step = b.step("test-web", "Run the web version's tests, with Deno");
+    test_web_step.dependOn(&test_web.step);
 
     const serve = b.addExecutable(.{
         .name = "serve",
