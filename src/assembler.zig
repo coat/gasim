@@ -788,3 +788,22 @@ test "ROM words" {
     try expectError(error.ReservedLabel, ": warm");
     try expectError(error.ReservedLabel, ": *.17");
 }
+
+/// Any source assembles or fails to, without crashing
+fn fuzzAssemble(_: void, smith: *std.testing.Smith) !void {
+    var source: [4096]u8 = undefined;
+    const len = smith.slice(&source);
+    var programs: [16]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    _ = assembleNodes(source[0..len], &programs, &diagnostic) catch return;
+}
+
+test "fuzz assembling" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var seeds: std.ArrayList([]const u8) = .empty;
+    try fuzz.addFiles(arena.allocator(), &seeds, &.{ "examples/echo.ga", "examples/hello.ga", "examples/upcase.ga" }, null);
+    try std.testing.fuzz({}, fuzzAssemble, .{ .corpus = seeds.items });
+}
+
+const fuzz = @import("fuzz.zig");

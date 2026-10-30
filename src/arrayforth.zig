@@ -3753,3 +3753,63 @@ test "a session compiles colorForth blocks again, replacing what they compiled" 
     try std.testing.expectEqual(colorforth.line(5, 1), diagnostic.line);
     try std.testing.expectEqualStrings("", diagnostic.token);
 }
+
+/// Any source assembles or fails to, without crashing
+fn fuzzSource(_: void, smith: *std.testing.Smith) !void {
+    var source: [4096]u8 = undefined;
+    const len = smith.slice(&source);
+    var programs: [16]Program = undefined;
+    var descriptors: [16]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    _ = assembleNodes(source[0..len], &programs, &descriptors, &diagnostic) catch return;
+}
+
+test "fuzz source" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var seeds: std.ArrayList([]const u8) = .empty;
+    try fuzz.addFiles(arena.allocator(), &seeds, &.{ "examples/echo.af", "examples/hello.af", "examples/upcase.af" }, null);
+    try std.testing.fuzz({}, fuzzSource, .{ .corpus = seeds.items });
+}
+
+/// Any polyFORTH blocks assemble from block 0 or fail to, without crashing
+fn fuzzBlocks(_: void, smith: *std.testing.Smith) !void {
+    var blocks: [4 * block_size]u8 = undefined;
+    const len = smith.slice(&blocks);
+    var programs: [16]Program = undefined;
+    var descriptors: [16]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    _ = assembleBlocks(blocks[0..len], &.{0}, &programs, &descriptors, &diagnostic) catch return;
+}
+
+test "fuzz blocks" {
+    // each block of arrayForth 3's disk, if it is in rom/
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var seeds: std.ArrayList([]const u8) = .empty;
+    try fuzz.addFiles(arena.allocator(), &seeds, &.{"rom/pFDISK.blk"}, block_size);
+    try std.testing.fuzz({}, fuzzBlocks, .{ .corpus = seeds.items });
+}
+
+/// Any colorForth blocks compile from block 0 or fail to, without crashing
+fn fuzzColorForth(_: void, smith: *std.testing.Smith) !void {
+    var blocks: [4 * block_size]u8 = undefined;
+    const len = smith.slice(&blocks);
+    var programs: [16]Program = undefined;
+    var descriptors: [16]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    _ = assembleColorForth(blocks[0..len], &.{0}, &programs, &descriptors, &diagnostic) catch return;
+}
+
+test "fuzz colorForth" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var seeds: std.ArrayList([]const u8) = .empty;
+    try fuzz.addFiles(arena.allocator(), &seeds, &.{
+        "examples/alphabet.cf", "examples/echo.cf",   "examples/hello.cf",
+        "examples/multiply.cf", "examples/upcase.cf", "examples/variables.cf",
+    }, null);
+    try std.testing.fuzz({}, fuzzColorForth, .{ .corpus = seeds.items });
+}
+
+const fuzz = @import("fuzz.zig");

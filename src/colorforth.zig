@@ -259,9 +259,11 @@ pub const Reader = struct {
             return token;
         }
         try unpack(cell, &token);
+        // a variable's name fits in its cell, so an extension after its
+        // value is one on its own
         if (tag == .variable) token.value = @bitCast(self.take());
         // more characters, even for an extension without a word before it
-        while (self.cell < cells_per_block) {
+        while (tag != .variable and self.cell < cells_per_block) {
             const more = cellAt(self.block, self.cell);
             if (more == 0 or @as(u4, @truncate(more)) != 0) break;
             self.cell += 1;
@@ -469,7 +471,7 @@ const BitReader = struct {
     fn take(self: *BitReader, n: u6) ImageError!u32 {
         var value: u32 = 0;
         for (0..n) |_| {
-            if (self.at / 8 >= self.bytes.len) return error.ImageTruncated;
+            if (byteOf(self.at) >= self.bytes.len) return error.ImageTruncated;
             value = value << 1 | (self.bytes[byteOf(self.at)] >> @intCast(7 - self.at % 8) & 1);
             self.at += 1;
         }
@@ -496,7 +498,7 @@ const BitWriter = struct {
         var i = n;
         while (i > 0) {
             i -= 1;
-            if (self.at / 8 >= self.bytes.len) return error.ImageFull;
+            if (byteOf(self.at) >= self.bytes.len) return error.ImageFull;
             self.bytes[byteOf(self.at)] |= @intCast((value >> @intCast(i) & 1) << @intCast(7 - self.at % 8));
             self.at += 1;
         }
@@ -873,3 +875,102 @@ test "arrayForth 2 images compress and decompress" {
     try std.testing.expectError(error.ImageTruncated, decompress(compressed[0..len], &decompressed));
     try std.testing.expectError(error.ImageFull, compress(&image, compressed[0 .. uncompressed_blocks * block_size]));
 }
+
+fn expectSameTokens(expected: []const Token, actual: []const Token) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |e, a| {
+        try std.testing.expectEqual(e.tag, a.tag);
+        try std.testing.expectEqual(e.value, a.value);
+        try std.testing.expectEqual(e.hex, a.hex);
+        try std.testing.expectEqualStrings(e.text(), a.text());
+    }
+}
+
+const example_blocks: []const []const u8 = &.{
+    "examples/alphabet.cf", "examples/echo.cf",   "examples/hello.cf",
+    "examples/multiply.cf", "examples/upcase.cf", "examples/variables.cf",
+};
+
+/// Any block decodes or fails to, and what it decodes to encodes into a
+/// block that decodes the same, and encodes again to the same bytes
+fn fuzzBlock(_: void, smith: *std.testing.Smith) !void {
+    var block: [block_size]u8 = @splat(0);
+    @memset(block[smith.slice(&block)..], 0);
+    var tokens: [cells_per_block]Token = undefined;
+    const decoded = decode(&block, &tokens) catch return;
+    // a space packs into no bits at the end of a cell, so a word with one,
+    // which nothing but nonsense decodes to, may not come back the same
+    for (decoded) |token| if (std.mem.indexOfScalar(u8, token.text(), ' ') != null) return;
+    var encoded: [block_size]u8 = undefined;
+    try encode(decoded, &encoded);
+
+    var again: [cells_per_block]Token = undefined;
+    const redecoded = try decode(&encoded, &again);
+    try expectSameTokens(decoded, redecoded);
+    var reencoded: [block_size]u8 = undefined;
+    try encode(redecoded, &reencoded);
+    try std.testing.expectEqualSlices(u8, &encoded, &reencoded);
+}
+
+test "fuzz blocks" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var seeds: std.ArrayList([]const u8) = .empty;
+    try fuzz.addFiles(arena.allocator(), &seeds, example_blocks, block_size);
+    try std.testing.fuzz({}, fuzzBlock, .{ .corpus = seeds.items });
+}
+
+/// the most blocks after the uncompressed ones that the image fuzz tests try
+const fuzz_blocks = 4;
+
+/// An image of any blocks after the uncompressed ones compresses or fails
+/// to, and decompresses to blocks of the same tokens
+fn fuzzCompress(_: void, smith: *std.testing.Smith) !void {
+    const start = uncompressed_blocks * block_size;
+    var image: [(uncompressed_blocks + fuzz_blocks) * block_size]u8 = @splat(0);
+    const source = image[0 .. start + smith.slice(image[start..])];
+    var compressed: [image.len * 2]u8 = undefined;
+    const len = compress(source, &compressed) catch return;
+    var decompressed: [image.len]u8 = undefined;
+    const out = decompressed[0 .. blockCount(source) * block_size];
+    try decompress(compressed[0..len], out);
+
+    for (uncompressed_blocks..blockCount(source)) |n| {
+        var block: [block_size]u8 = @splat(0);
+        const bytes = source[n * block_size ..][0..@min(block_size, source.len - n * block_size)];
+        @memcpy(block[0..bytes.len], bytes);
+        var expected: [cells_per_block]Token = undefined;
+        var actual: [cells_per_block]Token = undefined;
+        try expectSameTokens(try decode(&block, &expected), try decode(out[n * block_size ..][0..block_size], &actual));
+    }
+}
+
+test "fuzz compressing images" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var seeds: std.ArrayList([]const u8) = .empty;
+    try fuzz.addFiles(arena.allocator(), &seeds, example_blocks, null);
+    try std.testing.fuzz({}, fuzzCompress, .{ .corpus = seeds.items });
+}
+
+/// Any bits after the uncompressed blocks decompress or fail to, and what
+/// they decompress to compresses and decompresses to the same bytes
+fn fuzzDecompress(_: void, smith: *std.testing.Smith) !void {
+    const start = uncompressed_blocks * block_size;
+    var image: [(uncompressed_blocks + fuzz_blocks) * block_size]u8 = @splat(0);
+    const len = smith.slice(image[start..]);
+    var out: [image.len]u8 = undefined;
+    decompress(image[0 .. start + len], &out) catch return;
+
+    var compressed: [image.len * 2]u8 = undefined;
+    const compressed_len = try compress(&out, &compressed);
+    var again: [image.len]u8 = undefined;
+    try decompress(compressed[0..compressed_len], &again);
+    try std.testing.expectEqualSlices(u8, out[start..], again[start..]);
+}
+
+test "fuzz decompressing images" {
+    try std.testing.fuzz({}, fuzzDecompress, .{});
+}
+
+const fuzz = @import("fuzz.zig");

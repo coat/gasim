@@ -21,4 +21,5 @@ With arrayForth 3's disk copied here as `rom/pFDISK.blk`, which git ignores,
 same as a G144A12's, by its SHA-256. That is of the ROM as read from a chip
 by Michael Schuldt, `raw-rom-dump.txt` from
 [mschuldt/ga144-sim](https://github.com/mschuldt/ga144-sim) at commit
-`de5974a`. The tests that need the ROM are skipped without the disk.
+`de5974a`. The tests that need the ROM are skipped without the disk. Its
+blocks also seed the fuzz test of polyFORTH blocks.
