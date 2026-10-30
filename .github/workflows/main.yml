@@ -41,6 +41,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: nix develop -c zig build wasm --summary all
 
+      - name: Test the web version
+        run: nix develop -c zig build test-web --summary all
+
   build-windows:
     runs-on: windows-latest
     steps:

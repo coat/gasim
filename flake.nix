@@ -17,6 +17,7 @@
             packages = with pkgs;
               [
                 zig
+                deno
               ]
               ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [elfkickers kcov]);
           };
