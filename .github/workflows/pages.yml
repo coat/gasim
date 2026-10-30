@@ -38,7 +38,7 @@ jobs:
       - name: Build the web version
         run: nix develop -c zig build web --summary all
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v4
         with:
