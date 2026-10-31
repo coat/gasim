@@ -14,4 +14,6 @@ Copied as published, so the web version needs no package manager:
   The GUI draws them too, converted to TinyVG as it is built. MIT, see
   `LICENSE-heroicons`. Not Heroicons' own, but drawn from them: `step` and
   `step-back` are `play` squeezed, and mirrored, with a bar as `pause`'s
-  are, and `round` is `forward` squeezed, with a bar.
+  are, `round` is `forward` squeezed, with a bar, and `step-node` is a small
+  `step` cut out of `stop`'s tile, wound the other way so the hole shows
+  where shapes fill nonzero, as dvui's do.

@@ -280,7 +280,7 @@ const gui_icons = [_][]const u8{
     "arrow-path",       "book-open", "clock",                "code-bracket",
     "computer-desktop", "cpu-chip",  "folder-open",          "moon",
     "pause",            "play",      "question-mark-circle", "round",
-    "step",             "step-back", "sun",
+    "step",             "step-back", "step-node",            "sun",
 };
 
 /// Gives the GUI and its tests, and the C libraries it links as SDL3, the macOS SDK's
