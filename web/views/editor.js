@@ -198,7 +198,6 @@ export const EditorView = {
       ]),
       m('nav.tabs', { role: 'tablist' }, ['editing', 'blocks', 'node'].map((tab) => m('button', {
         role: 'tab',
-        class: state.editorTab === tab ? '' : 'secondary outline',
         'aria-selected': state.editorTab === tab ? 'true' : 'false',
         onclick: () => (state.editorTab = tab),
       }, { editing: 'Block', blocks: 'Blocks', node: 'Node' }[tab]))),

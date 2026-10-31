@@ -1,5 +1,6 @@
 // The app: the chip's view, with the map, the node and the console, in
-// regions whose borders can be dragged, or as tabs on a narrow screen.
+// regions whose borders can be dragged, or on a narrow screen, the map
+// above tabs, with the border between them dragged.
 
 import {
   state, start, toggleRun, stepNext, stepRound, stepNode, back, move, openFile, openExample, examples, flushWorkspace, workspaceKept,
@@ -14,11 +15,14 @@ const { m } = window;
 
 // ---------- layout ----------
 
-/** the sizes of the node column and the dock, kept for next time */
+/**
+ * the sizes of the node column and the dock, and on a narrow screen, of
+ * the tabs under the map, kept for next time
+ */
 const layout = loadLayout();
 
 function loadLayout() {
-  const defaults = { node: 26, dock: 30, tab: 'node' };
+  const defaults = { node: 26, dock: 30, stack: 50, tab: 'node' };
   try {
     return { ...defaults, ...JSON.parse(localStorage.getItem('layout') ?? '{}') };
   } catch {
@@ -44,7 +48,7 @@ function gutter(name, vertical, min, max) {
     const percent = vertical ? ((box.right - e.clientX) / box.width) * 100 : ((box.bottom - e.clientY) / box.height) * 100;
     layout[name] = Math.round(Math.max(min, Math.min(max, percent)));
   };
-  return m(`.gutter.${vertical ? 'columns' : 'rows'}`, {
+  return m(`.gutter.${name}-gutter`, {
     role: 'separator',
     'aria-orientation': vertical ? 'vertical' : 'horizontal',
     'aria-valuenow': layout[name],
@@ -78,7 +82,6 @@ function tabs() {
     const selected = layout.tab === name && (dock === null || state.dock === dock);
     return m('button', {
       role: 'tab',
-      class: selected ? '' : 'secondary outline',
       'aria-selected': selected ? 'true' : 'false',
       onclick: () => {
         layout.tab = name;
@@ -105,12 +108,13 @@ const ChipView = {
   view() {
     return m('main.chip-view', {
       class: `tab-${layout.tab}`,
-      style: { '--node-width': `${layout.node}%`, '--dock-height': `${layout.dock}%` },
+      style: { '--node-width': `${layout.node}%`, '--dock-height': `${layout.dock}%`, '--stack-height': `${layout.stack}%` },
     }, [
       m(ChipMap),
       gutter('dock', false, 10, 70),
       m(Dock),
       gutter('node', true, 18, 50),
+      gutter('stack', false, 20, 80),
       tabs(),
       m(NodePanel),
     ]);
