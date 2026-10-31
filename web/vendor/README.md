@@ -12,4 +12,6 @@ Copied as published, so the web version needs no package manager:
 - `../icons/*.svg`: some of [Heroicons](https://heroicons.com/) 2.2.0's
   20 px solid icons, from `https://registry.npmjs.org/heroicons/-/heroicons-2.2.0.tgz`.
   The GUI draws them too, converted to TinyVG as it is built. MIT, see
-  `LICENSE-heroicons`.
+  `LICENSE-heroicons`. Not Heroicons' own, but drawn from them: `step` and
+  `step-back` are `play` squeezed, and mirrored, with a bar as `pause`'s
+  are, and `round` is `forward` squeezed, with a bar.

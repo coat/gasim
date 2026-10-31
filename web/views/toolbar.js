@@ -129,10 +129,10 @@ export const Toolbar = {
       ]),
       m('.group.run', { role: 'toolbar', 'aria-label': 'Run and step' }, [
         tool(state.running ? 'Pause' : 'Run', toggleRun, { class: state.running ? 'secondary' : '', title: 'Run or pause (space)' }, state.running ? 'pause' : 'play'),
-        tool('Step', stepNext, { disabled: !stopped, class: 'secondary outline', title: 'Step the next node to run (s)' }),
-        tool('Round', stepRound, { disabled: !stopped, class: 'secondary outline', title: 'Step each node that can run once (shift+s)' }),
+        tool('Step', stepNext, { disabled: !stopped, class: 'secondary outline', title: 'Step the next node to run (s)' }, 'step'),
+        tool('Round', stepRound, { disabled: !stopped, class: 'secondary outline', title: 'Step each node that can run once (shift+s)' }, 'round'),
         tool('Node', stepNode, { disabled: !stopped, class: 'secondary outline', title: 'Step the selected node (n)' }),
-        tool('Back', back, { disabled: !stopped || state.chip.history === 0, class: 'secondary outline', title: 'Go back before the last step or run (z)' }, 'arrow-uturn-left'),
+        tool('Back', back, { disabled: !stopped || state.chip.history === 0, class: 'secondary outline', title: 'Go back before the last step or run (z)' }, 'step-back'),
         tool('Reset', reset, { class: 'secondary outline', title: 'Start the chip again as it was loaded' }, 'arrow-path'),
       ]),
       m('.group.info', [
