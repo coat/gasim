@@ -269,32 +269,82 @@ fn keys() void {
 fn toolbar() void {
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .style = .window, .background = true, .padding = .all(4) });
     defer bar.deinit();
+    fitLabels(bar);
 
     dvui.label(@src(), "gasim", .{}, .{ .font = .theme(.heading), .gravity_y = 0.5, .padding = .{ .x = 4, .w = 12 } });
     for (std.enums.values(View)) |v| {
-        const tag = if (v == .chip) "view-chip" else "view-editor";
-        if (dvui.button(@src(), if (v == .chip) "Chip" else "Editor", .{}, .{ .id_extra = @backingInt(v), .style = if (view == v) .highlight else .control, .tag = tag })) view = v;
+        const t: Tool = if (v == .chip)
+            .{ .label = "Chip", .icon = icons.cpu_chip, .tip = "The chip (q in the editor)" }
+        else
+            .{ .label = "Editor", .icon = icons.code_bracket, .tip = "The colorForth editor (e)" };
+        if (tool(@src(), t, .{ .id_extra = @backingInt(v), .style = if (view == v) .highlight else .control, .tag = if (v == .chip) "view-chip" else "view-editor" })) view = v;
     }
     files.toolbar();
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12 } });
     const stopped = !running;
-    if (dvui.button(@src(), if (running) "Pause" else "Run", .{}, .{ .style = .highlight, .min_size_content = .{ .w = 48 } })) toggleRun();
-    if (tool(@src(), "Step", stopped)) stepNext();
-    if (tool(@src(), "Round", stopped)) stepRound();
-    if (tool(@src(), "Node", stopped)) stepNode();
-    if (tool(@src(), "Back", stopped and sim.historyLen() > 0)) back();
-    if (tool(@src(), "Reset", true)) reset();
+    if (tool(@src(), .{ .label = if (running) "Pause" else "Run", .icon = if (running) icons.pause else icons.play, .tip = "Run or pause (space)" }, .{ .style = .highlight, .min_size_content = .{ .w = 48 } })) toggleRun();
+    if (tool(@src(), .{ .label = "Step", .tip = "Step the next node to run (s)", .enabled = stopped }, .{})) stepNext();
+    if (tool(@src(), .{ .label = "Round", .tip = "Step each node that can run once (shift+s)", .enabled = stopped }, .{})) stepRound();
+    if (tool(@src(), .{ .label = "Node", .tip = "Step the selected node (n)", .enabled = stopped }, .{})) stepNode();
+    if (tool(@src(), .{ .label = "Back", .icon = icons.arrow_uturn_left, .tip = "Go back before the last step or run (z)", .enabled = stopped and sim.historyLen() > 0 }, .{})) back();
+    if (tool(@src(), .{ .label = "Reset", .icon = icons.arrow_path, .tip = "Start the chip again as it was loaded" }, .{})) reset();
     var info = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .gravity_y = 0.5 });
     defer info.deinit();
     dvui.label(@src(), "{d} steps", .{sim.chip.steps}, .{ .gravity_y = 0.5, .padding = .{ .x = 4, .w = 8 } });
     files.romButton();
-    if (dvui.button(@src(), "?", .{}, .{ .tag = "help" })) help.open = true;
+    if (tool(@src(), .{ .label = "Help", .icon = icons.question_mark_circle, .tip = "Keys (?)" }, .{ .tag = "help" })) help.open = true;
     help.themeButton();
 }
 
-/// a button that does nothing, and looks it, unless `enabled`
-fn tool(src: std.builtin.SourceLocation, label: []const u8, enabled: bool) bool {
-    return dvui.button(src, label, .{ .grayed = !enabled }, .{}) and enabled;
+/// A toolbar button, and what it says as the pointer rests on it
+pub const Tool = struct {
+    label: []const u8,
+    /// with an icon, the label shows only where the window is wide enough
+    icon: ?[]const u8 = null,
+    tip: []const u8,
+    enabled: bool = true,
+};
+
+/// whether the toolbar has room for its labels beside its icons, and how
+/// wide it was with them when it last had not
+var labels = true;
+var labelled_width: f32 = 0;
+
+pub fn toolbarLabels() bool {
+    return labels;
+}
+
+/// Leaves out the toolbar's labels once it no longer fits the window with
+/// them, as it measured last frame, and puts them back once the window is
+/// as wide as it measured with them
+fn fitLabels(bar: *dvui.BoxWidget) void {
+    const needed = dvui.minSizeGet(bar.data().id) orelse return;
+    const width = dvui.windowRect().w;
+    if (labels and needed.w > width) {
+        labels = false;
+        labelled_width = needed.w;
+    } else if (!labels and width >= labelled_width) labels = true;
+}
+
+/// a toolbar button that does nothing, and looks it, unless `t.enabled`
+pub fn tool(src: std.builtin.SourceLocation, t: Tool, opts: dvui.Options) bool {
+    var bw: dvui.ButtonWidget = undefined;
+    bw.init(src, .{ .grayed = !t.enabled }, opts.override(.{ .label = .{ .text = t.label } }));
+    bw.processEvents();
+    bw.drawBackground();
+    const inside = opts.strip().override(bw.style()).override(.{ .gravity_y = 0.5, .role = .none });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 0.5, .gravity_y = 0.5 });
+        defer row.deinit();
+        if (t.icon) |tvg| dvui.icon(@src(), t.label, tvg, .{}, inside);
+        if (t.icon == null or toolbarLabels())
+            dvui.labelNoFmt(@src(), t.label, .{}, inside.override(.{ .padding = .{ .x = if (t.icon == null) 0 else 4 } }));
+    }
+    const click = bw.clicked();
+    bw.drawFocus();
+    dvui.tooltip(@src(), .{ .active_rect = bw.data().borderRectScale().r }, "{s}", .{t.tip}, .{});
+    bw.deinit();
+    return click and t.enabled;
 }
 
 fn statusLine() void {
@@ -853,6 +903,7 @@ const dock = @import("dock.zig");
 const editor = @import("editor.zig");
 const files = @import("files.zig");
 const help = @import("help.zig");
+const icons = @import("icons");
 
 // ---------- tests, in a hidden window ----------
 
@@ -924,6 +975,17 @@ test "the map shows numbers when it is small" {
     try dvui.testing.settle(frame);
     try saveImage(&t, "map-small.png");
     try std.testing.expect(!tiles.registers());
+}
+
+test "the toolbar leaves out its labels where they do not fit" {
+    for ([_]f32{ 1800, 900, 1800 }) |w| {
+        var t = try dvui.testing.init(.{ .window_size = .{ .w = w, .h = 700 } });
+        defer t.deinit();
+        try startWith(upcase);
+        defer stop();
+        try dvui.testing.settle(frame);
+        try std.testing.expectEqual(w > 900, labels);
+    }
 }
 
 test "the keys step and go back" {

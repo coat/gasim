@@ -130,6 +130,16 @@ pub fn build(b: *std.Build) void {
         run_gui_step.dependOn(&fail.step);
         test_gui_step.dependOn(&fail.step);
     } else if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 })) |dvui| {
+        // the toolbar's icons, the web version's SVGs as the TinyVG dvui
+        // draws, each a constant of icons.zig named in snake_case
+        const icons = b.addWriteFiles();
+        var icons_zig: []const u8 = "";
+        if (b.lazyImport(@This(), "dvui")) |dvui_build| for (gui_icons) |name| {
+            const tvg = dvui_build.svgPathToTvgPath(dvui.builder, b.path(b.fmt("web/icons/{s}.svg", .{name})));
+            _ = icons.addCopyFile(tvg, b.fmt("{s}.tvg", .{name}));
+            const constant = std.mem.replaceOwned(u8, b.allocator, name, "-", "_") catch @panic("OOM");
+            icons_zig = b.fmt("{s}pub const {s} = @embedFile(\"{s}.tvg\");\n", .{ icons_zig, constant, name });
+        };
         const gui_imports: []const std.Build.Module.Import = &.{
             .{ .name = "gasim", .module = mod },
             .{ .name = "Sim", .module = b.createModule(.{
@@ -140,6 +150,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = gui_options.createModule() },
             // embedded, for its Examples menu
             .{ .name = "examples", .module = b.createModule(.{ .root_source_file = b.path("examples/examples.zig") }) },
+            .{ .name = "icons", .module = b.createModule(.{ .root_source_file = icons.add("icons.zig", icons_zig) }) },
         };
         const gui_mod = b.createModule(.{
             .root_source_file = b.path("src/gui/main.zig"),
@@ -260,6 +271,14 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&install_coverage.step);
     }
 }
+
+/// the icons in web/icons the GUI draws too
+const gui_icons = [_][]const u8{
+    "arrow-path",   "arrow-uturn-left", "book-open", "clock",
+    "code-bracket", "computer-desktop", "cpu-chip",  "folder-open",
+    "moon",         "pause",            "play",      "question-mark-circle",
+    "sun",
+};
 
 /// Gives the GUI and its tests, and the C libraries it links as SDL3, the macOS SDK's
 /// frameworks, libraries and headers, when built on a Mac for macOS. Zig

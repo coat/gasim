@@ -182,11 +182,11 @@ fn pick() void {
 
 /// Open…, the files opened before, the examples, the file, and its blocks
 pub fn toolbar() void {
-    if (dvui.button(@src(), "Open…", .{}, .{ .tag = "open" })) pick();
+    if (ui.tool(@src(), .{ .label = "Open…", .icon = icons.folder_open, .tip = "Open a file" }, .{ .tag = "open" })) pick();
     {
         var m = dvui.menu(@src(), .horizontal, .{ .gravity_y = 0.5 });
         defer m.deinit();
-        if (recent.items.len > 0) if (dvui.menuItemLabel(@src(), "Recent", .{ .submenu = true }, .{ .tag = "recent" })) |r| {
+        if (recent.items.len > 0) if (toolbarMenu(@src(), .{ .label = "Recent", .icon = icons.clock, .tip = "The files opened before" }, .{ .tag = "recent" })) |r| {
             var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
             defer fw.deinit();
             for (recent.items, 0..) |f, k| {
@@ -201,7 +201,7 @@ pub fn toolbar() void {
                 recent.clearRetainingCapacity();
             }
         };
-        if (dvui.menuItemLabel(@src(), "Examples", .{ .submenu = true }, .{ .tag = "examples" })) |r| {
+        if (toolbarMenu(@src(), .{ .label = "Examples", .icon = icons.book_open, .tip = "Examples to open" }, .{ .tag = "examples" })) |r| {
             var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
             defer fw.deinit();
             for (examples.all, 0..) |e, k| {
@@ -229,7 +229,22 @@ pub fn toolbar() void {
     var te = dvui.textEntry(src, .{ .text = .{ .array_list = .{ .backing = &loads_text, .allocator = gpa, .limit = 64 } } }, .{ .font = .theme(.mono), .min_size_content = .{ .w = 60 }, .max_size_content = .width(90), .gravity_y = 0.5, .tag = "loads" });
     const entered = te.enter_pressed;
     te.deinit();
-    if (dvui.button(@src(), "Load", .{}, .{ .gravity_y = 0.5 }) or entered) loadBlocks();
+    if (ui.tool(@src(), .{ .label = "Load", .tip = "Open the file again with these blocks" }, .{ .gravity_y = 0.5 }) or entered) loadBlocks();
+}
+
+/// a menu in the toolbar, drawn as `ui.tool` draws a button
+fn toolbarMenu(src: std.builtin.SourceLocation, t: ui.Tool, opts: dvui.Options) ?dvui.Rect.Natural {
+    var mi = dvui.menuItem(src, .{ .submenu = true }, opts);
+    defer mi.deinit();
+    const inside = mi.style().strip().override(.{ .gravity_y = 0.5, .role = .none, .label = .{ .for_id = mi.data().id } });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
+        defer row.deinit();
+        dvui.icon(@src(), t.label, t.icon.?, .{}, inside);
+        if (ui.toolbarLabels()) dvui.labelNoFmt(@src(), t.label, .{}, inside.override(.{ .padding = .{ .x = 4 } }));
+    }
+    dvui.tooltip(@src(), .{ .active_rect = mi.data().borderRectScale().r }, "{s}", .{t.tip}, .{});
+    return mi.activeRect();
 }
 
 /// Loads the file again with the blocks typed, such as 0 or 18 20
@@ -297,7 +312,7 @@ fn forgetRom() void {
 }
 
 pub fn romButton() void {
-    if (dvui.button(@src(), if (rom == .none) "No ROM" else "ROM", .{}, .{ .tag = "rom" })) rom_open = true;
+    if (ui.tool(@src(), .{ .label = if (rom == .none) "No ROM" else "ROM", .tip = "The ROM" }, .{ .tag = "rom" })) rom_open = true;
 }
 
 pub fn romDialog() void {
@@ -452,6 +467,7 @@ const debug = @import("debug.zig");
 const dock = @import("dock.zig");
 const editor = @import("editor.zig");
 const help = @import("help.zig");
+const icons = @import("icons");
 const ui = @import("ui.zig");
 
 // ---------- tests, in a hidden window ----------

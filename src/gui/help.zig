@@ -82,12 +82,12 @@ pub fn apply() void {
 }
 
 pub fn themeButton() void {
-    const label = switch (theme) {
-        .auto => "Auto",
-        .light => "Light",
-        .dark => "Dark",
+    const t: ui.Tool = switch (theme) {
+        .auto => .{ .label = "Auto", .icon = icons.computer_desktop, .tip = "Theme: auto" },
+        .light => .{ .label = "Light", .icon = icons.sun, .tip = "Theme: light" },
+        .dark => .{ .label = "Dark", .icon = icons.moon, .tip = "Theme: dark" },
     };
-    if (dvui.button(@src(), label, .{}, .{ .tag = "theme" })) {
+    if (ui.tool(@src(), t, .{ .tag = "theme" })) {
         theme = switch (theme) {
             .auto => .light,
             .light => .dark,
@@ -99,4 +99,5 @@ pub fn themeButton() void {
 
 const dvui = @import("dvui");
 const dock = @import("dock.zig");
+const icons = @import("icons");
 const ui = @import("ui.zig");
