@@ -163,6 +163,7 @@ pub fn build(b: *std.Build) void {
             .imports = gui_imports,
         }) });
         test_gui_step.dependOn(&b.addRunArtifact(gui_tests).step);
+        addMacSdk(b, &.{ gui_mod, gui_tests.root_module }, target.result);
     }
 
     const serve = b.addExecutable(.{
@@ -257,5 +258,28 @@ pub fn build(b: *std.Build) void {
             .install_subdir = "",
         });
         test_step.dependOn(&install_coverage.step);
+    }
+}
+
+/// Gives the GUI and its tests, and the C libraries it links as SDL3, the macOS SDK's
+/// frameworks, libraries and headers, when built on a Mac for macOS. Zig
+/// finds the SDK itself only when the target's OS is native, which would
+/// make the GUI need the macOS it was built on, or newer.
+fn addMacSdk(b: *std.Build, roots: []const *std.Build.Module, target: std.Target) void {
+    if (target.os.tag != .macos or b.graph.host.result.os.tag != .macos) return;
+    const sdk = std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target) orelse return;
+    var seen: std.AutoHashMapUnmanaged(*std.Build.Module, void) = .empty;
+    var todo: std.ArrayList(*std.Build.Module) = .empty;
+    todo.appendSlice(b.allocator, roots) catch @panic("OOM");
+    while (todo.pop()) |m| {
+        if ((seen.getOrPut(b.allocator, m) catch @panic("OOM")).found_existing) continue;
+        m.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
+        m.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
+        m.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+        for (m.import_table.values()) |imported| todo.append(b.allocator, imported) catch @panic("OOM");
+        for (m.link_objects.items) |object| switch (object) {
+            .other_step => |c| todo.append(b.allocator, c.root_module) catch @panic("OOM"),
+            else => {},
+        };
     }
 }
