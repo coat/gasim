@@ -272,7 +272,6 @@ fn toolbar() void {
     defer bar.deinit();
     fitLabels(bar);
 
-    dvui.label(@src(), "gasim", .{}, .{ .font = .theme(.heading), .gravity_y = 0.5, .padding = .{ .x = 4, .w = 12 } });
     for (std.enums.values(View)) |v| {
         const t: Tool = if (v == .chip)
             .{ .label = "Chip", .icon = icons.cpu_chip, .tip = "The chip (q in the editor)" }

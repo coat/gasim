@@ -141,7 +141,6 @@ export const Toolbar = {
     const stopped = !state.running;
     return m('header.toolbar', { class: compact ? 'compact' : '' }, [
       m('.group.files', [
-        m('strong.brand', 'gasim'),
         m('nav.views', { role: 'tablist', 'aria-label': 'Views' }, [['/chip', 'Chip', 'cpu-chip'], ['/editor', 'Editor', 'code-bracket']].map(([route, label, icon]) => {
           const current = m.route.get() === route;
           return m(m.route.Link, {

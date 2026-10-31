@@ -178,10 +178,6 @@ code,
   visibility: hidden;
 }
 
-.brand {
-  margin-right: 0.25rem;
-}
-
 .views {
   display: flex;
   border: 1px solid var(--pico-muted-border-color);
