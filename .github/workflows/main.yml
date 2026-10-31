@@ -18,9 +18,12 @@ on:
 permissions:
   contents: read
 
-# a newer push to a pull request makes its older runs moot
+# a newer push to a pull request makes its older runs moot. Any other run
+# has a group of its own, as a group's pending run is replaced by a newer
+# one even without cancel-in-progress, which would leave a push to main
+# untested
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -48,16 +51,17 @@ jobs:
             echo "native=true web=true gui=true" | tr ' ' '\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # apart, so if it fails, the step does, and does not skip them all
-          files=$(git diff --name-only HEAD^1 HEAD)
+          # apart, so if it fails, the step does, and does not skip them all.
+          # Without renames, so a file moved out of the core names it too
+          files=$(git diff --no-renames --name-only HEAD^1 HEAD)
           native=false web=false gui=false
           while read -r file; do
             case $file in
               *.md | docs/* | LICENSE | .gitignore | .envrc) ;;
               src/cli/*) native=true ;;
-              # the GUI draws the web version's Sim
+              # Sim.zig is tested natively, built for wasm and drawn by the GUI
               src/web/*) native=true web=true gui=true ;;
-              web/* | deno.json | tools/serve/*) web=true ;;
+              web/* | deno.json | deno.lock | tools/serve/*) web=true ;;
               src/gui/*) gui=true ;;
               *) native=true web=true gui=true ;;
             esac
