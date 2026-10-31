@@ -125,7 +125,9 @@ code,
   gap: 0.375rem;
 }
 
-.toolbar .info {
+/* running and stepping at the right, the steps before them growing
+   leftward, so the buttons stay put */
+.toolbar .run {
   margin-left: auto;
 }
 
@@ -166,12 +168,12 @@ code,
 
 /* Run as wide as Pause, so running does not move the buttons after it,
    nor change whether the labels fit */
-.toolbar .run .label {
+.toolbar .run-pause .label {
   display: inline-flex;
   flex-direction: column;
 }
 
-.toolbar .run .label::after {
+.toolbar .run-pause .label::after {
   content: "Pause";
   height: 0;
   overflow: hidden;

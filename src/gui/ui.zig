@@ -53,7 +53,8 @@ pub fn start(allocator: Allocator, dirs: ?files.Dirs) Allocator.Error!void {
     view = .chip;
     running = false;
     selected = 0;
-    labels = true;
+    fit = .{};
+    labels_add = null;
     mode = .auto;
     listing_here = null;
     listing_node = null;
@@ -268,35 +269,45 @@ fn keys() void {
 }
 
 fn toolbar() void {
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .style = .window, .background = true, .padding = .all(4) });
+    fitToolbar();
+    var bar = dvui.box(@src(), .{ .dir = if (fit.rows) .vertical else .horizontal }, .{ .expand = .horizontal, .style = .window, .background = true, .padding = .all(4) });
     defer bar.deinit();
-    fitLabels(bar);
+    bar_ids[0] = bar.data().id;
 
-    for (std.enums.values(View)) |v| {
-        const t: Tool = if (v == .chip)
-            .{ .label = "Chip", .icon = icons.cpu_chip, .tip = "The chip (q in the editor)" }
-        else
-            .{ .label = "Editor", .icon = icons.code_bracket, .tip = "The colorForth editor (e)" };
-        if (tool(@src(), t, .{ .id_extra = @backingInt(v), .style = if (view == v) .highlight else .control, .tag = if (v == .chip) "view-chip" else "view-editor" })) view = v;
+    {
+        var rest = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer rest.deinit();
+        bar_ids[1] = rest.data().id;
+        for (std.enums.values(View)) |v| {
+            const t: Tool = if (v == .chip)
+                .{ .label = "Chip", .icon = icons.cpu_chip, .tip = "The chip (q in the editor)" }
+            else
+                .{ .label = "Editor", .icon = icons.code_bracket, .tip = "The colorForth editor (e)" };
+            if (tool(@src(), t, .{ .id_extra = @backingInt(v), .style = if (view == v) .highlight else .control, .tag = if (v == .chip) "view-chip" else "view-editor" })) view = v;
+        }
+        files.toolbar();
+        files.romButton();
+        if (tool(@src(), .{ .label = "Help", .icon = icons.question_mark_circle, .tip = "Keys (?)" }, .{ .tag = "help" })) help.open = true;
+        help.themeButton();
     }
-    files.toolbar();
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12 } });
+
+    // running and stepping at the right, as the web version's, the steps
+    // before them growing leftward, so the buttons stay put; centred only
+    // on one row, as a vertical box lays a child centred over the others
+    var run = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .gravity_y = if (fit.rows) 0 else 0.5, .padding = .{ .x = 12 } });
+    defer run.deinit();
+    bar_ids[2] = run.data().id;
+    dvui.label(@src(), "{d} steps", .{sim.chip.steps}, .{ .gravity_y = 0.5, .padding = .{ .x = 4, .w = 8 } });
     const stopped = !running;
     // as wide running as not, so the buttons after it stay put
     const font = dvui.themeGet().font_body;
-    const run_w = if (labels) font.textHeight() + 4 + font.textSize("Pause").w else 0;
+    const run_w = if (fit.labels) font.textHeight() + 4 + font.textSize("Pause").w else 0;
     if (tool(@src(), .{ .label = if (running) "Pause" else "Run", .icon = if (running) icons.pause else icons.play, .tip = "Run or pause (space)" }, .{ .style = .highlight, .min_size_content = .{ .w = run_w } })) toggleRun();
     if (tool(@src(), .{ .label = "Step", .icon = icons.step, .tip = "Step the next node to run (s)", .enabled = stopped }, .{})) stepNext();
     if (tool(@src(), .{ .label = "Round", .icon = icons.round, .tip = "Step each node that can run once (shift+s)", .enabled = stopped }, .{})) stepRound();
     if (tool(@src(), .{ .label = "Node", .icon = icons.step_node, .tip = "Step the selected node (n)", .enabled = stopped }, .{})) stepNode();
     if (tool(@src(), .{ .label = "Back", .icon = icons.step_back, .tip = "Go back before the last step or run (z)", .enabled = stopped and sim.historyLen() > 0 }, .{})) back();
     if (tool(@src(), .{ .label = "Reset", .icon = icons.arrow_path, .tip = "Start the chip again as it was loaded" }, .{})) reset();
-    var info = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .gravity_y = 0.5 });
-    defer info.deinit();
-    dvui.label(@src(), "{d} steps", .{sim.chip.steps}, .{ .gravity_y = 0.5, .padding = .{ .x = 4, .w = 8 } });
-    files.romButton();
-    if (tool(@src(), .{ .label = "Help", .icon = icons.question_mark_circle, .tip = "Keys (?)" }, .{ .tag = "help" })) help.open = true;
-    help.themeButton();
 }
 
 /// A toolbar button, and what it says as the pointer rests on it
@@ -308,34 +319,66 @@ pub const Tool = struct {
     enabled: bool = true,
 };
 
-/// whether the toolbar has room for its labels beside its icons
-var labels = true;
-/// how wide the toolbar was with its labels when it last had not room for
-/// them, and from the frame after, how much they add to it
-var labelled_width: f32 = 0;
-var labels_add: ?f32 = null;
+/// How the toolbar fits the window: with its labels beside its icons, or
+/// not, and on one row, or two, running and stepping on the second, as the
+/// web version's wraps
+const Fit = struct { labels: bool = true, rows: bool = false };
+var fit: Fit = .{};
+/// the toolbar, the rest of it, and running and stepping, to measure
+var bar_ids: [3]dvui.Id = undefined;
+/// how wide the toolbar's two parts were with their labels when they were
+/// last left out, and from the frame after, how much the labels add to each
+var labelled: [2]f32 = .{ 0, 0 };
+var labels_add: ?[2]f32 = null;
 
 pub fn toolbarLabels() bool {
-    return labels;
+    return fit.labels;
 }
 
-/// Leaves out the toolbar's labels once it no longer fits the window with
-/// them, as it measured last frame, and puts them back once the window has
-/// room for what it measures now and what the labels add, so a toolbar that
-/// grew and shrank again gets them back
-fn fitLabels(bar: *dvui.BoxWidget) void {
-    const needed = dvui.minSizeGet(bar.data().id) orelse return;
-    const width = dvui.windowRect().w;
-    if (labels) {
-        if (needed.w <= width) return;
-        labels = false;
-        labelled_width = needed.w;
-        labels_add = null;
+fn oneRow(parts: [2]f32) f32 {
+    return parts[0] + parts[1];
+}
+
+fn twoRows(parts: [2]f32) f32 {
+    return @max(parts[0], parts[1]);
+}
+
+/// Fits the toolbar to the window, as it measured last frame: one row with
+/// its labels where it has room, otherwise one without them, otherwise two
+/// rows, with them where they have room. Without the labels, it knows what
+/// they add from when it last had them, so one that grew and shrank again
+/// gets them back.
+fn fitToolbar() void {
+    const bar = dvui.minSizeGet(bar_ids[0]) orelse return;
+    const now: [2]f32 = .{ (dvui.minSizeGet(bar_ids[1]) orelse return).w, (dvui.minSizeGet(bar_ids[2]) orelse return).w };
+    const room = dvui.windowRect().w - (bar.w - if (fit.rows) twoRows(now) else oneRow(now));
+    var with = now;
+    var without: ?[2]f32 = null;
+    if (fit.labels) {
+        if (labels_add) |add| without = .{ now[0] - add[0], now[1] - add[1] };
     } else {
-        const add = labels_add orelse labelled_width - needed.w;
+        const add = labels_add orelse .{ labelled[0] - now[0], labelled[1] - now[1] };
         labels_add = add;
-        if (needed.w + add <= width) labels = true;
+        with = .{ now[0] + add[0], now[1] + add[1] };
+        without = now;
     }
+    const was = fit;
+    fit = if (oneRow(with) <= room)
+        .{}
+    else if (without == null)
+        // to measure it without them
+        .{ .labels = false }
+    else if (oneRow(without.?) <= room)
+        .{ .labels = false }
+    else if (twoRows(with) <= room)
+        .{ .rows = true }
+    else
+        .{ .labels = false, .rows = true };
+    if (was.labels and !fit.labels) {
+        labelled = with;
+        labels_add = null;
+    }
+    if (!std.meta.eql(was, fit)) dvui.refresh(null, @src(), null);
 }
 
 /// a toolbar button that does nothing, and looks it, unless `t.enabled`
@@ -989,16 +1032,19 @@ test "the map shows numbers when it is small" {
     try std.testing.expect(!tiles.registers());
 }
 
-test "the toolbar leaves out its labels where they do not fit" {
-    for ([_]f32{ 1800, 900, 1800 }) |w| {
+test "the toolbar leaves out its labels, then takes two rows, where it does not fit" {
+    for ([_]f32{ 1800, 900, 520, 1800 }) |w| {
         var t = try dvui.testing.init(.{ .window_size = .{ .w = w, .h = 700 } });
         defer t.deinit();
         try startWith(upcase);
         defer stop();
         try dvui.testing.settle(frame);
-        try std.testing.expectEqual(w > 900, labels);
+        try std.testing.expectEqual(Fit{ .labels = w > 900, .rows = w < 900 }, fit);
+        try saveImage(&t, try std.fmt.bufPrint(&image_name, "toolbar-{d}.png", .{w}));
     }
 }
+
+var image_name: [32]u8 = undefined;
 
 test "the toolbar's labels come back once it shrinks to fit them" {
     var t = try dvui.testing.init(.{ .window_size = .{ .w = 1800, .h = 700 } });
@@ -1008,16 +1054,15 @@ test "the toolbar's labels come back once it shrinks to fit them" {
     try dvui.testing.settle(frame);
     // as if they were left out while a long file name and its blocks took
     // the room, and it measured then how much they add
-    labels = false;
-    labelled_width = 2400;
-    labels_add = 1500;
+    fit = .{ .labels = false };
+    labels_add = .{ 1500, 0 };
     try dvui.testing.settle(frame);
-    try std.testing.expect(!labels);
+    try std.testing.expect(!fit.labels);
     // the file name and blocks gone, the toolbar is narrower, and what the
     // labels add, without them, fits
-    labels_add = 300;
+    labels_add = .{ 150, 150 };
     try dvui.testing.settle(frame);
-    try std.testing.expect(labels);
+    try std.testing.expectEqual(Fit{}, fit);
 }
 
 test "the keys step and go back" {

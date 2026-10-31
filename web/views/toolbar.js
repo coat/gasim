@@ -158,19 +158,21 @@ export const Toolbar = {
         state.file ? m('span.file', { title: state.file.name }, state.file.name) : null,
         blocksField(),
       ]),
+      m('.group.info', [
+        m('button.secondary.outline', { onclick: () => (dialogs.open = 'rom'), title: 'The ROM' }, state.rom ? 'ROM' : 'No ROM'),
+        m('button.secondary.outline', { onclick: () => (dialogs.open = 'help'), title: 'Keys (?)', 'aria-label': 'Help' }, labelled('question-mark-circle', 'Help')),
+        m(ThemeToggle),
+      ]),
+      // last, so that where the toolbar wraps, running and stepping take a
+      // line of their own
       m('.group.run', { role: 'toolbar', 'aria-label': 'Run and step' }, [
-        tool(state.running ? 'Pause' : 'Run', toggleRun, { class: state.running ? 'secondary run' : 'run', title: 'Run or pause (space)' }, state.running ? 'pause' : 'play'),
+        m('span.steps', { title: 'Steps taken by all the nodes' }, `${state.chip.steps.toLocaleString()} steps`),
+        tool(state.running ? 'Pause' : 'Run', toggleRun, { class: state.running ? 'secondary run-pause' : 'run-pause', title: 'Run or pause (space)' }, state.running ? 'pause' : 'play'),
         tool('Step', stepNext, { disabled: !stopped, class: 'secondary outline', title: 'Step the next node to run (s)' }, 'step'),
         tool('Round', stepRound, { disabled: !stopped, class: 'secondary outline', title: 'Step each node that can run once (shift+s)' }, 'round'),
         tool('Node', stepNode, { disabled: !stopped, class: 'secondary outline', title: 'Step the selected node (n)' }, 'step-node'),
         tool('Back', back, { disabled: !stopped || state.chip.history === 0, class: 'secondary outline', title: 'Go back before the last step or run (z)' }, 'step-back'),
         tool('Reset', reset, { class: 'secondary outline', title: 'Start the chip again as it was loaded' }, 'arrow-path'),
-      ]),
-      m('.group.info', [
-        m('span.steps', { title: 'Steps taken by all the nodes' }, `${state.chip.steps.toLocaleString()} steps`),
-        m('button.secondary.outline', { onclick: () => (dialogs.open = 'rom'), title: 'The ROM' }, state.rom ? 'ROM' : 'No ROM'),
-        m('button.secondary.outline', { onclick: () => (dialogs.open = 'help'), title: 'Keys (?)', 'aria-label': 'Help' }, labelled('question-mark-circle', 'Help')),
-        m(ThemeToggle),
       ]),
     ]);
   },
