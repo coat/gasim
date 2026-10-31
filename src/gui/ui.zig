@@ -53,6 +53,7 @@ pub fn start(allocator: Allocator, dirs: ?files.Dirs) Allocator.Error!void {
     view = .chip;
     running = false;
     selected = 0;
+    labels = true;
     mode = .auto;
     listing_here = null;
     listing_node = null;
@@ -282,7 +283,10 @@ fn toolbar() void {
     files.toolbar();
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12 } });
     const stopped = !running;
-    if (tool(@src(), .{ .label = if (running) "Pause" else "Run", .icon = if (running) icons.pause else icons.play, .tip = "Run or pause (space)" }, .{ .style = .highlight, .min_size_content = .{ .w = 48 } })) toggleRun();
+    // as wide running as not, so the buttons after it stay put
+    const font = dvui.themeGet().font_body;
+    const run_w = if (labels) font.textHeight() + 4 + font.textSize("Pause").w else 0;
+    if (tool(@src(), .{ .label = if (running) "Pause" else "Run", .icon = if (running) icons.pause else icons.play, .tip = "Run or pause (space)" }, .{ .style = .highlight, .min_size_content = .{ .w = run_w } })) toggleRun();
     if (tool(@src(), .{ .label = "Step", .tip = "Step the next node to run (s)", .enabled = stopped }, .{})) stepNext();
     if (tool(@src(), .{ .label = "Round", .tip = "Step each node that can run once (shift+s)", .enabled = stopped }, .{})) stepRound();
     if (tool(@src(), .{ .label = "Node", .tip = "Step the selected node (n)", .enabled = stopped }, .{})) stepNode();
@@ -305,25 +309,34 @@ pub const Tool = struct {
     enabled: bool = true,
 };
 
-/// whether the toolbar has room for its labels beside its icons, and how
-/// wide it was with them when it last had not
+/// whether the toolbar has room for its labels beside its icons
 var labels = true;
+/// how wide the toolbar was with its labels when it last had not room for
+/// them, and from the frame after, how much they add to it
 var labelled_width: f32 = 0;
+var labels_add: ?f32 = null;
 
 pub fn toolbarLabels() bool {
     return labels;
 }
 
 /// Leaves out the toolbar's labels once it no longer fits the window with
-/// them, as it measured last frame, and puts them back once the window is
-/// as wide as it measured with them
+/// them, as it measured last frame, and puts them back once the window has
+/// room for what it measures now and what the labels add, so a toolbar that
+/// grew and shrank again gets them back
 fn fitLabels(bar: *dvui.BoxWidget) void {
     const needed = dvui.minSizeGet(bar.data().id) orelse return;
     const width = dvui.windowRect().w;
-    if (labels and needed.w > width) {
+    if (labels) {
+        if (needed.w <= width) return;
         labels = false;
         labelled_width = needed.w;
-    } else if (!labels and width >= labelled_width) labels = true;
+        labels_add = null;
+    } else {
+        const add = labels_add orelse labelled_width - needed.w;
+        labels_add = add;
+        if (needed.w + add <= width) labels = true;
+    }
 }
 
 /// a toolbar button that does nothing, and looks it, unless `t.enabled`
@@ -986,6 +999,26 @@ test "the toolbar leaves out its labels where they do not fit" {
         try dvui.testing.settle(frame);
         try std.testing.expectEqual(w > 900, labels);
     }
+}
+
+test "the toolbar's labels come back once it shrinks to fit them" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1800, .h = 700 } });
+    defer t.deinit();
+    try startWith(upcase);
+    defer stop();
+    try dvui.testing.settle(frame);
+    // as if they were left out while a long file name and its blocks took
+    // the room, and it measured then how much they add
+    labels = false;
+    labelled_width = 2400;
+    labels_add = 1500;
+    try dvui.testing.settle(frame);
+    try std.testing.expect(!labels);
+    // the file name and blocks gone, the toolbar is narrower, and what the
+    // labels add, without them, fits
+    labels_add = 300;
+    try dvui.testing.settle(frame);
+    try std.testing.expect(labels);
 }
 
 test "the keys step and go back" {

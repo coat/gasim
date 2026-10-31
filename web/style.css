@@ -149,6 +149,9 @@ code,
   background-color: currentColor;
   -webkit-mask: var(--icon) center / contain no-repeat;
   mask: var(--icon) center / contain no-repeat;
+  /* where colours are forced, such as Windows' high contrast, the
+     background would be too, and leave the icon the colour behind it */
+  forced-color-adjust: none;
 }
 
 .toolbar .icon + .label {

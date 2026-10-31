@@ -234,9 +234,9 @@ pub fn toolbar() void {
 
 /// a menu in the toolbar, drawn as `ui.tool` draws a button
 fn toolbarMenu(src: std.builtin.SourceLocation, t: ui.Tool, opts: dvui.Options) ?dvui.Rect.Natural {
-    var mi = dvui.menuItem(src, .{ .submenu = true }, opts);
+    var mi = dvui.menuItem(src, .{ .submenu = true }, opts.override(.{ .label = .{ .text = t.label } }));
     defer mi.deinit();
-    const inside = mi.style().strip().override(.{ .gravity_y = 0.5, .role = .none, .label = .{ .for_id = mi.data().id } });
+    const inside = mi.style().strip().override(.{ .gravity_y = 0.5, .role = .none });
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5 });
         defer row.deinit();

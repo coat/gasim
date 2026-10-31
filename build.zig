@@ -131,15 +131,18 @@ pub fn build(b: *std.Build) void {
         test_gui_step.dependOn(&fail.step);
     } else if (b.lazyDependency("dvui", .{ .target = target, .optimize = optimize, .backend = .sdl3 })) |dvui| {
         // the toolbar's icons, the web version's SVGs as the TinyVG dvui
-        // draws, each a constant of icons.zig named in snake_case
+        // draws, each a constant of icons.zig named in snake_case. dvui's
+        // svgPathToTvgPath assumes its lazy svg2tvg is fetched, so it is
+        // asked for first, and the build configured again once it is.
         const icons = b.addWriteFiles();
         var icons_zig: []const u8 = "";
-        if (b.lazyImport(@This(), "dvui")) |dvui_build| for (gui_icons) |name| {
-            const tvg = dvui_build.svgPathToTvgPath(dvui.builder, b.path(b.fmt("web/icons/{s}.svg", .{name})));
-            _ = icons.addCopyFile(tvg, b.fmt("{s}.tvg", .{name}));
-            const constant = std.mem.replaceOwned(u8, b.allocator, name, "-", "_") catch @panic("OOM");
-            icons_zig = b.fmt("{s}pub const {s} = @embedFile(\"{s}.tvg\");\n", .{ icons_zig, constant, name });
-        };
+        if (dvui.builder.lazyDependency("svg2tvg", .{ .optimize = .ReleaseFast, .target = dvui.builder.graph.host }) != null)
+            if (b.lazyImport(@This(), "dvui")) |dvui_build| for (gui_icons) |name| {
+                const tvg = dvui_build.svgPathToTvgPath(dvui.builder, b.path(b.fmt("web/icons/{s}.svg", .{name})));
+                _ = icons.addCopyFile(tvg, b.fmt("{s}.tvg", .{name}));
+                const constant = std.mem.replaceOwned(u8, b.allocator, name, "-", "_") catch @panic("OOM");
+                icons_zig = b.fmt("{s}pub const {s} = @embedFile(\"{s}.tvg\");\n", .{ icons_zig, constant, name });
+            };
         const gui_imports: []const std.Build.Module.Import = &.{
             .{ .name = "gasim", .module = mod },
             .{ .name = "Sim", .module = b.createModule(.{

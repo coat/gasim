@@ -61,6 +61,8 @@ jobs:
               src/cli/*) native=true ;;
               # Sim.zig is tested natively, built for wasm and drawn by the GUI
               src/web/*) native=true web=true gui=true ;;
+              # the GUI draws the icons too, converted as it is built
+              web/icons/*) web=true gui=true ;;
               web/* | deno.json | deno.lock | tools/serve/*) web=true ;;
               src/gui/*) gui=true ;;
               *) native=true web=true gui=true ;;
