@@ -224,7 +224,6 @@ export const Dock = {
     const panel = panels[state.dock];
     const tab = (name) => m('button', {
       role: 'tab',
-      class: state.dock === name ? '' : 'secondary outline',
       'aria-selected': state.dock === name ? 'true' : 'false',
       onclick: () => showDock(name),
     }, panels[name].label, unseen(name));

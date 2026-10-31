@@ -125,7 +125,9 @@ code,
   gap: 0.375rem;
 }
 
-.toolbar .info {
+/* running and stepping at the right, the steps before them growing
+   leftward, so the buttons stay put */
+.toolbar .run {
   margin-left: auto;
 }
 
@@ -158,16 +160,24 @@ code,
   margin-left: 0.375rem;
 }
 
-/* where the toolbar with its labels would take two lines, only the icons,
+/* where the labels would take the toolbar another line, only the icons,
    with what they do in their titles */
-@media (max-width: 1279px) {
-  .toolbar .icon + .label {
-    display: none;
-  }
+.toolbar.compact .icon + .label {
+  display: none;
 }
 
-.brand {
-  margin-right: 0.25rem;
+/* Run as wide as Pause, so running does not move the buttons after it,
+   nor change whether the labels fit */
+.toolbar .run-pause .label {
+  display: inline-flex;
+  flex-direction: column;
+}
+
+.toolbar .run-pause .label::after {
+  content: "Pause";
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
 }
 
 .views {
@@ -227,13 +237,22 @@ code,
   margin: 0;
 }
 
+/* Pico lays a menu's summary out as a list item, its text at the top; a
+   row centred as the buttons' are, its arrow after the label */
+.examples summary {
+  display: flex;
+  align-items: center;
+}
+
 .examples ul {
   min-width: 18rem;
   max-height: 70vh;
   overflow: auto;
 }
 
-.examples li a {
+/* the name over what it does; the details and dropdown outweigh Pico's
+   details.dropdown summary + ul li a, which makes it a block */
+details.dropdown.examples li a {
   display: flex;
   flex-direction: column;
 }
@@ -288,29 +307,65 @@ dialog .actions {
   grid-area: node;
 }
 
-.gutter.rows {
+.dock-gutter {
   grid-area: gutter-rows;
   cursor: row-resize;
 }
 
-.gutter.columns {
+.node-gutter {
   grid-area: gutter-columns;
   cursor: col-resize;
 }
 
-.gutter {
+.stack-gutter {
+  display: none;
+}
+
+/* the borders to drag, and not the node's gutter for breakpoints */
+.chip-view > .gutter {
   touch-action: none;
   border-radius: 3px;
 }
 
-.gutter:hover,
-.gutter:focus-visible {
+.chip-view > .gutter:hover,
+.chip-view > .gutter:focus-visible {
   background: var(--pico-muted-border-color);
   outline: none;
 }
 
 .tabs {
   display: none;
+}
+
+/* tabs, as Pico has none: the label, underlined where it is chosen. Pico
+   sets --pico-color to a button's text, so these take --pico-contrast.
+   The tablist in the selector outweighs .panel-head button, for the dock's. */
+[role="tablist"] button[role="tab"] {
+  margin: 0;
+  padding: 0.375rem 0.75rem;
+  width: auto;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--pico-muted-color);
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+[role="tablist"] button[role="tab"]:hover {
+  color: var(--pico-contrast);
+}
+
+[role="tablist"] button[role="tab"]:focus-visible {
+  outline: 2px solid var(--pico-primary-focus);
+  outline-offset: -2px;
+}
+
+[role="tablist"] button[role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--pico-primary);
+  color: var(--pico-contrast);
 }
 
 .panel {
@@ -352,32 +407,76 @@ dialog .actions {
   padding: 0.5rem 0.75rem;
 }
 
-/* narrow screens, such as a tablet held upright: the map on top, and the
-   node or the console below it */
+/* narrow screens, such as a tablet held upright or a phone: the map on
+   top, and below a border to drag, tabs for the node or a dock's panel,
+   taking --stack-height of the view between them */
 @media (max-width: 900px) {
-  .chip-view {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto minmax(0, 1fr);
-    grid-template-areas: "map" "tabs" "panel";
-    gap: 0.5rem;
+  :root {
+    --tabs-height: 2.75rem;
   }
 
-  .gutter {
+  .chip-view {
+    grid-template-columns: minmax(0, 1fr);
+    /* the map's head, and some of the panel, where the view is short, such
+       as a phone held sideways */
+    grid-template-rows: minmax(3rem, 1fr) 0.75rem var(--tabs-height) minmax(4rem, calc(var(--stack-height) - var(--tabs-height) - 0.75rem));
+    grid-template-areas: "map" "gutter" "tabs" "panel";
+  }
+
+  .chip-view > .gutter {
     display: none;
   }
 
+  /* taller, with a grip, to find and to drag with a finger */
+  .chip-view > .stack-gutter {
+    grid-area: gutter;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: row-resize;
+  }
+
+  .stack-gutter::before {
+    content: "";
+    width: 2.5rem;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--pico-muted-border-color);
+  }
+
+  .chip-view > .stack-gutter:hover,
+  .chip-view > .stack-gutter:focus-visible {
+    background: none;
+  }
+
+  .stack-gutter:hover::before,
+  .stack-gutter:focus-visible::before {
+    background: var(--pico-primary);
+  }
+
+  /* a row of tabs, scrolling sideways where they do not fit */
   .tabs {
     grid-area: tabs;
     display: flex;
     justify-content: flex-start;
-    gap: 0.375rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+    border-bottom: 1px solid var(--pico-muted-border-color);
   }
 
   .tabs button {
-    margin: 0;
-    min-height: 2.75rem;
-    padding: 0.375rem 1rem;
-    width: auto;
+    flex: none;
+    min-height: var(--tabs-height);
+    margin-bottom: -1px;
+  }
+
+  /* the panels under the tabs, joined to them */
+  .chip-view > .node,
+  .chip-view > .dock,
+  .editor-view > .panel {
+    border-top: 0;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
   }
 
   .node,
@@ -907,11 +1006,10 @@ dialog .actions {
   position: relative;
 }
 
-.dock-tabs button {
-  margin: 0;
-  padding: 0.25rem 0.75rem;
-  font-size: 0.875rem;
-  width: auto;
+/* the tabs sit on the head's border */
+.dock-tabs {
+  align-self: stretch;
+  margin-block: -0.375rem calc(-0.375rem - 1px);
 }
 
 /* output not yet seen on the console's tab */
@@ -1533,20 +1631,13 @@ button.link:hover {
   }
 }
 
-/* narrow screens, after the rules they change: map rows tall enough to
-   tap, columns that fit a tablet held upright, and the tabs under the map
-   choosing between the dock's panels */
+/* narrow screens, after the rules they change: columns that fit a tablet
+   held upright, and the tabs under the map choosing between the dock's
+   panels */
 @media (max-width: 900px) {
   .tiles {
     grid-template-columns: repeat(var(--columns), minmax(2rem, 1fr));
-    grid-template-rows: repeat(var(--rows), 2.75rem);
     gap: 3px;
-  }
-
-  /* the map takes its tiles' height here, so tiles of registers to scroll
-     through leave the panel under it room */
-  .map.large {
-    max-height: 55dvh;
   }
 
   .dock-tabs {
@@ -1555,8 +1646,9 @@ button.link:hover {
 
   .editor-view {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: var(--tabs-height) minmax(0, 1fr);
     grid-template-areas: "tabs" "panel";
+    row-gap: 0;
   }
 
   .editor-view .tabs {

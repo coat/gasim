@@ -104,12 +104,48 @@ function blocksField() {
 
 const tool = (label, onclick, attrs = {}, icon = null) => m('button.tool', { onclick, 'aria-label': label, ...attrs }, icon ? labelled(icon, label) : label);
 
+/** whether the toolbar shows only its icons, as its labels would take another line */
+let compact = false;
+
+/**
+ * Shows the labels unless they make the toolbar taller, measuring it both
+ * ways before the browser paints.
+ */
+function fitLabels(toolbar) {
+  toolbar.classList.remove('compact');
+  const labelled = toolbar.offsetHeight;
+  toolbar.classList.add('compact');
+  compact = toolbar.offsetHeight < labelled;
+  toolbar.classList.toggle('compact', compact);
+}
+
+/**
+ * what the toolbar shows that changes its width, to measure it again when it
+ * does: the step count's length too, as it grows while running
+ */
+const contents = () => [
+  m.route.get(), state.file?.name, state.recent.length > 0, state.rom !== null, chosenTheme(), state.chip.steps.toLocaleString().length,
+].join();
+
 export const Toolbar = {
+  oncreate(vnode) {
+    vnode.state.resize = () => fitLabels(vnode.dom);
+    window.addEventListener('resize', vnode.state.resize);
+    vnode.state.contents = contents();
+    fitLabels(vnode.dom);
+  },
+  onupdate(vnode) {
+    if (contents() === vnode.state.contents) return;
+    vnode.state.contents = contents();
+    fitLabels(vnode.dom);
+  },
+  onremove(vnode) {
+    window.removeEventListener('resize', vnode.state.resize);
+  },
   view() {
     const stopped = !state.running;
-    return m('header.toolbar', [
+    return m('header.toolbar', { class: compact ? 'compact' : '' }, [
       m('.group.files', [
-        m('strong.brand', 'gasim'),
         m('nav.views', { role: 'tablist', 'aria-label': 'Views' }, [['/chip', 'Chip', 'cpu-chip'], ['/editor', 'Editor', 'code-bracket']].map(([route, label, icon]) => {
           const current = m.route.get() === route;
           return m(m.route.Link, {
@@ -127,19 +163,21 @@ export const Toolbar = {
         state.file ? m('span.file', { title: state.file.name }, state.file.name) : null,
         blocksField(),
       ]),
+      m('.group.info', [
+        m('button.secondary.outline', { onclick: () => (dialogs.open = 'rom'), title: 'The ROM' }, state.rom ? 'ROM' : 'No ROM'),
+        m('button.secondary.outline', { onclick: () => (dialogs.open = 'help'), title: 'Keys (?)', 'aria-label': 'Help' }, labelled('question-mark-circle', 'Help')),
+        m(ThemeToggle),
+      ]),
+      // last, so that where the toolbar wraps, running and stepping take a
+      // line of their own
       m('.group.run', { role: 'toolbar', 'aria-label': 'Run and step' }, [
-        tool(state.running ? 'Pause' : 'Run', toggleRun, { class: state.running ? 'secondary' : '', title: 'Run or pause (space)' }, state.running ? 'pause' : 'play'),
+        m('span.steps', { title: 'Steps taken by all the nodes' }, `${state.chip.steps.toLocaleString()} steps`),
+        tool(state.running ? 'Pause' : 'Run', toggleRun, { class: state.running ? 'secondary run-pause' : 'run-pause', title: 'Run or pause (space)' }, state.running ? 'pause' : 'play'),
         tool('Step', stepNext, { disabled: !stopped, class: 'secondary outline', title: 'Step the next node to run (s)' }, 'step'),
         tool('Round', stepRound, { disabled: !stopped, class: 'secondary outline', title: 'Step each node that can run once (shift+s)' }, 'round'),
         tool('Node', stepNode, { disabled: !stopped, class: 'secondary outline', title: 'Step the selected node (n)' }, 'step-node'),
         tool('Back', back, { disabled: !stopped || state.chip.history === 0, class: 'secondary outline', title: 'Go back before the last step or run (z)' }, 'step-back'),
         tool('Reset', reset, { class: 'secondary outline', title: 'Start the chip again as it was loaded' }, 'arrow-path'),
-      ]),
-      m('.group.info', [
-        m('span.steps', { title: 'Steps taken by all the nodes' }, `${state.chip.steps.toLocaleString()} steps`),
-        m('button.secondary.outline', { onclick: () => (dialogs.open = 'rom'), title: 'The ROM' }, state.rom ? 'ROM' : 'No ROM'),
-        m('button.secondary.outline', { onclick: () => (dialogs.open = 'help'), title: 'Keys (?)', 'aria-label': 'Help' }, labelled('question-mark-circle', 'Help')),
-        m(ThemeToggle),
       ]),
     ]);
   },
