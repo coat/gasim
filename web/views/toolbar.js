@@ -119,8 +119,13 @@ function fitLabels(toolbar) {
   toolbar.classList.toggle('compact', compact);
 }
 
-/** what the toolbar shows that changes its width, to measure it again when it does */
-const contents = () => [m.route.get(), state.file?.name, state.recent.length > 0, state.rom !== null, chosenTheme()].join();
+/**
+ * what the toolbar shows that changes its width, to measure it again when it
+ * does: the step count's length too, as it grows while running
+ */
+const contents = () => [
+  m.route.get(), state.file?.name, state.recent.length > 0, state.rom !== null, chosenTheme(), state.chip.steps.toLocaleString().length,
+].join();
 
 export const Toolbar = {
   oncreate(vnode) {

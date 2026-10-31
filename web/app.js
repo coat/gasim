@@ -38,29 +38,45 @@ function saveLayout() {
   }
 }
 
+/** where a border's drag started: the pointer, and the size then */
+let dragFrom = null;
+
 /**
  * A border to drag, setting `layout[name]` as a percentage of the chip
- * view's width or height, measured from its right or bottom edge.
+ * view's width or height, measured from its right or bottom edge. It moves
+ * as far as the pointer has from where the drag started, in the view's
+ * content box, the percentages' box, so it stays under the pointer.
  */
 function gutter(name, vertical, min, max) {
+  const at = (e) => (vertical ? e.clientX : e.clientY);
   const drag = (e) => {
-    const box = e.currentTarget.parentElement.getBoundingClientRect();
-    const percent = vertical ? ((box.right - e.clientX) / box.width) * 100 : ((box.bottom - e.clientY) / box.height) * 100;
-    layout[name] = Math.round(Math.max(min, Math.min(max, percent)));
+    const view = e.currentTarget.parentElement;
+    const style = getComputedStyle(view);
+    const size = vertical
+      ? view.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+      : view.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+    const percent = dragFrom.size + ((dragFrom.at - at(e)) / size) * 100;
+    layout[name] = Math.round(Math.max(min, Math.min(max, percent)) * 10) / 10;
   };
   return m(`.gutter.${name}-gutter`, {
     role: 'separator',
     'aria-orientation': vertical ? 'vertical' : 'horizontal',
-    'aria-valuenow': layout[name],
+    'aria-valuenow': Math.round(layout[name]),
     'aria-valuemin': min,
     'aria-valuemax': max,
     tabindex: 0,
-    onpointerdown: (e) => e.currentTarget.setPointerCapture(e.pointerId),
+    onpointerdown: (e) => {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      dragFrom = { at: at(e), size: layout[name] };
+    },
     onpointermove: (e) => {
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) drag(e);
+      if (dragFrom && e.currentTarget.hasPointerCapture(e.pointerId)) drag(e);
       else e.redraw = false;
     },
-    onpointerup: saveLayout,
+    onpointerup: () => {
+      dragFrom = null;
+      saveLayout();
+    },
     onkeydown: (e) => {
       const step = { ArrowLeft: 2, ArrowUp: 2, ArrowRight: -2, ArrowDown: -2 }[e.key];
       // Mithril prevents the default when a handler returns false, so this

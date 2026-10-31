@@ -54,6 +54,7 @@ pub fn start(allocator: Allocator, dirs: ?files.Dirs) Allocator.Error!void {
     running = false;
     selected = 0;
     fit = .{};
+    bar_ids = @splat(.zero);
     labels_add = null;
     mode = .auto;
     listing_here = null;
@@ -324,8 +325,9 @@ pub const Tool = struct {
 /// web version's wraps
 const Fit = struct { labels: bool = true, rows: bool = false };
 var fit: Fit = .{};
-/// the toolbar, the rest of it, and running and stepping, to measure
-var bar_ids: [3]dvui.Id = undefined;
+/// the toolbar, the rest of it, and running and stepping, to measure, none
+/// before the first frame
+var bar_ids: [3]dvui.Id = @splat(.zero);
 /// how wide the toolbar's two parts were with their labels when they were
 /// last left out, and from the frame after, how much the labels add to each
 var labelled: [2]f32 = .{ 0, 0 };

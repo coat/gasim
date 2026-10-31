@@ -312,13 +312,14 @@ dialog .actions {
   display: none;
 }
 
-.gutter {
+/* the borders to drag, and not the node's gutter for breakpoints */
+.chip-view > .gutter {
   touch-action: none;
   border-radius: 3px;
 }
 
-.gutter:hover,
-.gutter:focus-visible {
+.chip-view > .gutter:hover,
+.chip-view > .gutter:focus-visible {
   background: var(--pico-muted-border-color);
   outline: none;
 }
@@ -328,8 +329,9 @@ dialog .actions {
 }
 
 /* tabs, as Pico has none: the label, underlined where it is chosen. Pico
-   sets --pico-color to a button's text, so these take --pico-contrast. */
-button[role="tab"] {
+   sets --pico-color to a button's text, so these take --pico-contrast.
+   The tablist in the selector outweighs .panel-head button, for the dock's. */
+[role="tablist"] button[role="tab"] {
   margin: 0;
   padding: 0.375rem 0.75rem;
   width: auto;
@@ -343,16 +345,16 @@ button[role="tab"] {
   white-space: nowrap;
 }
 
-button[role="tab"]:hover {
+[role="tablist"] button[role="tab"]:hover {
   color: var(--pico-contrast);
 }
 
-button[role="tab"]:focus-visible {
+[role="tablist"] button[role="tab"]:focus-visible {
   outline: 2px solid var(--pico-primary-focus);
   outline-offset: -2px;
 }
 
-button[role="tab"][aria-selected="true"] {
+[role="tablist"] button[role="tab"][aria-selected="true"] {
   border-bottom-color: var(--pico-primary);
   color: var(--pico-contrast);
 }
@@ -406,16 +408,18 @@ button[role="tab"][aria-selected="true"] {
 
   .chip-view {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) 0.75rem var(--tabs-height) minmax(0, calc(var(--stack-height) - var(--tabs-height) - 0.75rem));
+    /* the map's head, and some of the panel, where the view is short, such
+       as a phone held sideways */
+    grid-template-rows: minmax(3rem, 1fr) 0.75rem var(--tabs-height) minmax(4rem, calc(var(--stack-height) - var(--tabs-height) - 0.75rem));
     grid-template-areas: "map" "gutter" "tabs" "panel";
   }
 
-  .gutter {
+  .chip-view > .gutter {
     display: none;
   }
 
   /* taller, with a grip, to find and to drag with a finger */
-  .stack-gutter {
+  .chip-view > .stack-gutter {
     grid-area: gutter;
     display: flex;
     align-items: center;
@@ -431,8 +435,8 @@ button[role="tab"][aria-selected="true"] {
     background: var(--pico-muted-border-color);
   }
 
-  .stack-gutter:hover,
-  .stack-gutter:focus-visible {
+  .chip-view > .stack-gutter:hover,
+  .chip-view > .stack-gutter:focus-visible {
     background: none;
   }
 
