@@ -158,12 +158,13 @@ const keys = {
 /** keys for any view */
 const anywhere = {
   '?': () => (dialogs.open = 'help'),
+  F1: () => (dialogs.open = 'help'),
   Escape: () => (dialogs.open = null),
 };
 
 document.addEventListener('keydown', (e) => {
   if (!state.chip || e.ctrlKey || e.metaKey || e.altKey) return;
-  if (typing(e) && e.key !== 'Escape') return;
+  if (typing(e) && e.key !== 'Escape' && e.key !== 'F1') return;
   // keys act on the chip only where nothing else takes them
   if (e.target.closest('button, a, summary, [role=separator]') && (e.key === ' ' || e.key.startsWith('Arrow'))) return;
   if (dialogs.open && e.key !== 'Escape') return;

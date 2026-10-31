@@ -2,7 +2,7 @@
 // status line along the bottom; and the dialogs they open.
 
 import {
-  state, examples, openFile, openExample, reload, hasBlocks, toggleRun, stepNext, stepRound, stepNode, back, reset,
+  state, pad, examples, openFile, openExample, reload, hasBlocks, toggleRun, stepNext, stepRound, stepNode, back, reset,
   giveRom, forgetRom, canPick, pickFile, openRecent, forgetRecent,
 } from '../state.js';
 
@@ -170,11 +170,19 @@ const ThemeToggle = {
   },
 };
 
+const statusText = {
+  running: 'running',
+  code: 'waiting for code',
+  reading: 'waiting to read',
+  writing: 'waiting to write',
+};
+
 export const StatusBar = {
   view() {
     return m('footer.status-bar', { role: 'status' }, [
       m('span.message', state.message),
       state.waitingForInput ? m('span.muted', 'The console has no input to give') : null,
+      m('span.selected', `node ${pad(state.node.number)}, ${statusText[state.node.status]}`),
     ]);
   },
 };
@@ -226,7 +234,7 @@ const keys = [
   ['esc', 'Stop typing'],
   ['tab', 'Complete a word at the prompt'],
   ['up and down', 'Lines typed before, at the prompt'],
-  ['?', 'Show these keys'],
+  ['? or F1', 'Show these keys'],
 ];
 
 const editorKeys = [

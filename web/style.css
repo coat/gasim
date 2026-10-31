@@ -225,6 +225,11 @@ code,
   min-height: 1.75rem;
 }
 
+.status-bar .selected {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 dialog .actions {
   display: flex;
   flex-wrap: wrap;
