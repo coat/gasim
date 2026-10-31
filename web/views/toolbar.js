@@ -28,6 +28,12 @@ function fileInput(accept, onfile, label, attrs = {}) {
   ]);
 }
 
+/** an icon, with its label beside it where the toolbar has room */
+const labelled = (icon, label) => [
+  m('span.icon', { style: `--icon: url(icons/${icon}.svg)` }),
+  m('span.label', label),
+];
+
 /** a menu item that closes its menu and does something */
 const item = (does, children) => m('li', m('a[href=#]', {
   onclick: (e) => {
@@ -39,7 +45,7 @@ const item = (does, children) => m('li', m('a[href=#]', {
 
 function examplesMenu() {
   return m('details.dropdown.examples', [
-    m('summary', { role: 'button', class: 'secondary outline' }, 'Examples'),
+    m('summary', { role: 'button', class: 'secondary outline', title: 'Examples to open', 'aria-label': 'Examples' }, labelled('book-open', 'Examples')),
     m('ul', examples.map((example) => item(() => openExample(example.name), [m('strong', example.name), m('small', example.about)]))),
   ]);
 }
@@ -47,7 +53,7 @@ function examplesMenu() {
 function recentMenu() {
   if (state.recent.length === 0) return null;
   return m('details.dropdown.examples', [
-    m('summary', { role: 'button', class: 'secondary outline' }, 'Recent'),
+    m('summary', { role: 'button', class: 'secondary outline', title: 'The files opened before', 'aria-label': 'Recent' }, labelled('clock', 'Recent')),
     m('ul', [
       state.recent.map((file) => item(async () => {
         await openRecent(file.name);
@@ -64,13 +70,15 @@ function recentMenu() {
 /** Open, through the browser's picker where it can save in place too */
 function openButton() {
   const accept = '.ga,.af,.blk,.cf,.txt';
-  if (!canPick) return fileInput(accept, openFile, 'Open…', { class: 'secondary' });
-  return m('button.secondary', {
+  const attrs = { class: 'secondary', title: 'Open a file', 'aria-label': 'Open…' };
+  if (!canPick) return fileInput(accept, openFile, labelled('folder-open', 'Open…'), attrs);
+  return m('button', {
+    ...attrs,
     onclick: async () => {
       await pickFile();
       m.redraw();
     },
-  }, 'Open…');
+  }, labelled('folder-open', 'Open…'));
 }
 
 function blocksField() {
@@ -90,11 +98,11 @@ function blocksField() {
   }, [
     m('label', { for: 'loads' }, 'Blocks'),
     m('input#loads[name=loads][inputmode=numeric]', { value: file.loads.join(' '), title: 'The blocks to load, as --load loads them' }),
-    m('button.secondary.outline[type=submit]', 'Load'),
+    m('button.secondary.outline[type=submit]', { title: 'Open the file again with these blocks' }, 'Load'),
   ]);
 }
 
-const tool = (label, onclick, attrs = {}) => m('button.tool', { onclick, ...attrs }, label);
+const tool = (label, onclick, attrs = {}, icon = null) => m('button.tool', { onclick, 'aria-label': label, ...attrs }, icon ? labelled(icon, label) : label);
 
 export const Toolbar = {
   view() {
@@ -102,7 +110,7 @@ export const Toolbar = {
     return m('header.toolbar', [
       m('.group.files', [
         m('strong.brand', 'gasim'),
-        m('nav.views', { role: 'tablist', 'aria-label': 'Views' }, [['/chip', 'Chip'], ['/editor', 'Editor']].map(([route, label]) => {
+        m('nav.views', { role: 'tablist', 'aria-label': 'Views' }, [['/chip', 'Chip', 'cpu-chip'], ['/editor', 'Editor', 'code-bracket']].map(([route, label, icon]) => {
           const current = m.route.get() === route;
           return m(m.route.Link, {
             href: route,
@@ -110,7 +118,8 @@ export const Toolbar = {
             class: current ? 'current' : '',
             'aria-selected': current ? 'true' : 'false',
             title: route === '/editor' ? 'The colorForth editor (e)' : 'The chip (q in the editor)',
-          }, label);
+            'aria-label': label,
+          }, labelled(icon, label));
         })),
         openButton(),
         recentMenu(),
@@ -119,17 +128,17 @@ export const Toolbar = {
         blocksField(),
       ]),
       m('.group.run', { role: 'toolbar', 'aria-label': 'Run and step' }, [
-        tool(state.running ? 'Pause' : 'Run', toggleRun, { class: state.running ? 'secondary' : '', title: 'Run or pause (space)' }),
-        tool('Step', stepNext, { disabled: !stopped, class: 'secondary outline', title: 'Step the next node to run (s)' }),
-        tool('Round', stepRound, { disabled: !stopped, class: 'secondary outline', title: 'Step each node that can run once (shift+s)' }),
-        tool('Node', stepNode, { disabled: !stopped, class: 'secondary outline', title: 'Step the selected node (n)' }),
-        tool('Back', back, { disabled: !stopped || state.chip.history === 0, class: 'secondary outline', title: 'Go back before the last step or run (z)' }),
-        tool('Reset', reset, { class: 'secondary outline', title: 'Start the chip again as it was loaded' }),
+        tool(state.running ? 'Pause' : 'Run', toggleRun, { class: state.running ? 'secondary' : '', title: 'Run or pause (space)' }, state.running ? 'pause' : 'play'),
+        tool('Step', stepNext, { disabled: !stopped, class: 'secondary outline', title: 'Step the next node to run (s)' }, 'step'),
+        tool('Round', stepRound, { disabled: !stopped, class: 'secondary outline', title: 'Step each node that can run once (shift+s)' }, 'round'),
+        tool('Node', stepNode, { disabled: !stopped, class: 'secondary outline', title: 'Step the selected node (n)' }, 'step-node'),
+        tool('Back', back, { disabled: !stopped || state.chip.history === 0, class: 'secondary outline', title: 'Go back before the last step or run (z)' }, 'step-back'),
+        tool('Reset', reset, { class: 'secondary outline', title: 'Start the chip again as it was loaded' }, 'arrow-path'),
       ]),
       m('.group.info', [
         m('span.steps', { title: 'Steps taken by all the nodes' }, `${state.chip.steps.toLocaleString()} steps`),
         m('button.secondary.outline', { onclick: () => (dialogs.open = 'rom'), title: 'The ROM' }, state.rom ? 'ROM' : 'No ROM'),
-        m('button.secondary.outline', { onclick: () => (dialogs.open = 'help'), title: 'Keys (?)', 'aria-label': 'Help' }, '?'),
+        m('button.secondary.outline', { onclick: () => (dialogs.open = 'help'), title: 'Keys (?)', 'aria-label': 'Help' }, labelled('question-mark-circle', 'Help')),
         m(ThemeToggle),
       ]),
     ]);
@@ -155,8 +164,10 @@ export function applyTheme(theme = chosenTheme()) {
 const ThemeToggle = {
   view() {
     const theme = chosenTheme();
+    const label = theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'Auto';
     return m('button.secondary.outline', {
       title: `Theme: ${theme}`,
+      'aria-label': `Theme: ${theme}`,
       onclick: () => {
         const next = themes[(themes.indexOf(theme) + 1) % themes.length];
         try {
@@ -166,7 +177,7 @@ const ThemeToggle = {
         }
         applyTheme(next);
       },
-    }, theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'Auto');
+    }, labelled({ dark: 'moon', light: 'sun' }[theme] ?? 'computer-desktop', label));
   },
 };
 

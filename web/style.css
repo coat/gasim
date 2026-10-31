@@ -140,6 +140,32 @@ code,
   width: auto;
 }
 
+/* an icon in the colour of the text around it, drawn from its SVG as a mask */
+.toolbar .icon {
+  display: inline-block;
+  width: 1.25em;
+  height: 1.25em;
+  vertical-align: -0.3em;
+  background-color: currentColor;
+  -webkit-mask: var(--icon) center / contain no-repeat;
+  mask: var(--icon) center / contain no-repeat;
+  /* where colours are forced, such as Windows' high contrast, the
+     background would be too, and leave the icon the colour behind it */
+  forced-color-adjust: none;
+}
+
+.toolbar .icon + .label {
+  margin-left: 0.375rem;
+}
+
+/* where the toolbar with its labels would take two lines, only the icons,
+   with what they do in their titles */
+@media (max-width: 1279px) {
+  .toolbar .icon + .label {
+    display: none;
+  }
+}
+
 .brand {
   margin-right: 0.25rem;
 }
