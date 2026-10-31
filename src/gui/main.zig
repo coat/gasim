@@ -48,9 +48,20 @@ fn init(win: *dvui.Window) !void {
     if (path) |p| files.open(p);
     files.restoreWorkspace();
     help.apply();
+    // dvui's SDL backend leaves files dropped on the window unhandled, so
+    // SDL hands them over as it queues them
+    _ = dvui.backend.c.SDL_AddEventWatch(dropped, null);
+}
+
+/// Takes a file dropped on the window, which SDL queues as the main thread
+/// pumps events, before the frame that opens it
+fn dropped(_: ?*anyopaque, event: [*c]dvui.backend.c.SDL_Event) callconv(.c) bool {
+    if (event.*.type == dvui.backend.c.SDL_EVENT_DROP_FILE and event.*.drop.data != null) files.drop(std.mem.span(event.*.drop.data));
+    return true;
 }
 
 fn deinit(_: *dvui.Window) void {
+    dvui.backend.c.SDL_RemoveEventWatch(dropped, null);
     ui.stop();
 }
 
