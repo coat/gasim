@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "gasim",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/cli/main.zig"),
             .target = target,
             .optimize = optimize,
             .strip = strip,
