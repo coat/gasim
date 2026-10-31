@@ -101,6 +101,7 @@ pub fn say(comptime fmt: []const u8, args: anytype) void {
 }
 
 pub fn frame() !dvui.App.Result {
+    files.openDropped();
     try dock.service();
     if (running) try runFrame();
 

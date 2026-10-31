@@ -53,6 +53,7 @@ pub fn start(allocator: Allocator, d: ?Dirs) void {
     loads_id = null;
     rom = .none;
     rom_open = false;
+    dropped = null;
 }
 
 pub fn stop() void {
@@ -90,6 +91,25 @@ pub fn open(path: []const u8) void {
         if (std.mem.eql(u8, r.path, path)) break r.loads;
     } else &[_]u32{0};
     load(.{ .path = path, .loads = loads }, bytes);
+}
+
+/// a file dropped on the window, to open in the next frame
+var dropped_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+var dropped: ?[]const u8 = null;
+
+/// Keeps a file dropped on the window to open in the next frame, the first
+/// of several dropped at once, as the web version takes
+pub fn drop(path: []const u8) void {
+    if (dropped != null or path.len > dropped_buffer.len) return;
+    @memcpy(dropped_buffer[0..path.len], path);
+    dropped = dropped_buffer[0..path.len];
+}
+
+/// Opens the file dropped since the last frame, if there is one
+pub fn openDropped() void {
+    const path = dropped orelse return;
+    dropped = null;
+    open(path);
 }
 
 pub fn openExample(e: examples.Example) void {
@@ -537,6 +557,27 @@ test "a file given wins over the last run's, and Recent keeps 8, once each" {
     for (recent.items, 0..) |r, k| for (recent.items[k + 1 ..]) |other| {
         try std.testing.expect(!std.mem.eql(u8, r.path, other.path));
     };
+}
+
+test "a file dropped on the window opens in the next frame, the first of several" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var w = try testing.init(.{ .window_size = .{ .w = 1400, .h = 900 } });
+    defer w.deinit();
+    var paths: [2][]const u8 = undefined;
+    for (&paths, [_][]const u8{ "first.ga", "second.ga" }) |*p, name| {
+        try tmp.dir.writeFile(dvui.io, .{ .sub_path = name, .data = examples.all[0].bytes });
+        // lasting past the frame, unlike the window's arena
+        p.* = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
+    }
+    defer for (paths) |p| std.testing.allocator.free(p);
+
+    try ui.start(std.testing.allocator, null);
+    defer ui.stop();
+    for (paths) |p| drop(p);
+    try testing.settle(ui.frame);
+    try std.testing.expectEqualStrings(paths[0], file.?.path);
+    try std.testing.expectEqual(null, dropped);
 }
 
 test "F1 shows the keys, and e and f go to the editor and the prompt" {

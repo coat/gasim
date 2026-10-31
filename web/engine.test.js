@@ -48,3 +48,11 @@ Deno.test('a breakpoint is set, then cleared', async () => {
   assertEquals(g.toggleBreakpoint(0, 0), false);
   assertEquals(g.chip().breakpoints.length, 0);
 });
+
+Deno.test('tiles show what each node waits on', async () => {
+  const g = await engine();
+  g.load(Kind.ga, await example('hello.ga'));
+  const tiles = g.tiles();
+  assertEquals(tiles.length, 144);
+  assertEquals(tiles[0].doing, 'run');
+});

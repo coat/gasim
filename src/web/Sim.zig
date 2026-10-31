@@ -449,7 +449,7 @@ pub fn setTracing(self: *Sim, on: bool) error{OutOfMemory}!void {
     if (on and self.trace == null) {
         const t = try self.gpa.create(Tail);
         errdefer self.gpa.destroy(t);
-        t.* = .{ .writer = .{ .vtable = &.{ .drain = Tail.drain }, .buffer = try self.gpa.alloc(u8, trace_capacity) } };
+        t.* = .init(try self.gpa.alloc(u8, trace_capacity));
         self.trace = t;
     } else if (!on) if (self.trace) |t| {
         self.gpa.free(t.writer.buffer);
@@ -469,27 +469,6 @@ pub fn takeTrace(self: *Sim) bool {
     defer t.dropped = false;
     return t.dropped;
 }
-
-/// A writer that keeps the last of what is written to it, dropping the
-/// older half of its lines whenever its buffer is full
-const Tail = struct {
-    writer: Writer,
-    dropped: bool = false,
-
-    fn drain(w: *Writer, data: []const []const u8, splat: usize) Writer.Error!usize {
-        const self: *Tail = @alignCast(@fieldParentPtr("writer", w));
-        self.dropped = true;
-        const kept = w.buffer[w.end / 2 .. w.end];
-        const lines = if (std.mem.indexOfScalar(u8, kept, '\n')) |nl| kept[nl + 1 ..] else kept[kept.len..];
-        @memmove(w.buffer[0..lines.len], lines);
-        w.end = lines.len;
-        // what cannot fit even so is dropped too
-        if (data[0].len <= w.buffer.len - w.end) return 0;
-        var len: usize = 0;
-        for (data[0 .. data.len - 1]) |d| len += d.len;
-        return len + data[data.len - 1].len * splat;
-    }
-};
 
 // ---------- views ----------
 
@@ -518,6 +497,69 @@ pub fn statuses(self: Sim, out_statuses: []u8, out_transfers: []u8) void {
         s.* = @backingInt(Status.of(n.status()));
         t.* = @as(u8, @truncate(n.transfers.written.bits.mask)) | @as(u8, @truncate(n.transfers.read.bits.mask)) << 4;
     }
+}
+
+/// A node as the map shows it with room, as the TUI's and the GUI's tiles
+/// do: what it is doing and waits on, its registers, and the ports to its
+/// neighbours east and north of it
+pub const TileView = struct {
+    /// run, code, rd or wr
+    doing: []const u8,
+    /// the ways the ports it waits on face on the map
+    ports: []const Chip.Cardinal,
+    /// what it waits on, when that is no port, such as `io`
+    waiting_on: ?[]const u8,
+    p: u10,
+    slot: u3,
+    t: u18,
+    s: u18,
+    a: u18,
+    b: u9,
+    io: u18,
+    east: ?Chip.Flow,
+    north: ?Chip.Flow,
+};
+
+/// Writes each node as the map shows it with room into `out` as JSON
+pub fn tilesView(self: *Sim) error{OutOfMemory}![]const u8 {
+    self.out.clearRetainingCapacity();
+    var tiles: [layout.count()]TileView = undefined;
+    var ports: [layout.count()][4]Chip.Cardinal = undefined;
+    for (self.chip.nodes, &tiles, &ports, 0..) |*n, *tile, *cardinals, k| {
+        const i: u16 = @intCast(k);
+        const x = i % layout.columns;
+        const y = i / layout.columns;
+        const doing: []const u8, const address: ?u9 = switch (n.status()) {
+            .running => .{ "run", null },
+            .code => |a| .{ "code", a },
+            .reading => |a| .{ "rd", a },
+            .writing => |a| .{ "wr", a },
+        };
+        var count: usize = 0;
+        var waiting_on: ?[]const u8 = null;
+        if (address) |a| if (gasim.port.select(a)) |select| {
+            var it = select.iterator();
+            while (it.next()) |direction| : (count += 1) cardinals[count] = Chip.facing(x, y, direction);
+        } else {
+            waiting_on = disassembler.ioName(a);
+        };
+        tile.* = .{
+            .doing = doing,
+            .ports = cardinals[0..count],
+            .waiting_on = waiting_on,
+            .p = @bitCast(n.p),
+            .slot = n.slot,
+            .t = @bitCast(n.data_stack.t),
+            .s = @bitCast(n.data_stack.s),
+            .a = @bitCast(n.a),
+            .b = n.b,
+            .io = @bitCast(n.io),
+            .east = self.chip.flow(i, .east),
+            .north = self.chip.flow(i, .north),
+        };
+    }
+    try self.writeJson(&tiles);
+    return self.out.written();
 }
 
 pub const Line = struct {
@@ -943,6 +985,7 @@ const disassembler = gasim.disassembler;
 const Editor = gasim.Editor;
 const ga144 = gasim.ga144;
 const rom = gasim.rom;
+const Tail = gasim.Tail;
 const Word = gasim.Word;
 const Diagnostic = arrayforth.Diagnostic;
 const Program = arrayforth.Program;
@@ -1071,6 +1114,16 @@ test "views as JSON" {
     try std.testing.expectEqualStrings("left", node_.value.object.get("waiting_on").?.string);
     try std.testing.expectEqual(128, node_.value.object.get("memory").?.array.items.len);
 
+    // node 000 waits to read left, off the chip to its west, and node 001
+    // for code
+    const tiles = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.tilesView(), .{});
+    defer tiles.deinit();
+    try std.testing.expectEqual(layout.count(), tiles.value.array.items.len);
+    const first = tiles.value.array.items[0].object;
+    try std.testing.expectEqualStrings("rd", first.get("doing").?.string);
+    try std.testing.expectEqualStrings("west", first.get("ports").?.array.items[0].string);
+    try std.testing.expectEqualStrings("code", tiles.value.array.items[1].object.get("doing").?.string);
+
     const chip = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.chipView(), .{});
     defer chip.deinit();
     try std.testing.expectEqual(18, chip.value.object.get("columns").?.integer);
@@ -1193,16 +1246,6 @@ test "tracing" {
     _ = try sim.stepNext();
     try std.testing.expect(!sim.takeTrace());
     try std.testing.expectEqualStrings("", sim.out.written());
-}
-
-test "a trace bigger than its buffer keeps whole lines" {
-    var buffer: [64]u8 = undefined;
-    var tail: Tail = .{ .writer = .{ .vtable = &.{ .drain = Tail.drain }, .buffer = &buffer } };
-    for (0..20) |k| try tail.writer.print("line {d:0>3}\n", .{k});
-    try std.testing.expect(tail.dropped);
-    const kept = tail.writer.buffered();
-    try std.testing.expectStringStartsWith(kept, "line ");
-    try std.testing.expectStringEndsWith(kept, "line 019\n");
 }
 
 test "the history, and going back to a step in it" {

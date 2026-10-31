@@ -3,6 +3,7 @@
 //! console, and arrayForth 3 typed at the chip with the words of its IDE.
 //! Panels can be hidden, zoomed to fill the screen, resized and scrolled.
 //! A screen of its own edits colorForth blocks, with vim-like keys.
+//! Help lists the keys over either screen.
 
 /// bytes of console output kept for display
 pub const console_capacity = 16 * 1024;
@@ -68,7 +69,7 @@ const node_header_rows = 14;
 /// rows of the memory listing: a heading and 64 words each for RAM and ROM
 const memory_rows = 2 * 65;
 
-const Panel = enum { map, console, forth, node };
+const Panel = enum { map, console, forth, node, debug };
 
 /// the chip's panels, or the colorForth editor
 const Screen = enum { chip, editor };
@@ -76,6 +77,40 @@ const Screen = enum { chip, editor };
 /// the border between the left panels and the node panel, or between the
 /// map and the console
 const Border = enum { columns, rows };
+
+/// what the debug panel shows: the trace, the breakpoints and watches, or
+/// the steps and runs to go back to
+const Debug = enum { trace, breakpoints, history };
+
+/// what the chip was saved before, in the history
+const Cause = enum {
+    step,
+    round,
+    node,
+    run,
+    /// a line typed into the forth panel
+    line,
+    compile,
+
+    fn text(self: Cause) []const u8 {
+        return switch (self) {
+            .step => "a step",
+            .round => "a round of steps",
+            .node => "a step of one node",
+            .run => "a run",
+            .line => "a line at the prompt",
+            .compile => "compiling a block",
+        };
+    }
+};
+
+/// which tiles the map chooses: tiles of registers where they fit, and
+/// numbers otherwise; numbers; or tiles of registers, scrolling where
+/// every node does not fit
+const MapMode = enum { auto, numbers, registers };
+
+/// bytes of the trace kept
+const trace_capacity = 256 * 1024;
 
 const colors = struct {
     const label: vaxis.Style = .{ .fg = .{ .index = 4 } };
@@ -90,6 +125,123 @@ const colors = struct {
 
 /// a key and what it does, for the status bar
 const Hint = struct { []const u8, []const u8 };
+
+/// keys listed in the help, under a heading
+const help: []const struct { []const u8, []const Hint } = &.{
+    .{ "everywhere", &.{
+        .{ "F1, ?", "show or hide this help, with ? where it is not typed" },
+        .{ "alt+1-5", "the map, console, node, forth or debug panel, showing it" },
+        .{ "ctrl+1-5", "the same, in terminals that report it" },
+        .{ "alt+6", "the colorForth editor, with a .cf file open" },
+        .{ "ctrl+c", "quit" },
+    } },
+    .{ "map and node panels", &.{
+        .{ "space", "run or pause" },
+        .{ "s", "step the next node to run, and select it" },
+        .{ "S", "step every node once" },
+        .{ "n", "step the selected node" },
+        .{ "z", "go back to before the last step or run, up to 64 times" },
+        .{ "tab, shift+tab", "the next or previous panel" },
+        .{ "1 2 3 4 5", "show or hide the map, console, node, forth and debug panels" },
+        .{ "f, esc", "fill the screen with the panel, and go back" },
+        .{ "< >", "narrow or widen the panels on the left" },
+        .{ "- +", "shorten or lengthen the map" },
+        .{ "q", "quit" },
+    } },
+    .{ "map", &.{
+        .{ "arrows, h j k l", "select a node, with north up" },
+        .{ "t", "tiles: registers if they fit, only numbers, or registers" },
+    } },
+    .{ "node", &.{
+        .{ "up down, j k", "move through memory" },
+        .{ "pgup pgdn", "page through memory" },
+        .{ "g, home", "follow the word the node is executing" },
+        .{ "b", "set or clear a breakpoint on the word under the cursor" },
+        .{ "w, then r d l u", "watch reads from a port, or stop watching them" },
+        .{ "w, then R D L U", "watch writes to a port, or stop watching them" },
+    } },
+    .{ "console", &.{
+        .{ "enter", "send the line" },
+        .{ "ctrl+d", "send what is typed without a newline, or end the input" },
+        .{ "pgup pgdn", "scroll" },
+        .{ "esc", "leave the console" },
+    } },
+    .{ "forth", &.{
+        .{ "enter", "interpret the line, with the selected node as the target" },
+        .{ "tab", "complete a word" },
+        .{ "up down", "recall lines typed" },
+        .{ "pgup pgdn", "scroll" },
+        .{ "esc", "leave the forth panel" },
+    } },
+    .{ "debug", &.{
+        .{ "h l, left right", "trace, breakpoints and watches, or history" },
+        .{ "t", "trace or stop, keeping what was traced" },
+        .{ "o", "trace only the selected node, or every node" },
+        .{ "c", "clear the trace" },
+        .{ "w", "save the trace to trace.txt" },
+        .{ "pgup pgdn", "scroll the trace" },
+        .{ "up down, j k", "choose a breakpoint, watch or step" },
+        .{ "enter", "show the breakpoint or watch, or go back to the step" },
+        .{ "x X", "remove the breakpoint or watch, or all of them" },
+    } },
+    .{ "colorForth editor", &.{
+        .{ "h l, b w", "the word before or after" },
+        .{ "j k", "the next or previous red name" },
+        .{ "0 $", "the first or last word" },
+        .{ "[ ], 256g", "the block before or after, or block 256" },
+        .{ "i a", "type a word before or after the cursor" },
+        .{ "o O", "type a new red name on a line below or above" },
+        .{ "x X", "delete the word, or the one before it" },
+        .{ "y", "copy the word" },
+        .{ "p P", "put the last deleted or copied after or before" },
+        .{ "u U", "undo, redo" },
+        .{ "R Y G W C M B", "red, yellow, green, white, cyan, magenta or blue" },
+        .{ "f", "show or hide blue words, which lay out the block" },
+        .{ "L", "compile the block and start the chip again with its code" },
+        .{ "s, ctrl+s", "save" },
+        .{ "q", "quit" },
+    } },
+    .{ "typing in the editor", &.{
+        .{ "space", "the next word" },
+        .{ "enter", "a new red name on the next line" },
+        .{ "backspace", "delete a character" },
+        .{ "ctrl+r y g w t v b", "red, yellow, green, white, cyan, magenta or blue" },
+        .{ "esc", "done" },
+    } },
+    .{ "mouse", &.{
+        .{ "click", "focus a panel, select a node, or move to a word in memory" },
+        .{ "click memory's edge", "set or clear a breakpoint" },
+        .{ "wheel", "scroll memory, the console, the forth panel or this help" },
+        .{ "drag a border", "resize panels, or tap it and then where it goes" },
+    } },
+    .{ "this help", &.{
+        .{ "up down, j k", "scroll" },
+        .{ "pgup pgdn", "page" },
+        .{ "g G, home end", "the top or bottom" },
+        .{ "esc, q, ?, F1", "close" },
+    } },
+};
+
+/// rows of the help: a heading and its keys, with a blank row between
+/// headings
+const help_rows = rows: {
+    var rows: u16 = help.len - 1;
+    for (help) |section| rows += 1 + section[1].len;
+    break :rows rows;
+};
+
+/// columns of the help taken by keys
+const help_key_width = 22;
+
+/// the row of the help a heading is on
+fn helpRow(heading: []const u8) u16 {
+    var row: u16 = 0;
+    for (help) |section| {
+        if (std.mem.eql(u8, section[0], heading)) break;
+        row += 2 + @as(u16, @intCast(section[1].len));
+    }
+    return row;
+}
 
 const Tui = struct {
     io: Io,
@@ -142,11 +294,16 @@ const Tui = struct {
     map_scroll: struct { x: u16 = 0, y: u16 = 0 } = .{},
     /// how the map was last drawn, for the mouse
     tiles: Tiles = .compact,
+    map_mode: MapMode = .auto,
     /// arrows for the directions of nodes out of the map's view
     map_more: []const u8 = "",
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
     message_buffer: [64]u8 = undefined,
+    /// the first row of the help in view, while it is shown
+    help_scroll: ?u16 = null,
+    /// rows of the help last drawn in view
+    help_page: u16 = 1,
     /// the next key chooses a port of the selected node to watch
     choosing_watch: bool = false,
     /// quitting was asked for with unsaved blocks, and asking again quits
@@ -169,6 +326,21 @@ const Tui = struct {
     /// whether the snapshot after those kept was saved before the last step
     /// or run
     pending: bool = false,
+    /// what each snapshot in `history` was saved before
+    causes: [history_capacity + 1]Cause = undefined,
+
+    debug: Debug = .trace,
+    /// the row of the breakpoints or the history chosen, and the first in
+    /// view
+    debug_cursor: usize = 0,
+    debug_first: usize = 0,
+    /// the last lines traced, kept once tracing stops, until cleared; the
+    /// chip writes to it while tracing
+    trace: ?Tail = null,
+    /// rows of the trace scrolled back from the end
+    trace_scroll: usize = 0,
+    /// show only the selected node's lines of the trace
+    trace_only_selected: bool = false,
 
     /// where panels were last drawn, for the mouse
     windows: std.EnumArray(Panel, ?vaxis.Window) = .initFill(null),
@@ -185,6 +357,8 @@ const Tui = struct {
     fn init(io: Io, gpa: Allocator, chip: *Chip, options: Options) Tui {
         var tui: Tui = .{ .io = io, .gpa = gpa, .chip = chip, .options = options, .selected = chip.layout.index(options.console_node) orelse 0 };
         if (options.forth == null) tui.shown.remove(.forth);
+        // until asked for
+        tui.shown.remove(.debug);
         // a file of colorForth was opened to edit it
         if (options.colorforth) |cf| {
             tui.screen = .editor;
@@ -196,6 +370,10 @@ const Tui = struct {
     fn deinit(self: *Tui) void {
         if (self.start) |*s| s.deinit(self.gpa);
         for (self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(self.gpa);
+        if (self.trace) |t| {
+            self.chip.trace = null;
+            self.gpa.free(t.writer.buffer);
+        }
     }
 
     /// formats text that lasts until the next frame
@@ -261,16 +439,18 @@ const Tui = struct {
                 // a key ends moving a border by tapping
                 self.dragging = null;
                 if (k.matches('c', .{ .ctrl = true })) return self.keepOnQuit();
+                if (self.help_scroll != null) return self.helpKey(k);
+                if (k.matches(vaxis.Key.f1, .{})) return self.openHelp();
                 // a digit with alt, or with ctrl where the terminal reports it,
                 // focuses a panel, even from the panels that take text
-                for ([_]Panel{ .map, .console, .node, .forth }, "1234") |panel, digit| {
+                for ([_]Panel{ .map, .console, .node, .forth, .debug }, "12345") |panel, digit| {
                     if (k.matches(digit, .{ .alt = true }) or k.matches(digit, .{ .ctrl = true })) {
                         self.screen = .chip;
                         self.focusPanel(panel);
                         return true;
                     }
                 }
-                if (k.matches('5', .{ .alt = true }) or k.matches('5', .{ .ctrl = true })) {
+                if (k.matches('6', .{ .alt = true }) or k.matches('6', .{ .ctrl = true })) {
                     if (self.options.colorforth == null) {
                         self.message = "open a .cf file to edit colorForth";
                     } else self.screen = .editor;
@@ -295,11 +475,12 @@ const Tui = struct {
             return true;
         }
         if (k.matches('q', .{})) return self.keepOnQuit();
+        if (k.matches('?', .{})) return self.openHelp();
         // matching text would take tab for shift+tab too
         if (k.codepoint == vaxis.Key.tab) self.cycleFocus(if (k.mods.shift) -1 else 1);
         if (k.matches(vaxis.Key.escape, .{})) self.zoomed = null;
         if (k.matches('f', .{})) self.zoomed = if (self.zoomed == null) self.focus else null;
-        for ([_]Panel{ .map, .console, .node, .forth }, "1234") |panel, digit| {
+        for ([_]Panel{ .map, .console, .node, .forth, .debug }, "12345") |panel, digit| {
             if (k.matches(digit, .{}) and (panel != .forth or self.options.forth != null)) self.toggle(panel);
         }
 
@@ -311,7 +492,7 @@ const Tui = struct {
 
         // running and stepping
         if (k.matches(' ', .{})) {
-            if (!self.running) self.remember();
+            if (!self.running) self.remember(.run);
             self.running = !self.running;
             // a breakpoint reached while stepping is left behind
             self.chip.hit = null;
@@ -322,23 +503,28 @@ const Tui = struct {
             if (self.running) self.message = "pause with space to go back" else self.back();
         }
         if (!self.running) {
-            if (stepping) self.remember();
+            const layout = self.chip.layout;
             if (k.matches('s', .{})) {
+                self.remember(.step);
                 // the next node to run, which the view follows
                 self.trimOutput();
                 if (try self.chip.stepNext()) |i| {
                     self.select(i);
+                    self.message = self.printLasting("stepped node {d:0>3}", .{layout.nodeNumber(i)});
                 } else self.message = "every node is waiting";
             }
             if (k.matches('S', .{})) {
-                if (!try self.advance()) self.message = "every node is waiting";
+                self.remember(.round);
+                self.message = if (try self.advance()) "stepped each node that could run" else "every node is waiting";
             }
             if (k.matches('n', .{})) {
+                self.remember(.node);
                 self.trimOutput();
                 _ = try self.chip.service();
                 self.chip.stepNode(self.selected);
                 self.memory_scroll = null;
-                if (self.chip.nodes[self.selected].suspended) self.message = "the node is waiting";
+                const waiting = self.chip.nodes[self.selected].suspended;
+                self.message = self.printLasting("node {d:0>3} {s}", .{ layout.nodeNumber(self.selected), if (waiting) "is still waiting" else "stepped" });
             }
         }
 
@@ -365,9 +551,34 @@ const Tui = struct {
                     self.message = "watch reads from r d l u, or writes to R D L U";
                 }
             },
+            .debug => self.debugKey(k),
             .console, .forth => {},
         }
         return true;
+    }
+
+    /// Shows the help, at the editor's keys in the editor
+    fn openHelp(self: *Tui) bool {
+        self.help_scroll = if (self.screen == .editor) helpRow("colorForth editor") else 0;
+        return true;
+    }
+
+    /// Handles keys while the help is shown, which scroll and close it
+    fn helpKey(self: *Tui, k: vaxis.Key) bool {
+        const page: i32 = self.help_page;
+        if (k.matchesAny(&.{ vaxis.Key.escape, vaxis.Key.f1, 'q', '?' }, .{})) self.help_scroll = null;
+        if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.scrollHelp(-1);
+        if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) self.scrollHelp(1);
+        if (k.matches(vaxis.Key.page_up, .{})) self.scrollHelp(-page);
+        if (k.matches(vaxis.Key.page_down, .{})) self.scrollHelp(page);
+        if (k.matchesAny(&.{ vaxis.Key.home, 'g' }, .{})) self.help_scroll = 0;
+        if (k.matchesAny(&.{ vaxis.Key.end, 'G' }, .{})) self.scrollHelp(help_rows);
+        return true;
+    }
+
+    fn scrollHelp(self: *Tui, rows: i32) void {
+        const first = self.help_scroll orelse return;
+        self.help_scroll = @intCast(std.math.clamp(@as(i32, first) + rows, 0, @max(help_rows - @as(i32, self.help_page), 0)));
     }
 
     fn mapKey(self: *Tui, k: vaxis.Key) void {
@@ -379,6 +590,159 @@ const Tui = struct {
         // north is up
         if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{}) and y + 1 < layout.rows) self.select(self.selected + layout.columns);
         if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{}) and y > 0) self.select(self.selected - layout.columns);
+        if (k.matches('t', .{})) {
+            self.map_mode = switch (self.map_mode) {
+                .auto => .numbers,
+                .numbers => .registers,
+                .registers => .auto,
+            };
+            self.message = switch (self.map_mode) {
+                .auto => "tiles of registers where they fit, and numbers otherwise",
+                .numbers => "numbers",
+                .registers => "tiles of registers, scrolling where they do not fit",
+            };
+        }
+    }
+
+    /// Keys for the debug panel: h and l choose what it shows, and the rest
+    /// act on that
+    fn debugKey(self: *Tui, k: vaxis.Key) void {
+        const views = std.enums.values(Debug);
+        const at: usize = @backingInt(self.debug);
+        if (k.matchesAny(&.{ vaxis.Key.left, 'h' }, .{})) self.showDebug(views[(at + views.len - 1) % views.len]);
+        if (k.matchesAny(&.{ vaxis.Key.right, 'l' }, .{})) self.showDebug(views[(at + 1) % views.len]);
+        switch (self.debug) {
+            .trace => {
+                if (k.matches('t', .{})) self.setTracing(self.chip.trace == null);
+                if (k.matches('o', .{})) self.trace_only_selected = !self.trace_only_selected;
+                if (k.matches('c', .{})) if (self.trace) |*t| {
+                    t.clear();
+                    self.trace_scroll = 0;
+                };
+                if (k.matches('w', .{})) self.saveTrace();
+                if (k.matches(vaxis.Key.page_up, .{})) self.trace_scroll += self.textPage(.debug);
+                if (k.matches(vaxis.Key.page_down, .{})) self.trace_scroll -|= self.textPage(.debug);
+            },
+            .breakpoints, .history => {
+                if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.debug_cursor -|= 1;
+                if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{}) and self.debug_cursor + 1 < self.debugRows()) self.debug_cursor += 1;
+                if (k.matches(vaxis.Key.enter, .{})) self.chooseDebug();
+                if (self.debug == .breakpoints) {
+                    if (k.matchesAny(&.{ 'x', vaxis.Key.delete }, .{})) self.removeStop();
+                    if (k.matches('X', .{})) {
+                        self.chip.breakpoints = .{};
+                        self.chip.watches = .{};
+                        self.message = "removed every breakpoint and watch";
+                    }
+                }
+            },
+        }
+    }
+
+    fn showDebug(self: *Tui, view: Debug) void {
+        self.debug = view;
+        self.debug_cursor = 0;
+        self.debug_first = 0;
+    }
+
+    /// the rows of the breakpoints and watches, or of the history: now, and
+    /// before each step or run kept, the latest first
+    fn debugRows(self: *Tui) usize {
+        self.keepPaused();
+        return switch (self.debug) {
+            .trace => 0,
+            .breakpoints => self.chip.breakpoints.len + self.chip.watches.len,
+            .history => self.history_len + 1,
+        };
+    }
+
+    /// Selects the node of the breakpoint or watch chosen, showing where the
+    /// breakpoint is, or goes back to the moment chosen
+    fn chooseDebug(self: *Tui) void {
+        const cursor = self.debug_cursor;
+        if (cursor >= self.debugRows()) return;
+        switch (self.debug) {
+            .trace => {},
+            .breakpoints => {
+                const stops = self.chip.breakpoints.items();
+                if (cursor < stops.len) {
+                    const b = stops[cursor];
+                    self.select(b.index);
+                    // one on an I/O register, as --break can set, is not in
+                    // the listing
+                    if (memoryRow(.fromWord(b.address))) |row| {
+                        self.memory_cursor = row;
+                        self.memory_scroll = row -| self.memoryPage() / 2;
+                    }
+                } else self.select(self.chip.watches.items()[cursor - stops.len].index);
+            },
+            .history => {
+                if (cursor == 0) return;
+                if (self.running) {
+                    self.message = "pause with space to go back";
+                    return;
+                }
+                self.backTo(self.history_len - cursor);
+                self.debug_cursor = 0;
+            },
+        }
+    }
+
+    /// removes the breakpoint or watch chosen
+    fn removeStop(self: *Tui) void {
+        const stops = self.chip.breakpoints.items();
+        const cursor = self.debug_cursor;
+        if (cursor < stops.len) {
+            _ = self.chip.breakpoints.toggle(stops[cursor]) catch {};
+        } else if (cursor - stops.len < self.chip.watches.len) {
+            _ = self.chip.watches.toggle(self.chip.watches.items()[cursor - stops.len]) catch {};
+        } else return;
+        self.debug_cursor = @min(self.debug_cursor, self.debugRows() -| 1);
+    }
+
+    /// Starts writing a line for each step that runs code, as `--trace`
+    /// does, or stops, keeping what was traced
+    fn setTracing(self: *Tui, on: bool) void {
+        if (on and self.trace == null) {
+            const buffer = self.gpa.alloc(u8, trace_capacity) catch {
+                self.message = "there is no memory left to trace with";
+                return;
+            };
+            self.trace = .init(buffer);
+        }
+        self.chip.trace = if (on) &self.trace.?.writer else null;
+        self.message = if (on) "tracing each step that runs code, which is slower" else "not tracing";
+    }
+
+    /// the start of the selected node's lines of the trace, if only those
+    /// show
+    fn traceOnly(self: *Tui) ?[]const u8 {
+        return if (self.trace_only_selected) self.print("{d:0>3} ", .{self.chip.layout.nodeNumber(self.selected)}) else null;
+    }
+
+    /// writes the lines of the trace shown to trace.txt
+    fn saveTrace(self: *Tui) void {
+        const t = self.trace orelse {
+            self.message = "t starts tracing";
+            return;
+        };
+        const only = self.traceOnly();
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(self.gpa);
+        var lines: usize = 0;
+        var it = std.mem.splitScalar(u8, t.writer.buffered(), '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            if (only) |prefix| if (!std.mem.startsWith(u8, line, prefix)) continue;
+            text.appendSlice(self.gpa, line) catch break;
+            text.append(self.gpa, '\n') catch break;
+            lines += 1;
+        }
+        Io.Dir.cwd().writeFile(self.io, .{ .sub_path = "trace.txt", .data = text.items }) catch |err| {
+            self.message = self.printLasting("cannot save trace.txt: {t}", .{err});
+            return;
+        };
+        self.message = self.printLasting("saved {d} lines as trace.txt", .{lines});
     }
 
     /// Whether to keep going rather than quit, which with blocks not saved
@@ -407,6 +771,7 @@ const Tui = struct {
             if (editor.mode == .insert or text.len == 1) chars = text;
         }
 
+        if (editor.mode == .normal and named == null and std.mem.eql(u8, chars, "?")) return self.openHelp();
         if (named) |one| return self.editorAction(editor, one);
         for (chars) |c| if (!self.editorAction(editor, .char(c))) return false;
         return true;
@@ -461,7 +826,7 @@ const Tui = struct {
             self.message = self.printLasting("{t} at {s} in block {d}", .{ err, forth.diagnostic.token, place.block });
             return;
         };
-        self.remember();
+        self.remember(.compile);
         self.chip.restore(&start);
         const assembled = forth.session.assembled();
         var nodes: usize = 0;
@@ -623,7 +988,7 @@ const Tui = struct {
             output.end = keep;
         }
         const layout = self.chip.layout;
-        if (!self.running) self.remember();
+        if (!self.running) self.remember(.line);
         forth.session.setTarget(layout.nodeNumber(self.selected));
         output.print("{d:0>3}> {s}\n", .{ layout.nodeNumber(self.selected), line }) catch {};
         repl.interpret(forth.session, line, forth.diagnostic, output) catch {
@@ -650,13 +1015,23 @@ const Tui = struct {
     }
 
     fn mouse(self: *Tui, m: vaxis.Mouse) void {
+        // the help takes the wheel, and nothing else
+        if (self.help_scroll != null) {
+            if (m.type != .press) return;
+            if (m.button == .wheel_up) self.scrollHelp(-3);
+            if (m.button == .wheel_down) self.scrollHelp(3);
+            return;
+        }
         if (m.type == .drag) if (self.dragging) |border| {
             self.moveBorder(border, m);
             self.dragged = true;
             return;
         };
         // a tap leaves the border to move with the next tap
-        if (m.type == .release and self.dragged) self.dragging = null;
+        if (m.type == .release and self.dragged) {
+            self.dragging = null;
+            self.message = null;
+        }
         if (m.type == .press and m.button == .left) if (self.dragging) |border| {
             if (self.onBorder(m) == null) {
                 self.moveBorder(border, m);
@@ -679,6 +1054,9 @@ const Tui = struct {
             if (self.windows.get(.forth)) |w| if (w.hasMouse(m) != null) {
                 self.forth_scroll = if (wheel < 0) self.forth_scroll + 3 else self.forth_scroll -| 3;
             };
+            if (self.windows.get(.debug)) |w| if (w.hasMouse(m) != null and self.debug == .trace) {
+                self.trace_scroll = if (wheel < 0) self.trace_scroll + 3 else self.trace_scroll -| 3;
+            };
             return;
         }
         if (m.type != .press or m.button != .left) return;
@@ -690,10 +1068,15 @@ const Tui = struct {
             return;
         }
 
-        for ([_]Panel{ .map, .console, .forth, .node }) |panel| {
+        for ([_]Panel{ .map, .console, .forth, .debug, .node }) |panel| {
             const w = self.windows.get(panel) orelse continue;
             if (w.hasMouse(m) == null) continue;
             self.focus = panel;
+            // a row of the breakpoints or the history chooses it
+            if (panel == .debug and self.debug != .trace) {
+                const row = self.debug_first + @as(usize, @intCast(m.row - w.y_off));
+                if (row < self.debugRows()) self.debug_cursor = row;
+            }
             if (panel == .node) if (self.memory_window) |listing| if (listing.hasMouse(m) != null) {
                 const row = self.memoryFirstRow() + @as(u16, @intCast(m.row - listing.y_off));
                 if (rowAddress(row) == null) return;
@@ -763,11 +1146,13 @@ const Tui = struct {
 
     /// saves the chip before the user steps or runs it, to go back to if it
     /// changes
-    fn remember(self: *Tui) void {
+    fn remember(self: *Tui, cause: Cause) void {
         // one is saved before it is kept
         if (self.history.len < 2) return;
         self.keepPending();
-        const snapshot = &self.history[self.historyIndex(self.history_len)];
+        const index = self.historyIndex(self.history_len);
+        self.causes[index] = cause;
+        const snapshot = &self.history[index];
         if (snapshot.* == null) snapshot.* = Chip.Snapshot.init(self.gpa, self.chip.layout) catch {
             self.message = "there is no memory left to go back with";
             return;
@@ -787,6 +1172,13 @@ const Tui = struct {
         } else self.history_len += 1;
     }
 
+    /// keeps the snapshot saved before the last step or run, for the
+    /// history to show, unless running: the chip may not have changed yet,
+    /// and keeping it then would drop it
+    fn keepPaused(self: *Tui) void {
+        if (!self.running) self.keepPending();
+    }
+
     /// goes back to before the last step or run
     fn back(self: *Tui) void {
         self.keepPending();
@@ -794,8 +1186,16 @@ const Tui = struct {
             self.message = "nothing to go back to";
             return;
         }
-        self.history_len -= 1;
-        self.chip.restore(&self.history[self.historyIndex(self.history_len)].?);
+        self.backTo(self.history_len - 1);
+    }
+
+    /// goes back to before the `n`th step or run kept, the oldest 0,
+    /// forgetting those after it
+    fn backTo(self: *Tui, n: usize) void {
+        self.keepPending();
+        if (n >= self.history_len) return;
+        self.history_len = n;
+        self.chip.restore(&self.history[self.historyIndex(n)].?);
         self.memory_scroll = null;
         self.message = self.printLasting("back to {d} steps", .{self.chip.steps});
     }
@@ -845,7 +1245,7 @@ const Tui = struct {
         if (self.zoomed == panel) self.zoomed = null;
         // rather than the console, where keys would be typed as input
         if (!self.shown.contains(self.focus)) {
-            for ([_]Panel{ .node, .map, .console, .forth }) |other| if (self.shown.contains(other)) {
+            for ([_]Panel{ .node, .map, .console, .forth, .debug }) |other| if (self.shown.contains(other)) {
                 self.focus = other;
                 break;
             };
@@ -854,8 +1254,8 @@ const Tui = struct {
 
     /// moves the focus to the next panel in view
     fn cycleFocus(self: *Tui, direction: i2) void {
-        const panels = [_]Panel{ .map, .console, .forth, .node };
-        var i: usize = @backingInt(self.focus);
+        const panels = [_]Panel{ .map, .console, .forth, .debug, .node };
+        var i = std.mem.indexOfScalar(Panel, &panels, self.focus).?;
         for (0..panels.len) |_| {
             i = @intCast(@mod(@as(isize, @intCast(i)) + direction, panels.len));
             if (self.visible().contains(panels[i])) break;
@@ -920,12 +1320,18 @@ const Tui = struct {
             _ = win.printSegment(.{ .text = "The terminal is too small" }, .{});
             return;
         }
+        // over either screen
+        defer if (self.help_scroll != null) self.drawHelp(win);
         if (self.screen == .editor) return self.drawEditor(win);
 
         const layout = self.chip.layout;
         const body_height = win.height - 1;
         const shown = self.visible();
-        const below_map = shown.contains(.console) or shown.contains(.forth);
+        // the panels under the map, sharing the rest of the column
+        const below = [_]Panel{ .console, .forth, .debug };
+        var below_count: u16 = 0;
+        for (below) |panel| below_count += @intFromBool(shown.contains(panel));
+        const below_map = below_count > 0;
         const left = shown.contains(.map) or below_map;
 
         // the map and console on the left, and the node on the right
@@ -946,7 +1352,12 @@ const Tui = struct {
         } else if (!shown.contains(.map)) map_height = 0;
 
         if (shown.contains(.map)) {
-            const title = self.print("1 chip {d}x{d}", .{ layout.rows, layout.columns });
+            const mode = switch (self.map_mode) {
+                .auto => "",
+                .numbers => " numbers",
+                .registers => " registers",
+            };
+            const title = self.print("1 chip {d}x{d}{s}", .{ layout.rows, layout.columns, mode });
             self.drawMap(self.drawPanel(win, .map, 0, 0, left_width, map_height, title));
             // which way the nodes out of view are, after the title
             if (self.map_more.len > 0) {
@@ -954,20 +1365,69 @@ const Tui = struct {
                 _ = heading.printSegment(.{ .text = self.map_more, .style = .{ .bold = true } }, .{ .wrap = .none });
             }
         }
-        // the console above the forth panel, sharing the rest of the column
         const rest = body_height - map_height;
-        const console_height = if (shown.contains(.console) and shown.contains(.forth)) rest / 2 else rest;
-        if (shown.contains(.console)) {
-            self.drawConsole(self.drawPanel(win, .console, 0, map_height, left_width, console_height, self.print("2 console {d:0>3}:{t}", .{ self.options.console_node, self.options.console_port })));
-        }
-        if (shown.contains(.forth)) {
-            const y = if (shown.contains(.console)) map_height + console_height else map_height;
-            self.drawForth(self.drawPanel(win, .forth, 0, y, left_width, body_height - y, "4 forth"));
-        }
+        var y = map_height;
+        var drawn: u16 = 0;
+        for (below) |panel| if (shown.contains(panel)) {
+            drawn += 1;
+            // the last takes what is left over
+            const height = if (drawn == below_count) body_height - y else rest / below_count;
+            const title = switch (panel) {
+                .console => self.print("2 console {d:0>3}:{t}", .{ self.options.console_node, self.options.console_port }),
+                .forth => "4 forth",
+                else => self.debugTitle(),
+            };
+            const inside = self.drawPanel(win, panel, 0, y, left_width, height, title);
+            switch (panel) {
+                .console => self.drawConsole(inside),
+                .forth => self.drawForth(inside),
+                else => self.drawDebug(inside),
+            }
+            y += height;
+        };
         if (shown.contains(.node)) {
             self.drawNode(self.drawPanel(win, .node, left_width, 0, win.width - left_width, body_height, self.print("3 node {d:0>3}", .{layout.nodeNumber(self.selected)})));
         }
         self.drawStatus(win.child(.{ .y_off = body_height, .height = 1 }));
+    }
+
+    /// Draws the help in a box over the screen, with arrows after its title
+    /// when there is more of it above or below
+    fn drawHelp(self: *Tui, win: vaxis.Window) void {
+        const width = @min(win.width -| 4, help_key_width + 60);
+        const height = @min(win.height -| 1, help_rows + 2);
+        const x = (win.width - width) / 2;
+        const y = (win.height - 1 -| height) / 2;
+        const box = win.child(.{ .x_off = x, .y_off = y, .width = width, .height = height });
+        box.clear();
+        // with a column of space inside the border
+        const inside = box.child(.{ .border = .{ .where = .all, .style = .{ .fg = .{ .index = 6 } } } }).child(.{ .x_off = 1 });
+        self.help_page = @max(inside.height, 1);
+        // so the last page is full, as after resizing
+        const first = @min(self.help_scroll.?, help_rows -| self.help_page);
+        self.help_scroll = first;
+        const more = self.print("{s}{s}", .{ if (first > 0) "↑" else "", if (first + self.help_page < help_rows) "↓" else "" });
+        _ = box.child(.{ .x_off = 2, .width = width -| 3, .height = 1 }).print(&.{
+            .{ .text = "help", .style = .{ .bold = true } },
+            .{ .text = " " },
+            .{ .text = more, .style = .{ .bold = true } },
+        }, .{ .wrap = .none });
+
+        var row: u16 = 0;
+        for (help) |section| {
+            if (row >= first and row - first < inside.height) {
+                _ = inside.printSegment(.{ .text = section[0], .style = colors.heading }, .{ .row_offset = row - first, .wrap = .none });
+            }
+            row += 1;
+            for (section[1]) |hint| {
+                if (row >= first and row - first < inside.height) {
+                    _ = inside.printSegment(.{ .text = hint[0], .style = colors.label }, .{ .row_offset = row - first, .wrap = .none });
+                    _ = inside.printSegment(.{ .text = hint[1] }, .{ .row_offset = row - first, .col_offset = help_key_width, .wrap = .none });
+                }
+                row += 1;
+            }
+            row += 1;
+        }
     }
 
     /// Draws a bordered panel with a title, returning the window inside it
@@ -986,7 +1446,7 @@ const Tui = struct {
     /// ports between them are doing, or with too little room as numbers
     fn drawMap(self: *Tui, win: vaxis.Window) void {
         const layout = self.chip.layout;
-        const t: Tiles = .fit(win, layout);
+        const t: Tiles = .fit(win, layout, self.map_mode);
         self.tiles = t;
         const columns, const rows = t.inView(win);
 
@@ -1120,7 +1580,7 @@ const Tui = struct {
             self.print("  {d} lines back, pgdn to return", .{self.console_scroll})
         else
             self.print("> {s}", .{self.input[0..self.input_len]});
-        self.drawText(win, .console, self.options.console.output.buffered(), &self.console_scroll, prompt);
+        self.drawText(win, .console, self.options.console.output.buffered(), &self.console_scroll, prompt, null);
     }
 
     fn drawForth(self: *Tui, win: vaxis.Window) void {
@@ -1128,13 +1588,81 @@ const Tui = struct {
             self.print("  {d} lines back, pgdn to return", .{self.forth_scroll})
         else
             self.print("{d:0>3}> {s}", .{ self.chip.layout.nodeNumber(self.selected), self.forth_input[0..self.forth_input_len] });
-        self.drawText(win, .forth, self.options.forth.?.output.buffered(), &self.forth_scroll, prompt);
+        self.drawText(win, .forth, self.options.forth.?.output.buffered(), &self.forth_scroll, prompt, null);
+    }
+
+    fn debugTitle(self: *Tui) []const u8 {
+        return switch (self.debug) {
+            .trace => if (self.chip.trace == null) "5 trace" else "5 trace, tracing",
+            .breakpoints => self.print("5 breakpoints {d}, watches {d}", .{ self.chip.breakpoints.len, self.chip.watches.len }),
+            .history => self.print("5 history {d} of {d}", .{ self.history_len, self.history.len -| 1 }),
+        };
+    }
+
+    /// Draws the trace, or the breakpoints and watches, or the moments to go
+    /// back to
+    fn drawDebug(self: *Tui, win: vaxis.Window) void {
+        const layout = self.chip.layout;
+        switch (self.debug) {
+            .trace => {
+                const text = if (self.trace) |t| t.writer.buffered() else "";
+                const only = self.traceOnly();
+                const footer = if (self.trace_scroll > 0)
+                    self.print("  {d} lines back, pgdn to return", .{self.trace_scroll})
+                else if (self.chip.trace == null)
+                    "t traces each step that runs code, as --trace does"
+                else if (self.trace.?.dropped)
+                    "tracing, keeping the last lines"
+                else
+                    "tracing";
+                const shown = if (only) |prefix| self.print("{s}, only node {s}", .{ footer, prefix[0..3] }) else footer;
+                self.drawText(win, .debug, text, &self.trace_scroll, shown, only);
+            },
+            .breakpoints => {
+                const stops = self.chip.breakpoints.items();
+                const watched = self.chip.watches.items();
+                const rows = self.frame.allocator().alloc([]const u8, stops.len + watched.len) catch return;
+                for (stops, rows[0..stops.len]) |b, *row| row.* = self.print("{d:0>3} stops at {x:0>3}", .{ layout.nodeNumber(b.index), b.address });
+                for (watched, rows[stops.len..]) |w, *row| row.* = self.print("{d:0>3} stops {s} {t}", .{ layout.nodeNumber(w.index), if (w.write) "writing" else "reading", w.direction });
+                self.drawList(win, rows, "none: b sets a breakpoint in the node panel, and w watches a port");
+            },
+            .history => {
+                self.keepPaused();
+                const rows = self.frame.allocator().alloc([]const u8, self.history_len + 1) catch return;
+                rows[0] = self.print("{s:<27}  {d} steps", .{ "now", self.chip.steps });
+                for (rows[1..], 1..) |*row, k| {
+                    const index = self.historyIndex(self.history_len - k);
+                    row.* = self.print("before {s:<20}  {d} steps", .{ self.causes[index].text(), self.history[index].?.steps });
+                }
+                self.drawList(win, rows, "");
+            },
+        }
+    }
+
+    /// Draws rows to choose from, keeping the one chosen in view, or a note
+    /// when there are none
+    fn drawList(self: *Tui, win: vaxis.Window, rows: []const []const u8, empty: []const u8) void {
+        if (win.height == 0) return;
+        if (rows.len == 0) {
+            _ = win.printSegment(.{ .text = empty, .style = colors.dim }, .{ .wrap = .word });
+            return;
+        }
+        self.debug_cursor = @min(self.debug_cursor, rows.len - 1);
+        // with rows removed, no room left after the last
+        self.debug_first = @min(self.debug_first, rows.len -| win.height);
+        if (self.debug_cursor < self.debug_first) self.debug_first = self.debug_cursor;
+        if (self.debug_cursor >= self.debug_first + win.height) self.debug_first = self.debug_cursor + 1 - win.height;
+        for (rows[self.debug_first..@min(rows.len, self.debug_first + win.height)], self.debug_first..) |row, k| {
+            const chosen = k == self.debug_cursor and self.focus == .debug;
+            _ = win.printSegment(.{ .text = row, .style = .{ .reverse = chosen } }, .{ .row_offset = @intCast(k - self.debug_first), .wrap = .none });
+        }
     }
 
     /// Draws the end of some output, `scroll` rows back from it, above a
-    /// prompt with the cursor at its end when the panel has the focus and
-    /// is not scrolled back
-    fn drawText(self: *Tui, win: vaxis.Window, panel: Panel, output: []const u8, scroll: *usize, prompt: []const u8) void {
+    /// prompt with the cursor at its end when the panel takes text, has the
+    /// focus and is not scrolled back. With `only`, just the lines starting
+    /// with it.
+    fn drawText(self: *Tui, win: vaxis.Window, panel: Panel, output: []const u8, scroll: *usize, prompt: []const u8, only: ?[]const u8) void {
         // too short for even the prompt
         if (win.height == 0) return;
         const rows = win.height - 1;
@@ -1150,7 +1678,8 @@ const Tui = struct {
         if (output.len > 0) lines: while (true) {
             const start = if (std.mem.lastIndexOfScalar(u8, output[0..end], '\n')) |newline| newline + 1 else 0;
             const line = std.mem.trimEnd(u8, output[start..end], "\r");
-            var line_rows = @max(std.math.divCeil(usize, line.len, width) catch unreachable, 1);
+            const shown = if (only) |prefix| std.mem.startsWith(u8, line, prefix) else true;
+            var line_rows = if (shown) @max(std.math.divCeil(usize, line.len, width) catch unreachable, 1) else 0;
             while (line_rows > 0) : (line_rows -= 1) {
                 if (skipped < scroll.*) {
                     skipped += 1;
@@ -1166,7 +1695,7 @@ const Tui = struct {
         // scrolled back past the start, so show the first page instead
         if (count < rows and skipped > 0) {
             scroll.* = skipped -| (rows - count);
-            return self.drawText(win, panel, output, scroll, prompt);
+            return self.drawText(win, panel, output, scroll, prompt, only);
         }
         scroll.* = skipped;
 
@@ -1183,7 +1712,7 @@ const Tui = struct {
 
         const style: vaxis.Style = if (self.focus == panel) .{} else colors.dim;
         _ = win.printSegment(.{ .text = prompt, .style = style }, .{ .row_offset = win.height - 1, .wrap = .none });
-        if (self.focus == panel and scroll.* == 0) win.showCursor(@intCast(@min(prompt.len, win.width - 1)), win.height - 1);
+        if (self.focus == panel and panel != .debug and scroll.* == 0) win.showCursor(@intCast(@min(prompt.len, win.width - 1)), win.height - 1);
     }
 
     /// prints labelled values on a row, with the labels in their own color
@@ -1290,7 +1819,7 @@ const Tui = struct {
         const editor = cf.editor;
         const body_height = win.height - 1;
         const inside = win.child(.{ .height = body_height, .border = .{ .where = .all, .style = colors.focused } });
-        const title = self.print("5 colorforth  block {d}{s}  {s}", .{ editor.block, if (editor.unsaved()) " +" else "", std.fs.path.basename(cf.path) });
+        const title = self.print("6 colorforth  block {d}{s}  {s}", .{ editor.block, if (editor.unsaved()) " +" else "", std.fs.path.basename(cf.path) });
         _ = win.child(.{ .x_off = 2, .width = win.width -| 3, .height = 1 }).printSegment(.{ .text = title, .style = .{ .bold = true } }, .{ .wrap = .none });
 
         if (editor.read_only) {
@@ -1360,8 +1889,8 @@ const Tui = struct {
         const hints: []const Hint = if (editor.mode == .insert)
             &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "ctrl+r y g w t v b", "color" }, .{ "esc", "done" } }
         else
-            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
-        var segments: [4 + 2 * 11]vaxis.Segment = undefined;
+            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "?", "help" }, .{ "q", "quit" } };
+        var segments: [4 + 2 * 12]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = if (editor.mode == .insert)
             .{ .text = " insert ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } }
@@ -1395,12 +1924,17 @@ const Tui = struct {
         else
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
         const hints: []const Hint = switch (self.focus) {
-            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ if (self.options.forth == null) "1-3" else "1-4", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "q", "quit" } },
-            .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-4", "panels" }, .{ "esc", "map" } },
-            .forth => &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-4", "panels" }, .{ "esc", "map" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" } },
+            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "t", "tiles" }, .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" }, .{ "q", "quit" } },
+            .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" }, .{ "esc", "map" } },
+            .forth => &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" }, .{ "esc", "map" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" } },
+            .debug => switch (self.debug) {
+                .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "c", "clear" }, .{ "w", "save trace.txt" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
+                .breakpoints => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "x", "remove" }, .{ "X", "remove all" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
+                .history => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "go back" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
+            },
         };
-        var segments: [4 + 2 * 11]vaxis.Segment = undefined;
+        var segments: [3 + 2 * 13]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = state;
         len += 1;
@@ -1416,7 +1950,7 @@ const Tui = struct {
             len += 2;
         }
         if (self.options.colorforth != null and self.focus == .map) {
-            segments[len] = .{ .text = " alt+5", .style = colors.label };
+            segments[len] = .{ .text = " alt+6", .style = colors.label };
             segments[len + 1] = .{ .text = " colorforth " };
             len += 2;
         }
@@ -1573,15 +2107,17 @@ const Tiles = struct {
     /// comfortable, and as large as fit up to the largest. Otherwise
     /// comfortable tiles to scroll through, if at least two by two fit, or
     /// every node in the smallest tiles or larger, and with too little room
-    /// for those, compact ones.
-    fn fit(win: vaxis.Window, layout: Chip.Layout) Tiles {
+    /// for those, compact ones. For `numbers`, compact ones, and for
+    /// `registers`, comfortable ones to scroll through however little room.
+    fn fit(win: vaxis.Window, layout: Chip.Layout, mode: MapMode) Tiles {
+        if (mode == .numbers) return compact;
         const width = win.width / layout.columns;
         const height = win.height / layout.rows;
         const c = comfortable;
         if (width >= c.width + c.gap_x and height >= c.height + c.gap_y) {
             return .{ .width = @min(width - c.gap_x, largest.width), .height = @min(height - c.gap_y, largest.height), .gap_x = c.gap_x, .gap_y = c.gap_y };
         }
-        if (win.width >= 2 * c.width + c.gap_x and win.height >= 2 * c.height + c.gap_y) return c;
+        if (mode == .registers or (win.width >= 2 * c.width + c.gap_x and win.height >= 2 * c.height + c.gap_y)) return c;
         const s = smallest;
         if (width >= s.width + s.gap_x and height >= s.height + s.gap_y) {
             return .{ .width = @min(width - s.gap_x, largest.width), .height = @min(height - s.gap_y, largest.height), .gap_x = s.gap_x, .gap_y = s.gap_y };
@@ -1600,10 +2136,10 @@ const Tiles = struct {
 
 fn arrow(cardinal: Chip.Cardinal) []const u8 {
     return switch (cardinal) {
-        .north => "↑",
-        .east => "→",
-        .south => "↓",
-        .west => "←",
+        .north => "▴",
+        .east => "▸",
+        .south => "▾",
+        .west => "◂",
     };
 }
 
@@ -1735,6 +2271,7 @@ test "draws the chip, console and selected node" {
     try t.click(border - 10, 5, .drag);
     try t.click(border - 10, 5, .release);
     try std.testing.expectEqual(border - 10, t.tui.column_border.?);
+    try std.testing.expectEqual(null, t.tui.message);
     try t.click(border - 10, 5, .press);
     try t.click(border - 10, 5, .release);
     try t.click(border - 4, 5, .press);
@@ -1755,6 +2292,46 @@ test "draws the chip, console and selected node" {
     var sent: [3]u8 = undefined;
     try std.testing.expectEqual(3, try t.input.get(std.testing.io, &sent, 0));
     try std.testing.expectEqualStrings("hi\n", &sent);
+}
+
+test "help lists the keys, and scrolls" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+
+    try t.press('?');
+    // more below, after the title in the middle of the screen
+    const more = (120 - (help_key_width + 60)) / 2 + 2 + "help ".len;
+    try std.testing.expect(try t.shows(0, "help #"));
+    try std.testing.expectEqualStrings("↓", t.screen.readCell(more, 0).?.char.grapheme);
+    try std.testing.expect(try t.shows(1, "everywhere"));
+    try std.testing.expect(try t.shows(2, "F1, ?"));
+    // keys scroll it rather than reaching the chip
+    try t.press('s');
+    try std.testing.expectEqual(0, t.tui.chip.steps);
+    try t.press('j');
+    try std.testing.expect(try t.shows(1, "F1, ?"));
+    try t.press('G');
+    try std.testing.expect(try t.shows(27, "esc, q, ?, F1"));
+    try std.testing.expectEqualStrings("↑", t.screen.readCell(more, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", t.screen.readCell(more + 1, 0).?.char.grapheme);
+    try std.testing.expect(try t.tui.handle(.{ .mouse = .{ .col = 50, .row = 10, .button = .wheel_up, .mods = .{}, .type = .press } }));
+    try std.testing.expectEqual(help_rows - t.tui.help_page - 3, t.tui.help_scroll.?);
+    try t.press('g');
+    try std.testing.expectEqual(0, t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+    try std.testing.expectEqual(null, t.tui.help_scroll);
+    try std.testing.expect(try t.shows(0, "1 chip"));
+
+    // ? is typed into the console, and F1 shows the help from it
+    try t.pressWith('2', .{ .alt = true });
+    try t.press('?');
+    try std.testing.expectEqualStrings("?", t.tui.input[0..t.tui.input_len]);
+    try t.press(vaxis.Key.f1);
+    try std.testing.expect(try t.shows(1, "everywhere"));
+    try t.press(vaxis.Key.f1);
+    try std.testing.expectEqual(null, t.tui.help_scroll);
 }
 
 test "escapes from the console, and ends moving a border with a key" {
@@ -1979,6 +2556,7 @@ const Color = gasim.colorforth.Color;
 const Diagnostic = gasim.assembler.Diagnostic;
 const Direction = gasim.Direction;
 const Editor = gasim.Editor;
+const Tail = gasim.Tail;
 const Instruction = gasim.Instruction;
 const Word = gasim.Word;
 const disassembler = gasim.disassembler;
@@ -2092,7 +2670,7 @@ test "tiles are no larger than the largest" {
     const layout: Chip.Layout = .{ .rows = 2, .columns = 3 };
     // too short for comfortable tiles, but wide
     const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 300, .height = 8, .screen = undefined };
-    const tiles: Tiles = .fit(win, layout);
+    const tiles: Tiles = .fit(win, layout, .auto);
     try std.testing.expectEqual(Tiles.largest.width, tiles.width);
     try std.testing.expectEqual(3, tiles.height);
 }
@@ -2132,8 +2710,8 @@ test "the map shows nodes as tiles when it has room" {
     const up = chip.nodes[0].ports[@backingInt(Chip.portToward(0, 0, .north))];
     up.port.?.state = .{ .reading = up.side.other() };
     t.draw();
-    try std.testing.expectEqualStrings("→", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
-    try std.testing.expectEqualStrings("↑", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("▸", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("▴", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
 
     // and clicking a tile selects its node
     try t.click(1 + tiles.width + tiles.gap_x + 2, 2, .press);
@@ -2178,6 +2756,126 @@ test "the map scrolls through tiles too large to show every node" {
     try std.testing.expectEqualStrings("←", t.screen.readCell(after_title + 1, 0).?.char.grapheme);
 }
 
+test "t chooses the map's tiles" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+    // too little room for tiles of registers
+    try std.testing.expectEqual(1, t.tui.tiles.height);
+    try t.press('t');
+    try std.testing.expect(try t.shows(0, "1 chip 8x18 numbers"));
+    try std.testing.expectEqual(Tiles.compact, t.tui.tiles);
+    // tiles of registers anyway, to scroll through
+    try t.press('t');
+    try std.testing.expect(try t.shows(0, "1 chip 8x18 registers"));
+    try std.testing.expectEqual(Tiles.comfortable, t.tui.tiles);
+    try t.press('t');
+    try std.testing.expectEqual(1, t.tui.tiles.height);
+}
+
+/// whether a panel shows `text` on one of its rows, or in its title
+fn panelShows(t: *TestTui, panel: Panel, text: []const u8) !bool {
+    const w = t.tui.windows.get(panel).?;
+    const top: usize = @intCast(w.y_off - 1);
+    for (top..top + 1 + w.height) |row| if (try t.shows(@intCast(row), text)) return true;
+    return false;
+}
+
+test "the debug panel traces, lists breakpoints and watches, and goes back" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("begin 1 + again");
+    defer t.deinit();
+    t.draw();
+    // hidden until asked for
+    try std.testing.expectEqual(null, t.tui.windows.get(.debug));
+    try t.pressWith('5', .{ .alt = true });
+    try std.testing.expectEqual(.debug, t.tui.focus);
+    try std.testing.expect(try panelShows(&t, .debug, "5 trace"));
+
+    // tracing the steps that run code, of every node or the selected one's
+    try t.press('t');
+    try std.testing.expect(t.chip.trace != null);
+    for (0..3) |_| try t.press('n');
+    try std.testing.expect(try panelShows(&t, .debug, "5 trace, tracing"));
+    try std.testing.expect(try panelShows(&t, .debug, "000 000 "));
+    t.tui.select(1);
+    try t.press('o');
+    try std.testing.expect(!try panelShows(&t, .debug, "000 000 "));
+    try std.testing.expect(try panelShows(&t, .debug, "only node 001"));
+    // stopping keeps what was traced, until cleared
+    try t.press('t');
+    try std.testing.expectEqual(null, t.chip.trace);
+    try std.testing.expect(t.tui.trace.?.writer.end > 0);
+    try t.press('c');
+    try std.testing.expectEqual(0, t.tui.trace.?.writer.end);
+
+    // the breakpoints and watches, to show or remove
+    try t.press('l');
+    try std.testing.expect(try panelShows(&t, .debug, "none: b sets a breakpoint"));
+    _ = try t.chip.breakpoints.toggle(.init(0, 1));
+    _ = try t.chip.watches.toggle(.{ .index = 0, .direction = .right, .write = false });
+    t.draw();
+    try std.testing.expect(try panelShows(&t, .debug, "5 breakpoints 1, watches 1"));
+    try std.testing.expect(try panelShows(&t, .debug, "000 stops at 001"));
+    try std.testing.expect(try panelShows(&t, .debug, "000 stops reading right"));
+    try t.press(vaxis.Key.enter);
+    try std.testing.expectEqual(0, t.tui.selected);
+    try std.testing.expectEqual(memoryRow(.fromWord(1)), t.tui.memory_cursor);
+    try t.press('j');
+    try t.press('x');
+    try std.testing.expectEqual(0, t.chip.watches.len);
+    // one on an I/O register, as --break can set, shows only its node
+    _ = try t.chip.breakpoints.toggle(.init(1, 0x15d));
+    t.tui.select(5);
+    try t.press('j');
+    try t.press(vaxis.Key.enter);
+    try std.testing.expectEqual(1, t.tui.selected);
+    try t.press('X');
+    try std.testing.expectEqual(0, t.chip.breakpoints.len);
+
+    // the steps kept, the latest first, to go back to; the test keeps two
+    try t.press('l');
+    try std.testing.expect(try panelShows(&t, .debug, "5 history 2 of 2"));
+    try std.testing.expect(try panelShows(&t, .debug, "before a step of one node"));
+    try t.press('j');
+    try t.press('j');
+    try t.press(vaxis.Key.enter);
+    try std.testing.expectEqual(1, t.chip.steps);
+    try std.testing.expectEqual(0, t.tui.history_len);
+}
+
+test "the history shown while running keeps the run to go back before" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("begin 1 + again");
+    defer t.deinit();
+    try t.press('n');
+    try t.pressWith('5', .{ .alt = true });
+    try t.press('l');
+    try t.press('l');
+    try std.testing.expectEqual(.history, t.tui.debug);
+    // drawn as the run starts, before the chip has changed
+    try t.press(' ');
+    try t.press('j');
+    try t.tui.run();
+    try t.press(' ');
+    try t.press('z');
+    try std.testing.expectEqual(1, t.chip.steps);
+}
+
+test "steps say what they stepped" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("begin 1 + again");
+    defer t.deinit();
+    try t.press('s');
+    try std.testing.expectEqualStrings("stepped node 000", t.tui.message.?);
+    try t.press('S');
+    try std.testing.expectEqualStrings("stepped each node that could run", t.tui.message.?);
+    t.tui.select(1);
+    try t.press('n');
+    try std.testing.expectEqualStrings("node 001 is still waiting", t.tui.message.?);
+}
+
 test "the colorForth editor, on a screen of its own" {
     var t: TestTui = .{ .chip = undefined };
     try t.init("");
@@ -2190,9 +2888,14 @@ test "the colorForth editor, on a screen of its own" {
     t.draw();
 
     try std.testing.expect(try t.shows(0, "1 chip"));
-    try t.pressWith('5', .{ .alt = true });
-    try std.testing.expect(try t.shows(0, "5 colorforth  block 0  test.cf"));
+    try t.pressWith('6', .{ .alt = true });
+    try std.testing.expect(try t.shows(0, "6 colorforth  block 0  test.cf"));
     try std.testing.expect(try t.shows(1, "An empty block"));
+    // the help opens at the editor's keys
+    try t.press('?');
+    try std.testing.expect(try t.shows(1, "colorForth editor"));
+    try t.press('q');
+    try std.testing.expect(try t.shows(0, "6 colorforth"));
     // typing a definition, and making its last word yellow
     for ("iinc 1 + ;") |c| try t.press(c);
     try std.testing.expect(try t.shows(29, "insert"));
@@ -2224,10 +2927,10 @@ test "the colorForth editor, on a screen of its own" {
     try std.testing.expect(!t.tui.show_format);
     try t.press('f');
 
-    // and back to the chip, until alt+5 again
+    // and back to the chip, until alt+6 again
     try t.pressWith('1', .{ .alt = true });
     try std.testing.expect(try t.shows(0, "1 chip"));
-    try t.pressWith('5', .{ .alt = true });
+    try t.pressWith('6', .{ .alt = true });
 
     // quitting with blocks not saved takes asking twice
     try t.press('q');
@@ -2255,7 +2958,7 @@ test "compiling colorForth in the editor starts the chip again with its code" {
     var blocks: [gasim.colorforth.block_size]u8 = @splat(0);
     editor.open(&blocks, 1);
     t.tui.options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
-    try t.pressWith('5', .{ .alt = true });
+    try t.pressWith('6', .{ .alt = true });
 
     // echo, typed in yellow, red and green
     try t.press('i');

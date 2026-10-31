@@ -56,7 +56,7 @@ pub fn dialog() void {
         dvui.labelNoFmt(@src(), r[0], .{}, .{ .font = .theme(.mono), .min_size_content = .{ .w = 190 } });
         dvui.labelNoFmt(@src(), r[1], .{}, .{});
     }
-    if (!editing) dvui.labelNoFmt(@src(), "Open… takes a .txt file, or pFDISK.blk, as the ROM.", .{}, .{ .color_text = .{ .color = dock.muted() }, .padding = .{ .y = 8 } });
+    if (!editing) dvui.labelNoFmt(@src(), "Drop a file on the window to open it. Open… and dropping take a .txt file, or pFDISK.blk, as the ROM.", .{}, .{ .color_text = .{ .color = dock.muted() }, .padding = .{ .y = 8 } });
     for (dvui.events()) |*e| switch (e.evt) {
         .key => |k| if (!e.handled and k.action == .down and k.code == .escape) {
             e.handle(@src(), win.data());

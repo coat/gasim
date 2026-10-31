@@ -59,6 +59,8 @@ export const state = {
   /** each node's Status name, and the ports it moved words through */
   statuses: [],
   transfers: new Uint8Array(0),
+  /** each node's registers and ports, while the map shows them, or null */
+  tiles: null,
   /** the dock's tab: 'forth', 'console', 'trace', 'breakpoints' or 'history' */
   dock: 'forth',
   /**
@@ -114,6 +116,7 @@ export function refresh() {
   const { status, transfers } = g.statuses();
   state.statuses = Array.from(status, (s) => Status[s]);
   state.transfers = transfers.slice();
+  if (state.tiles) state.tiles = g.tiles();
   state.moments = g.history();
   if (state.trace.on) takeTrace();
   givePending();
@@ -133,6 +136,9 @@ export function nodeNumber(i) {
   return Math.floor(i / columns) * 100 + (i % columns);
 }
 
+/** a node's number as three digits, such as 007 */
+export const pad = (number) => String(number).padStart(3, '0');
+
 /** a node's index from its number, or null if it is not on the chip */
 export function nodeIndex(number) {
   const { rows, columns } = state.chip;
@@ -145,6 +151,12 @@ export function select(i) {
   state.selected = i;
   state.node = state.gasim.node(i);
   keepWorkspace();
+}
+
+/** Reads each node's registers as the chip changes, for the map, or stops. */
+export function showRegisters(on) {
+  if (on === (state.tiles !== null)) return;
+  state.tiles = on ? state.gasim.tiles() : null;
 }
 
 /** Moves the selection a node east, west, north or south, if there is one. */
@@ -180,7 +192,7 @@ export async function openFile(file, handle = null) {
     return;
   }
   const loads = state.recent.find((r) => r.name === file.name)?.loads ?? [0];
-  load({ name: file.name, kind, bytes, loads, handle });
+  opened({ name: file.name, kind, bytes, loads, handle });
 }
 
 /** whether the browser can open and save files in place */
@@ -203,7 +215,7 @@ export async function pickFile() {
 /** Opens a file opened before, read again where it can be. */
 export async function openRecent(name) {
   const file = state.recent.find((r) => r.name === name);
-  if (file) load(await readAgain(file));
+  if (file) opened(await readAgain(file));
 }
 
 /** The file as it is now, if its handle can read it, or as it was kept. */
@@ -235,8 +247,17 @@ export async function openExample(name) {
     state.message = `Cannot fetch ${name}`;
     return m.redraw();
   }
-  load({ name, kind: kindOf(name), bytes: new Uint8Array(await response.arrayBuffer()), loads: [0], example: true });
+  opened({ name, kind: kindOf(name), bytes: new Uint8Array(await response.arrayBuffer()), loads: [0], example: true });
   m.redraw();
+}
+
+/**
+ * Loads a file the user opened, showing colorForth in the editor, as the
+ * TUI and the GUI do, even when it does not compile, to put right
+ */
+function opened(file) {
+  load(file);
+  if (file.kind === 'cf') m.route.set('/editor');
 }
 
 /** Assembles a file onto a new chip, keeping it to load again. */
@@ -355,22 +376,27 @@ const sentence = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 export function stepNext() {
   if (state.running) return;
   const i = state.gasim.stepNext();
-  if (i === null) state.message = 'Every node is waiting';
-  else select(i);
+  if (i === null) {
+    state.message = 'Every node is waiting';
+  } else {
+    select(i);
+    state.message = `Stepped node ${pad(nodeNumber(i))}`;
+  }
   refresh();
 }
 
 /** Steps each runnable node once. */
 export function stepRound() {
   if (state.running) return;
-  if (!state.gasim.stepRound()) state.message = 'Every node is waiting';
+  state.message = state.gasim.stepRound() ? 'Stepped each node that could run' : 'Every node is waiting';
   refresh();
 }
 
 /** Steps the selected node, even if it is waiting. */
 export function stepNode() {
   if (state.running) return;
-  if (!state.gasim.stepNode(state.selected)) state.message = 'The node is waiting';
+  const ran = state.gasim.stepNode(state.selected);
+  state.message = `Node ${pad(nodeNumber(state.selected))} ${ran ? 'stepped' : 'is still waiting'}`;
   refresh();
 }
 
