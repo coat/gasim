@@ -6,7 +6,7 @@ green, `\` cyan, `(` white, `@` magenta, `^` gray and `~` blue, with hex
 numbers after a `$`.
 
 `gasim source.cf` opens the blocks in an editor. Hit alt+1 to get back to the
-chip view and alt+5 to get back to the colorForth editor. It's inspired by
+chip view and alt+6 to get back to the colorForth editor. It's inspired by
 AshleyF's [Color](https://github.com/AshleyF/Color) editor. The cursor is on a
 word, and as in vim. Keys move between words and blocks - hit `i`, `a` or `o`
 to start typing. Typing a space starts the next word in green after a red name
