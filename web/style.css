@@ -457,6 +457,165 @@ dialog .actions {
   background: var(--breakpoint);
 }
 
+.legend .moved {
+  --status: var(--moved);
+}
+
+/* auto, numbers or registers, beside the legend at the right */
+.modes[role="group"] {
+  width: auto;
+  margin: 0 0 0 auto;
+}
+
+.modes + .legend {
+  margin-left: 0;
+}
+
+.panel-head .modes button {
+  margin: 0;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.map .panel-body {
+  position: relative;
+}
+
+/* a line of the tiles' font, to size them by */
+.measure,
+.tiles.large {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.75rem;
+  line-height: 1.25;
+}
+
+.measure {
+  position: absolute;
+  visibility: hidden;
+  white-space: pre;
+  pointer-events: none;
+}
+
+/* tiles of registers, as many lines as fit, and arrows in the gaps */
+.tiles.large {
+  grid-template-columns: repeat(var(--columns), var(--tile-w));
+  grid-template-rows: repeat(var(--rows), var(--tile-h));
+  column-gap: var(--gap-x);
+  row-gap: var(--gap-y);
+  width: max-content;
+  height: auto;
+}
+
+.large .tile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: calc(var(--line) / 4) calc(var(--char) / 2) 0;
+  text-align: left;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: nowrap;
+}
+
+.large .tile .head {
+  display: flex;
+  gap: var(--char);
+  overflow: hidden;
+}
+
+.large .tile .head .number {
+  width: calc(3 * var(--char));
+}
+
+.large .tile .faint {
+  opacity: 0.65;
+}
+
+.large .tile .regs {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--char);
+  max-height: calc(var(--register-lines) * var(--line));
+  overflow: hidden;
+}
+
+.large .tile .regs > span {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* a triangle pointing the way it is named */
+.arrow,
+.flow {
+  display: inline-block;
+  background: currentColor;
+}
+
+.arrow {
+  width: calc(var(--char) * 0.8);
+  height: calc(var(--char) * 0.8);
+  margin: 0 calc(var(--char) * 0.1);
+  vertical-align: middle;
+}
+
+.arrow.n,
+.flow.n {
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+.arrow.s,
+.flow.s {
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+.arrow.e,
+.flow.e {
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+
+.arrow.w,
+.flow.w {
+  clip-path: polygon(100% 0, 100% 100%, 0 50%);
+}
+
+/* green for a word that went across, or has been handed over to be taken,
+   the text's color for a node waiting to read or write, and faint for one
+   waiting for code */
+.flow {
+  position: absolute;
+  pointer-events: none;
+  color: var(--tile-text);
+}
+
+.flow.moved {
+  color: var(--moved);
+}
+
+.flow.waiting {
+  opacity: 0.75;
+}
+
+.flow.code {
+  opacity: 0.3;
+}
+
+.flow.across {
+  top: 50%;
+  left: calc(100% + var(--gap-x) / 2);
+  width: calc(var(--char) * 1.2);
+  height: calc(var(--char) * 1.2);
+  transform: translate(-50%, -50%);
+}
+
+.flow.upward {
+  left: 50%;
+  top: calc(var(--gap-y) / -2);
+  width: calc(var(--line) * 0.7);
+  height: calc(var(--line) * 0.7);
+  transform: translate(-50%, -50%);
+}
+
 /* the port the console is attached to, facing off the chip */
 .edge.console {
   background: var(--pico-primary);
@@ -1351,6 +1510,12 @@ button.link:hover {
     grid-template-columns: repeat(var(--columns), minmax(2rem, 1fr));
     grid-template-rows: repeat(var(--rows), 2.75rem);
     gap: 3px;
+  }
+
+  /* the map takes its tiles' height here, so tiles of registers to scroll
+     through leave the panel under it room */
+  .map.large {
+    max-height: 55dvh;
   }
 
   .dock-tabs {

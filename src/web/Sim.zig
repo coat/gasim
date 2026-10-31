@@ -520,6 +520,69 @@ pub fn statuses(self: Sim, out_statuses: []u8, out_transfers: []u8) void {
     }
 }
 
+/// A node as the map shows it with room, as the TUI's and the GUI's tiles
+/// do: what it is doing and waits on, its registers, and the ports to its
+/// neighbours east and north of it
+pub const TileView = struct {
+    /// run, code, rd or wr
+    doing: []const u8,
+    /// the ways the ports it waits on face on the map
+    ports: []const Chip.Cardinal,
+    /// what it waits on, when that is no port, such as `io`
+    waiting_on: ?[]const u8,
+    p: u10,
+    slot: u3,
+    t: u18,
+    s: u18,
+    a: u18,
+    b: u9,
+    io: u18,
+    east: ?Chip.Flow,
+    north: ?Chip.Flow,
+};
+
+/// Writes each node as the map shows it with room into `out` as JSON
+pub fn tilesView(self: *Sim) error{OutOfMemory}![]const u8 {
+    self.out.clearRetainingCapacity();
+    var tiles: [layout.count()]TileView = undefined;
+    var ports: [layout.count()][4]Chip.Cardinal = undefined;
+    for (self.chip.nodes, &tiles, &ports, 0..) |*n, *tile, *cardinals, k| {
+        const i: u16 = @intCast(k);
+        const x = i % layout.columns;
+        const y = i / layout.columns;
+        const doing: []const u8, const address: ?u9 = switch (n.status()) {
+            .running => .{ "run", null },
+            .code => |a| .{ "code", a },
+            .reading => |a| .{ "rd", a },
+            .writing => |a| .{ "wr", a },
+        };
+        var count: usize = 0;
+        var waiting_on: ?[]const u8 = null;
+        if (address) |a| if (gasim.port.select(a)) |select| {
+            var it = select.iterator();
+            while (it.next()) |direction| : (count += 1) cardinals[count] = Chip.facing(x, y, direction);
+        } else {
+            waiting_on = disassembler.ioName(a);
+        };
+        tile.* = .{
+            .doing = doing,
+            .ports = cardinals[0..count],
+            .waiting_on = waiting_on,
+            .p = @bitCast(n.p),
+            .slot = n.slot,
+            .t = @bitCast(n.data_stack.t),
+            .s = @bitCast(n.data_stack.s),
+            .a = @bitCast(n.a),
+            .b = n.b,
+            .io = @bitCast(n.io),
+            .east = self.chip.flow(i, .east),
+            .north = self.chip.flow(i, .north),
+        };
+    }
+    try self.writeJson(&tiles);
+    return self.out.written();
+}
+
 pub const Line = struct {
     address: u9,
     value: u18,
@@ -1070,6 +1133,16 @@ test "views as JSON" {
     try std.testing.expectEqualStrings("reading", node_.value.object.get("status").?.string);
     try std.testing.expectEqualStrings("left", node_.value.object.get("waiting_on").?.string);
     try std.testing.expectEqual(128, node_.value.object.get("memory").?.array.items.len);
+
+    // node 000 waits to read left, off the chip to its west, and node 001
+    // for code
+    const tiles = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.tilesView(), .{});
+    defer tiles.deinit();
+    try std.testing.expectEqual(layout.count(), tiles.value.array.items.len);
+    const first = tiles.value.array.items[0].object;
+    try std.testing.expectEqualStrings("rd", first.get("doing").?.string);
+    try std.testing.expectEqualStrings("west", first.get("ports").?.array.items[0].string);
+    try std.testing.expectEqualStrings("code", tiles.value.array.items[1].object.get("doing").?.string);
 
     const chip = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.chipView(), .{});
     defer chip.deinit();

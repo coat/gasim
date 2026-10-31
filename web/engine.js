@@ -135,6 +135,12 @@ export async function loadEngine(url = 'gasim.wasm') {
       return { status: view(p, nodes), transfers: view(p + nodes, nodes) };
     },
     node: (i) => json(x.nodeView(i)),
+    /**
+     * Each node as the map shows it with room: { doing, ports, waiting_on,
+     * p, slot, t, s, a, b, io, east, north }, the last two the ports to its
+     * neighbours, as { outward, kind }, or null.
+     */
+    tiles: () => json(x.tilesView()),
     chip: () => json(x.chipView()),
 
     // ---------- the prompt ----------

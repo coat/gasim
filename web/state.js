@@ -59,6 +59,8 @@ export const state = {
   /** each node's Status name, and the ports it moved words through */
   statuses: [],
   transfers: new Uint8Array(0),
+  /** each node's registers and ports, while the map shows them, or null */
+  tiles: null,
   /** the dock's tab: 'forth', 'console', 'trace', 'breakpoints' or 'history' */
   dock: 'forth',
   /**
@@ -114,6 +116,7 @@ export function refresh() {
   const { status, transfers } = g.statuses();
   state.statuses = Array.from(status, (s) => Status[s]);
   state.transfers = transfers.slice();
+  if (state.tiles) state.tiles = g.tiles();
   state.moments = g.history();
   if (state.trace.on) takeTrace();
   givePending();
@@ -145,6 +148,12 @@ export function select(i) {
   state.selected = i;
   state.node = state.gasim.node(i);
   keepWorkspace();
+}
+
+/** Reads each node's registers as the chip changes, for the map, or stops. */
+export function showRegisters(on) {
+  if (on === (state.tiles !== null)) return;
+  state.tiles = on ? state.gasim.tiles() : null;
 }
 
 /** Moves the selection a node east, west, north or south, if there is one. */

@@ -152,6 +152,11 @@ export fn nodeView(i: u16) usize {
     return written(sim.nodeView(i));
 }
 
+/// each node as the map shows it with room, as `Sim.tilesView` writes it
+export fn tilesView() usize {
+    return written(sim.tilesView());
+}
+
 export fn chipView() usize {
     return written(sim.chipView());
 }
