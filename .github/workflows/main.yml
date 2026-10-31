@@ -15,8 +15,58 @@ on:
     paths-ignore: *docs
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# a newer push to a pull request makes its older runs moot
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # which of gasim, the web version and the GUI a pull request can affect.
+  # Pushes to main build them all. A file not named below is the core's,
+  # or the build's, so it builds them all too
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      native: ${{ steps.filter.outputs.native }}
+      web: ${{ steps.filter.outputs.web }}
+      gui: ${{ steps.filter.outputs.gui }}
+    steps:
+      # the merge commit, whose first parent is the base it merges into
+      - name: Checkout code
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - id: filter
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "native=true web=true gui=true" | tr ' ' '\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # apart, so if it fails, the step does, and does not skip them all
+          files=$(git diff --name-only HEAD^1 HEAD)
+          native=false web=false gui=false
+          while read -r file; do
+            case $file in
+              *.md | docs/* | LICENSE | .gitignore | .envrc) ;;
+              src/cli/*) native=true ;;
+              # the GUI draws the web version's Sim
+              src/web/*) native=true web=true gui=true ;;
+              web/* | deno.json | tools/serve/*) web=true ;;
+              src/gui/*) gui=true ;;
+              *) native=true web=true gui=true ;;
+            esac
+          done <<< "$files"
+          echo "native=$native web=$web gui=$gui" | tee /dev/stderr | tr ' ' '\n' >> "$GITHUB_OUTPUT"
+
   build:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +80,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Install Nix and use that to run our tests so our environment matches exactly.
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
@@ -41,22 +93,39 @@ jobs:
 
       - run: nix develop -c zig env
 
-      - name: Run tests 
+      - name: Run tests
         run: nix develop -c zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --summary all
+
+  web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
 
       # the core must build for the web, with no I/O and no libc
       - name: Build for wasm
-        if: matrix.os == 'ubuntu-latest'
         run: nix develop -c zig build wasm --summary all
 
       - name: Test the web version
         run: nix develop -c zig build test-web --summary all
 
   build-windows:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
@@ -64,12 +133,14 @@ jobs:
 
       - run: zig env
 
-      - name: Run tests 
+      - name: Run tests
         run: zig build test -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe --summary all
 
   # the GUI's SDL3 built from source, as the releases build it, so a
   # release does not find it broken. Its tests need a display, so are not run
   build-gui:
+    needs: changes
+    if: needs.changes.outputs.gui == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -86,6 +157,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
@@ -95,10 +168,14 @@ jobs:
         run: zig build -Dgui -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstrip -fno-sys=sdl3 --summary all
 
   coverage:
+    needs: changes
+    if: needs.changes.outputs.native == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Install Nix and use that to run our tests so our environment matches exactly.
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
