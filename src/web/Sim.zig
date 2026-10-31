@@ -449,7 +449,7 @@ pub fn setTracing(self: *Sim, on: bool) error{OutOfMemory}!void {
     if (on and self.trace == null) {
         const t = try self.gpa.create(Tail);
         errdefer self.gpa.destroy(t);
-        t.* = .{ .writer = .{ .vtable = &.{ .drain = Tail.drain }, .buffer = try self.gpa.alloc(u8, trace_capacity) } };
+        t.* = .init(try self.gpa.alloc(u8, trace_capacity));
         self.trace = t;
     } else if (!on) if (self.trace) |t| {
         self.gpa.free(t.writer.buffer);
@@ -469,27 +469,6 @@ pub fn takeTrace(self: *Sim) bool {
     defer t.dropped = false;
     return t.dropped;
 }
-
-/// A writer that keeps the last of what is written to it, dropping the
-/// older half of its lines whenever its buffer is full
-const Tail = struct {
-    writer: Writer,
-    dropped: bool = false,
-
-    fn drain(w: *Writer, data: []const []const u8, splat: usize) Writer.Error!usize {
-        const self: *Tail = @alignCast(@fieldParentPtr("writer", w));
-        self.dropped = true;
-        const kept = w.buffer[w.end / 2 .. w.end];
-        const lines = if (std.mem.indexOfScalar(u8, kept, '\n')) |nl| kept[nl + 1 ..] else kept[kept.len..];
-        @memmove(w.buffer[0..lines.len], lines);
-        w.end = lines.len;
-        // what cannot fit even so is dropped too
-        if (data[0].len <= w.buffer.len - w.end) return 0;
-        var len: usize = 0;
-        for (data[0 .. data.len - 1]) |d| len += d.len;
-        return len + data[data.len - 1].len * splat;
-    }
-};
 
 // ---------- views ----------
 
@@ -1006,6 +985,7 @@ const disassembler = gasim.disassembler;
 const Editor = gasim.Editor;
 const ga144 = gasim.ga144;
 const rom = gasim.rom;
+const Tail = gasim.Tail;
 const Word = gasim.Word;
 const Diagnostic = arrayforth.Diagnostic;
 const Program = arrayforth.Program;
@@ -1266,16 +1246,6 @@ test "tracing" {
     _ = try sim.stepNext();
     try std.testing.expect(!sim.takeTrace());
     try std.testing.expectEqualStrings("", sim.out.written());
-}
-
-test "a trace bigger than its buffer keeps whole lines" {
-    var buffer: [64]u8 = undefined;
-    var tail: Tail = .{ .writer = .{ .vtable = &.{ .drain = Tail.drain }, .buffer = &buffer } };
-    for (0..20) |k| try tail.writer.print("line {d:0>3}\n", .{k});
-    try std.testing.expect(tail.dropped);
-    const kept = tail.writer.buffered();
-    try std.testing.expectStringStartsWith(kept, "line ");
-    try std.testing.expectStringEndsWith(kept, "line 019\n");
 }
 
 test "the history, and going back to a step in it" {
