@@ -237,13 +237,22 @@ code,
   margin: 0;
 }
 
+/* Pico lays a menu's summary out as a list item, its text at the top; a
+   row centred as the buttons' are, its arrow after the label */
+.examples summary {
+  display: flex;
+  align-items: center;
+}
+
 .examples ul {
   min-width: 18rem;
   max-height: 70vh;
   overflow: auto;
 }
 
-.examples li a {
+/* the name over what it does; the details and dropdown outweigh Pico's
+   details.dropdown summary + ul li a, which makes it a block */
+details.dropdown.examples li a {
   display: flex;
   flex-direction: column;
 }
