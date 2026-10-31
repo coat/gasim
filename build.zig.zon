@@ -17,6 +17,11 @@
             .hash = "N-V-__8AAI8vEwDBxs8j_tnNzQ_8MiBQBrR3SXBPbov4JY9z",
             .lazy = true,
         },
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui#0b409a1332525658c8bc7a274a2c221e2602c269",
+            .hash = "dvui-0.6.0-dev-AQFJmVSWBAHHPFe4ozRUFx0_4pEF2BSEhL25YwZjOZGE",
+            .lazy = true,
+        },
     },
 
     .paths = .{

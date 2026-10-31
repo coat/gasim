@@ -261,7 +261,79 @@ pub const Layout = struct {
     }
 };
 
-pub const Cardinal = enum { north, east, south, west };
+pub const Cardinal = enum {
+    north,
+    east,
+    south,
+    west,
+
+    pub fn opposite(self: Cardinal) Cardinal {
+        return switch (self) {
+            .north => .south,
+            .east => .west,
+            .south => .north,
+            .west => .east,
+        };
+    }
+};
+
+/// Which way a word goes through the port between two nodes, as a map
+/// draws it, and why
+pub const Flow = struct {
+    /// toward the neighbour, rather than from it
+    outward: bool,
+    kind: Kind,
+
+    pub const Kind = enum {
+        /// a word went across in the last step, or has been handed over to
+        /// be taken
+        moved,
+        /// a node is waiting to read or write
+        waiting,
+        /// a node is waiting for code
+        code,
+    };
+};
+
+/// What the port between node `i` and its neighbour toward `cardinal` is
+/// doing, pointing the way the word goes. Nodes on both sides waiting to
+/// read, as after reset, get none, as no word will go either way.
+pub fn flow(self: *const Chip, i: u16, cardinal: Cardinal) ?Flow {
+    const layout = self.layout;
+    const n = &self.nodes[i];
+    const direction = portToward(i % layout.columns, i / layout.columns, cardinal);
+    const link = n.ports[@backingInt(direction)];
+    const p = link.port orelse return null;
+    const j = layout.neighbour(i, direction) orelse return null;
+    const facing_back = portToward(j % layout.columns, j / layout.columns, cardinal.opposite());
+    const other = &self.nodes[j];
+
+    if (n.transfers.written.contains(direction) or other.transfers.read.contains(facing_back)) return .{ .outward = true, .kind = .moved };
+    if (n.transfers.read.contains(direction) or other.transfers.written.contains(facing_back)) return .{ .outward = false, .kind = .moved };
+    return switch (p.state) {
+        .idle => null,
+        .reading => |side| reading: {
+            // the port remembers only the first of two readers
+            const also_reading = if (side == link.side) self.waitsToRead(j, facing_back) else self.waitsToRead(i, direction);
+            if (also_reading) break :reading null;
+            const reader = if (side == link.side) n else other;
+            break :reading .{ .outward = side != link.side, .kind = if (reader.status() == .code) .code else .waiting };
+        },
+        .writing => |w| .{ .outward = w.side == link.side, .kind = .waiting },
+        .delivered => |d| .{ .outward = d.side != link.side, .kind = .moved },
+        .taken => |side| .{ .outward = side == link.side, .kind = .moved },
+    };
+}
+
+/// whether a node is waiting to read, or for code, on one of its ports
+fn waitsToRead(self: *const Chip, i: u16, direction: Direction) bool {
+    const address = switch (self.nodes[i].status()) {
+        .code, .reading => |a| a,
+        .running, .writing => return false,
+    };
+    const ports = port.select(address) orelse return false;
+    return ports.contains(direction);
+}
 
 /// The port a node at column `x` and row `y` uses toward `cardinal`
 pub fn portToward(x: u16, y: u16, cardinal: Cardinal) Direction {

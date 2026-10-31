@@ -14,7 +14,11 @@ section below.
 
 Try out the [web based version](https://coat.github.io/gasim/).
 
-If you have Nix installed: `nix run github:coat/gasim`.
+If you have Nix installed: `nix run github:coat/gasim`, or `nix run
+github:coat/gasim#gui` for the GUI.
+
+`gasim-gui` is a desktop GUI, like the web version, in each release beside
+`gasim`. On Linux it needs glibc, and X11 or Wayland.
 
 ## Usage
 
@@ -183,6 +187,13 @@ zig build -Doptimize=ReleaseFast
 ```
 
 `gasim` will be available in `./zig-out/bin/gasim`.
+
+The GUI is built only with `-Dgui`, which fetches
+[dvui](https://github.com/david-vanderson/dvui) and SDL3: `zig build -Dgui`
+builds `./zig-out/bin/gasim-gui` beside `gasim`, `zig build -Dgui run-gui`
+runs it, and `zig build -Dgui test-gui` runs its tests in a hidden window. On
+Linux it links the system's SDL3 (in the Nix dev shell); `-fno-sys=sdl3`
+builds SDL3 from source instead, as the releases do.
 
 `zig build web` builds the web version into `./zig-out/web`, and `zig build
 test-web` runs its tests, which need [Deno](https://deno.com/) (in the Nix dev

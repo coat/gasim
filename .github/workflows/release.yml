@@ -34,22 +34,29 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          # the GUI links glibc, not musl: SDL3 loads X11 or Wayland as it
+          # starts, which a static binary cannot
           - os: ubuntu-latest
             target: x86_64-linux-musl
+            gui_target: x86_64-linux-gnu
             name: x86_64-linux
             test: true
           - os: ubuntu-latest
             target: aarch64-linux-musl
+            gui_target: aarch64-linux-gnu
             name: aarch64-linux
           - os: macos-latest
             target: aarch64-macos
+            gui_target: aarch64-macos
             name: aarch64-macos
             test: true
           - os: macos-latest
             target: x86_64-macos
+            gui_target: x86_64-macos
             name: x86_64-macos
           - os: windows-latest
             target: x86_64-windows-gnu
+            gui_target: x86_64-windows-gnu
             name: x86_64-windows
             test: true
     runs-on: ${{ matrix.os }}
@@ -67,7 +74,14 @@ jobs:
         run: zig build test -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --summary all
 
       - name: Build
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast --prefix out
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstrip --prefix out
+
+      # with SDL3 built from source and linked in, so it needs no SDL
+      # installed. Apart, as on Linux it is for another target than gasim
+      - name: Build the GUI
+        run: |
+          zig build -Dgui -Dtarget=${{ matrix.gui_target }} -Doptimize=ReleaseFast -Dstrip -fno-sys=sdl3 --prefix gui
+          cp gui/bin/gasim-gui* out/bin/
 
       - name: Package
         run: |

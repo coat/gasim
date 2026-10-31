@@ -1099,51 +1099,20 @@ const Tui = struct {
         return self.print("{s} {s}", .{ kind, std.mem.join(self.frame.allocator(), "", arrows[0..count]) catch "" });
     }
 
-    /// An arrow for the port between a node and its neighbour in a direction:
-    /// green for a word that went across in the last step, or that has been
-    /// handed over to be taken, yellow for a node waiting to read or write,
-    /// and dim for one waiting for code, pointing the way the word goes.
-    /// Nodes on both sides waiting to read, as after reset, get none, as no
-    /// word will go either way.
+    /// An arrow for the port between a node and its neighbour in a direction,
+    /// pointing the way the word goes: green for a word that went across in
+    /// the last step, or that has been handed over to be taken, yellow for a
+    /// node waiting to read or write, and dim for one waiting for code
     fn portArrow(self: *Tui, i: u16, cardinal: Chip.Cardinal) ?vaxis.Segment {
-        const layout = self.chip.layout;
-        const n = &self.chip.nodes[i];
-        const direction = Chip.portToward(i % layout.columns, i / layout.columns, cardinal);
-        const link = n.ports[@backingInt(direction)];
-        const p = link.port orelse return null;
-        const j = layout.neighbour(i, direction) orelse return null;
-        const facing_back = Chip.portToward(j % layout.columns, j / layout.columns, opposite(cardinal));
-        const other = &self.chip.nodes[j];
-
-        const moved: vaxis.Style = .{ .fg = .{ .index = 2 }, .bold = true };
-        const waiting: vaxis.Style = .{ .fg = .{ .index = 3 } };
-        const out: []const u8 = arrow(cardinal);
-        const in: []const u8 = arrow(opposite(cardinal));
-        if (n.transfers.written.contains(direction) or other.transfers.read.contains(facing_back)) return .{ .text = out, .style = moved };
-        if (n.transfers.read.contains(direction) or other.transfers.written.contains(facing_back)) return .{ .text = in, .style = moved };
-        return switch (p.state) {
-            .idle => null,
-            .reading => |side| reading: {
-                // the port remembers only the first of two readers
-                const also_reading = if (side == link.side) self.waitsToRead(j, facing_back) else self.waitsToRead(i, direction);
-                if (also_reading) break :reading null;
-                const reader = if (side == link.side) n else other;
-                break :reading .{ .text = if (side == link.side) in else out, .style = if (reader.status() == .code) .{ .dim = true } else waiting };
+        const f = self.chip.flow(i, cardinal) orelse return null;
+        return .{
+            .text = arrow(if (f.outward) cardinal else cardinal.opposite()),
+            .style = switch (f.kind) {
+                .moved => .{ .fg = .{ .index = 2 }, .bold = true },
+                .waiting => .{ .fg = .{ .index = 3 } },
+                .code => .{ .dim = true },
             },
-            .writing => |w| .{ .text = if (w.side == link.side) out else in, .style = waiting },
-            .delivered => |d| .{ .text = if (d.side == link.side) in else out, .style = moved },
-            .taken => |side| .{ .text = if (side == link.side) out else in, .style = moved },
         };
-    }
-
-    /// whether a node is waiting to read, or for code, on one of its ports
-    fn waitsToRead(self: *Tui, i: u16, direction: Direction) bool {
-        const address = switch (self.chip.nodes[i].status()) {
-            .code, .reading => |a| a,
-            .running, .writing => return false,
-        };
-        const ports = gasim.port.select(address) orelse return false;
-        return ports.contains(direction);
     }
 
     fn drawConsole(self: *Tui, win: vaxis.Window) void {
@@ -1635,15 +1604,6 @@ fn arrow(cardinal: Chip.Cardinal) []const u8 {
         .east => "→",
         .south => "↓",
         .west => "←",
-    };
-}
-
-fn opposite(cardinal: Chip.Cardinal) Chip.Cardinal {
-    return switch (cardinal) {
-        .north => .south,
-        .east => .west,
-        .south => .north,
-        .west => .east,
     };
 }
 

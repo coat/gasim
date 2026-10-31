@@ -18,13 +18,19 @@
               [
                 zig
                 deno
+                # the GUI's window, input and drawing, linked with -fsys=sdl3
+                sdl3
               ]
               ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [elfkickers kcov]);
           };
 
           formatter.${system} = pkgs.alejandra;
 
-          packages.${system}.default = pkgs.callPackage ./package.nix {};
+          packages.${system} = {
+            default = pkgs.callPackage ./package.nix {};
+            # gasim and gasim-gui; `nix run .#gui` runs the GUI
+            gui = pkgs.callPackage ./package.nix {gui = true;};
+          };
         }
       )
       systems
