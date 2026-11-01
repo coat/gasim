@@ -219,6 +219,18 @@ const Palette = struct {
     };
 
     fn get() Palette {
+        if (style.colors()) |b| return .{
+            .background = b.base00,
+            .cursor = b.base02,
+            .red = b.base08,
+            .yellow = b.base0A,
+            .green = b.base0B,
+            .cyan = b.base0C,
+            .white = b.base05,
+            .magenta = b.base0E,
+            .gray = b.base04,
+            .blue = b.base0D,
+        };
         return if (dvui.themeGet().dark) dark else light;
     }
 
@@ -519,6 +531,7 @@ const Editor = gasim.Editor;
 const Sim = @import("Sim");
 const dock = @import("dock.zig");
 const files = @import("files.zig");
+const style = @import("style.zig");
 const ui = @import("ui.zig");
 
 // ---------- tests, in a hidden window ----------

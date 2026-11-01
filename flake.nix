@@ -3,10 +3,18 @@
 
   inputs.nixpkgs.url = "nixpkgs/nixos-unstable";
 
-  outputs = {nixpkgs, ...}: let
+  outputs = {
+    self,
+    nixpkgs,
+    ...
+  }: let
     systems = ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"];
   in
-    builtins.foldl' nixpkgs.lib.recursiveUpdate {} (
+    builtins.foldl' nixpkgs.lib.recursiveUpdate {
+      # programs.gasim: gasim, and gasim-gui's fonts and colors, from Stylix
+      # when it is on
+      homeModules.default = import ./nix/hm-module.nix self;
+    } (
       builtins.map (
         system: let
           pkgs = import nixpkgs {

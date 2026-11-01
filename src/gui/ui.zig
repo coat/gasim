@@ -467,6 +467,17 @@ pub const Palette = struct {
     };
 
     pub fn get() Palette {
+        // the tiles' backgrounds tinted toward their hue, as the web's are
+        if (style.colors()) |b| return .{
+            .running = b.base00.lerp(b.base0B, 0.3),
+            .reading = b.base00.lerp(b.base0D, 0.3),
+            .writing = b.base00.lerp(b.base0E, 0.3),
+            .moved = b.base0B,
+            .breakpoint = b.base08,
+            .tile_text = b.base05,
+            .here = b.base00.lerp(b.base0A, 0.3),
+            .literal = b.base09,
+        };
         return if (dvui.themeGet().dark) dark else light;
     }
 
@@ -963,6 +974,7 @@ const editor = @import("editor.zig");
 const files = @import("files.zig");
 const help = @import("help.zig");
 const icons = @import("icons");
+const style = @import("style.zig");
 
 // ---------- tests, in a hidden window ----------
 
@@ -1106,6 +1118,7 @@ test {
     _ = editor;
     _ = files;
     _ = help;
+    _ = style;
     _ = @import("debug.zig");
 }
 

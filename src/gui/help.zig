@@ -71,14 +71,14 @@ pub fn dialog() void {
 pub const Theme = enum { auto, light, dark };
 pub var theme: Theme = .auto;
 
-/// Sets the theme chosen, or with auto, the system's
+/// Sets the theme chosen, or with auto, gui.json's colors or the system's
 pub fn apply() void {
     const dark = switch (theme) {
         .auto => (dvui.currentWindow().backend.preferredColorScheme() orelse .light) == .dark,
         .light => false,
         .dark => true,
     };
-    dvui.themeSet(if (dark) dvui.Theme.builtin.adwaita_dark else dvui.Theme.builtin.adwaita_light);
+    dvui.themeSet(style.theme(dark));
 }
 
 pub fn themeButton() void {
@@ -100,4 +100,5 @@ pub fn themeButton() void {
 const dvui = @import("dvui");
 const dock = @import("dock.zig");
 const icons = @import("icons");
+const style = @import("style.zig");
 const ui = @import("ui.zig");
