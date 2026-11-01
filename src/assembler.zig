@@ -446,9 +446,9 @@ fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
     return result;
 }
 
-fn expectError(expected: Error, source: []const u8) !void {
+fn expectAssembleError(expected: Error, source: []const u8) !void {
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(expected, assemble(source, &diagnostic));
+    try expectError(expected, assemble(source, &diagnostic));
 }
 
 test "opcodes are packed four to a word" {
@@ -493,7 +493,7 @@ test "source lines" {
     var diagnostic: Diagnostic = .{};
     // an instruction word is from the line it starts on
     const program = try assemble("5 dup\ndrop\n\n7 ,", &diagnostic);
-    try std.testing.expectEqualSlices(u32, &.{ 1, 1, 4, 0 }, program.lines[0..4]);
+    try expectEqualSlices(u32, &.{ 1, 1, 4, 0 }, program.lines[0..4]);
 }
 
 test "labels, calls and tail calls" {
@@ -637,51 +637,51 @@ test "port names" {
 }
 
 test "errors" {
-    try expectError(error.UnknownWord, "jump");
-    try expectError(error.UndefinedLabel, "nowhere");
-    try expectError(error.DuplicateLabel, ": x : x");
-    try expectError(error.MissingLabelName, ":");
-    try expectError(error.UnterminatedComment, "( dup");
-    try expectError(error.UnterminatedString, "\"dup");
-    try expectError(error.NumberOutOfRange, "0x40000");
-    try expectError(error.NumberOutOfRange, "0x100000000");
-    try expectError(error.NumberOutOfRange, "64 org");
-    try expectError(error.ProgramTooLarge, "63 org 1 ,  2 ,");
-    try expectError(error.UnmatchedControl, "then");
-    try expectError(error.UnmatchedControl, "if next");
-    try expectError(error.UnmatchedControl, "else");
-    try expectError(error.UnmatchedControl, "if while");
-    try expectError(error.UnmatchedControl, "begin repeat");
-    try expectError(error.UnmatchedControl, "begin *next");
-    try expectError(error.UnclosedControl, "begin");
-    try expectError(error.UnclosedControl, "begin while again");
-    try expectError(error.NumberOutOfRange, "0 <sl");
-    try expectError(error.NumberOutOfRange, "5 <sl");
-    try expectError(error.ReservedLabel, ": while");
-    try expectError(error.ReservedLabel, ": ..");
-    try expectError(error.UnextBodyTooLong, "for dup dup dup dup unext");
-    try expectError(error.ControlTooDeep, repeat("begin ", 17));
-    try expectError(error.ReservedLabel, ": up");
-    try expectError(error.ReservedLabel, ": dup");
-    try expectError(error.ReservedLabel, ": begin");
-    try expectError(error.ReservedLabel, ": 0x10");
+    try expectAssembleError(error.UnknownWord, "jump");
+    try expectAssembleError(error.UndefinedLabel, "nowhere");
+    try expectAssembleError(error.DuplicateLabel, ": x : x");
+    try expectAssembleError(error.MissingLabelName, ":");
+    try expectAssembleError(error.UnterminatedComment, "( dup");
+    try expectAssembleError(error.UnterminatedString, "\"dup");
+    try expectAssembleError(error.NumberOutOfRange, "0x40000");
+    try expectAssembleError(error.NumberOutOfRange, "0x100000000");
+    try expectAssembleError(error.NumberOutOfRange, "64 org");
+    try expectAssembleError(error.ProgramTooLarge, "63 org 1 ,  2 ,");
+    try expectAssembleError(error.UnmatchedControl, "then");
+    try expectAssembleError(error.UnmatchedControl, "if next");
+    try expectAssembleError(error.UnmatchedControl, "else");
+    try expectAssembleError(error.UnmatchedControl, "if while");
+    try expectAssembleError(error.UnmatchedControl, "begin repeat");
+    try expectAssembleError(error.UnmatchedControl, "begin *next");
+    try expectAssembleError(error.UnclosedControl, "begin");
+    try expectAssembleError(error.UnclosedControl, "begin while again");
+    try expectAssembleError(error.NumberOutOfRange, "0 <sl");
+    try expectAssembleError(error.NumberOutOfRange, "5 <sl");
+    try expectAssembleError(error.ReservedLabel, ": while");
+    try expectAssembleError(error.ReservedLabel, ": ..");
+    try expectAssembleError(error.UnextBodyTooLong, "for dup dup dup dup unext");
+    try expectAssembleError(error.ControlTooDeep, repeat("begin ", 17));
+    try expectAssembleError(error.ReservedLabel, ": up");
+    try expectAssembleError(error.ReservedLabel, ": dup");
+    try expectAssembleError(error.ReservedLabel, ": begin");
+    try expectAssembleError(error.ReservedLabel, ": 0x10");
 
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.UnknownWord, assemble("dup\n  jump", &diagnostic));
+    try expectError(error.UnknownWord, assemble("dup\n  jump", &diagnostic));
     try expectEqual(2, diagnostic.line);
-    try std.testing.expectEqualStrings("jump", diagnostic.token);
+    try expectEqualStrings("jump", diagnostic.token);
 }
 
 test "malformed tokens are reported where they start" {
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.UnterminatedComment, assemble("dup\n\n\n( never closed", &diagnostic));
+    try expectError(error.UnterminatedComment, assemble("dup\n\n\n( never closed", &diagnostic));
     try expectEqual(4, diagnostic.line);
-    try std.testing.expectEqualStrings("(", diagnostic.token);
+    try expectEqualStrings("(", diagnostic.token);
 
     // found while looking for a , or org after a number
-    try std.testing.expectError(error.UnterminatedString, assemble("1\n\"text", &diagnostic));
+    try expectError(error.UnterminatedString, assemble("1\n\"text", &diagnostic));
     try expectEqual(2, diagnostic.line);
-    try std.testing.expectEqualStrings("\"", diagnostic.token);
+    try expectEqualStrings("\"", diagnostic.token);
 }
 
 test "nesting up to the control stack depth" {
@@ -714,6 +714,8 @@ const Opcode = @import("opcodes.zig").Opcode;
 const std = @import("std");
 const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
 
 test "node directive" {
     const source =
@@ -739,18 +741,18 @@ test "node directive" {
     try expectEqual(1, (try assembleNodes("node 5 node 6 dup", &programs, &diagnostic)).len);
 
     // errors about a node point at its directive
-    try std.testing.expectError(error.DuplicateNode, assembleNodes("dup\nnode 0 dup", &programs, &diagnostic));
+    try expectError(error.DuplicateNode, assembleNodes("dup\nnode 0 dup", &programs, &diagnostic));
     try expectEqual(2, diagnostic.line);
-    try std.testing.expectEqualStrings("node 0", diagnostic.token);
-    try std.testing.expectError(error.TooManyNodes, assemble("dup node 1 dup", &diagnostic));
-    try std.testing.expectEqualStrings("node 1", diagnostic.token);
+    try expectEqualStrings("node 0", diagnostic.token);
+    try expectError(error.TooManyNodes, assemble("dup node 1 dup", &diagnostic));
+    try expectEqualStrings("node 1", diagnostic.token);
     // a single node can be any node
     try expectEqual(5, (try assemble("node 5 dup", &diagnostic)).node);
-    try std.testing.expectError(error.UndefinedLabel, assemble("node 1 : x node 2 x", &diagnostic));
-    try expectError(error.InvalidNode, "node");
-    try expectError(error.InvalidNode, "node 10000");
-    try expectError(error.InvalidNode, "node up");
-    try expectError(error.ReservedLabel, ": node");
+    try expectError(error.UndefinedLabel, assemble("node 1 : x node 2 x", &diagnostic));
+    try expectAssembleError(error.InvalidNode, "node");
+    try expectAssembleError(error.InvalidNode, "node 10000");
+    try expectAssembleError(error.InvalidNode, "node up");
+    try expectAssembleError(error.ReservedLabel, ": node");
 }
 
 test "ROM words" {
@@ -770,23 +772,23 @@ test "ROM words" {
     var diagnostic: Diagnostic = .{};
     const assembled = try assembleNodes("node 300 *.17", &programs, &diagnostic);
     try expectEqual(0xcc, assembled[0].ram[0] & 0x3ff);
-    try std.testing.expectError(error.UndefinedLabel, assemble("node 708 *.17", &diagnostic));
+    try expectError(error.UndefinedLabel, assemble("node 708 *.17", &diagnostic));
 
     // programs note where they first need ROM
     try expectEqual(null, (try assemble(": x dup ; x", &diagnostic)).rom_word);
     const rom_word = (try assemble("dup\n dup warm *.17", &diagnostic)).rom_word.?;
     try expectEqual(2, rom_word.line);
-    try std.testing.expectEqualStrings("warm", rom_word.token);
+    try expectEqualStrings("warm", rom_word.token);
 
     // the address of a ROM word, such as a return to warm
     try expectAssembles("'warm >r", &.{
         Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@">r", .slot_2 = .@".", .slot_3 = 7 }),
         0xa9,
     });
-    try std.testing.expectEqualStrings("warm", (try assemble("'warm", &diagnostic)).rom_word.?.token);
+    try expectEqualStrings("warm", (try assemble("'warm", &diagnostic)).rom_word.?.token);
 
-    try expectError(error.ReservedLabel, ": warm");
-    try expectError(error.ReservedLabel, ": *.17");
+    try expectAssembleError(error.ReservedLabel, ": warm");
+    try expectAssembleError(error.ReservedLabel, ": *.17");
 }
 
 /// Any source assembles or fails to, without crashing

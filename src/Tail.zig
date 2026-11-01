@@ -36,17 +36,21 @@ fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!
 
 const std = @import("std");
 const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectStringEndsWith = std.testing.expectStringEndsWith;
+const expectStringStartsWith = std.testing.expectStringStartsWith;
 
 test "keeps whole lines, the last of them" {
     var buffer: [64]u8 = undefined;
     var tail: Tail = .init(&buffer);
     for (0..20) |k| try tail.writer.print("line {d:0>3}\n", .{k});
-    try std.testing.expect(tail.dropped);
+    try expect(tail.dropped);
     const kept = tail.writer.buffered();
-    try std.testing.expectStringStartsWith(kept, "line ");
-    try std.testing.expectStringEndsWith(kept, "line 019\n");
+    try expectStringStartsWith(kept, "line ");
+    try expectStringEndsWith(kept, "line 019\n");
 
     tail.clear();
-    try std.testing.expectEqualStrings("", tail.writer.buffered());
-    try std.testing.expect(!tail.dropped);
+    try expectEqualStrings("", tail.writer.buffered());
+    try expect(!tail.dropped);
 }

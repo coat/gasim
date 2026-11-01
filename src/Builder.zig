@@ -405,8 +405,8 @@ test "calls to labels defined later must reach them" {
     try builder.callLabel("far");
     try builder.org(20);
     try builder.define("far");
-    try std.testing.expectError(error.UnreachableLabel, builder.finish(&diagnostic));
-    try std.testing.expectEqualStrings("far", diagnostic.token);
+    try expectError(error.UnreachableLabel, builder.finish(&diagnostic));
+    try expectEqualStrings("far", diagnostic.token);
 
     builder = .{ .short_forward = true };
     try builder.emit(.dup);
@@ -414,7 +414,7 @@ test "calls to labels defined later must reach them" {
     try builder.callLabel("near");
     try builder.define("near");
     try builder.finish(&diagnostic);
-    try std.testing.expectEqual(1, builder.mem[0] & Instruction.destinationMask(2));
+    try expectEqual(1, builder.mem[0] & Instruction.destinationMask(2));
 }
 
 const Diagnostic = @import("assembler.zig").Diagnostic;
@@ -426,3 +426,6 @@ const Word = f18.Word;
 const Opcode = @import("opcodes.zig").Opcode;
 
 const std = @import("std");
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;

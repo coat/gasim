@@ -221,20 +221,20 @@ test "sends frames back to back on an inverted line" {
     var uart: Uart = .{ .bit_time = 10, .output = &writer, .preload = "\x01\x80" };
 
     // a start bit, data bit 0 a mark, bits 1 to 7 not
-    try std.testing.expect(uart.rxHigh(0));
-    try std.testing.expect(!uart.rxHigh(10));
-    try std.testing.expect(uart.rxHigh(25));
-    try std.testing.expectEqual(90, uart.nextRxEdge(25));
+    try expect(uart.rxHigh(0));
+    try expect(!uart.rxHigh(10));
+    try expect(uart.rxHigh(25));
+    try expectEqual(90, uart.nextRxEdge(25));
     // the stop bit, then the next frame's start bit
-    try std.testing.expect(!uart.rxHigh(95));
-    try std.testing.expectEqual(100, uart.nextRxEdge(95));
-    try std.testing.expect(uart.rxHigh(100));
+    try expect(!uart.rxHigh(95));
+    try expectEqual(100, uart.nextRxEdge(95));
+    try expect(uart.rxHigh(100));
     // bit 7 of 0x80 is the only mark of the second frame
-    try std.testing.expectEqual(180, uart.nextRxEdge(100));
-    try std.testing.expect(!uart.rxHigh(185));
+    try expectEqual(180, uart.nextRxEdge(100));
+    try expect(!uart.rxHigh(185));
     // then the line is idle, with nothing more to send
-    try std.testing.expectEqual(null, uart.nextRxEdge(185));
-    try std.testing.expect(!uart.rxHigh(1000));
+    try expectEqual(null, uart.nextRxEdge(185));
+    try expect(!uart.rxHigh(1000));
 }
 
 test "receives what the node sends" {
@@ -246,9 +246,9 @@ test "receives what the node sends" {
     const levels = [_]bool{ true, false, true, true, true, true, true, false, true, false };
     // a few steps of the node in each bit
     for (levels, 0..) |level, k| for (0..3) |j| uart.observe(k * 10 + j * 3, level);
-    try std.testing.expect(try uart.service(100));
-    try std.testing.expectEqualStrings("A", writer.buffered());
-    try std.testing.expect(uart.used);
+    try expect(try uart.service(100));
+    try expectEqualStrings("A", writer.buffered());
+    try expect(uart.used);
 }
 
 test "input arriving on an idle line is sent from when it arrived" {
@@ -257,16 +257,19 @@ test "input arriving on an idle line is sent from when it arrived" {
     var input = try Console.testInput(&input_buffer, "x");
     var uart: Uart = .{ .bit_time = 10, .output = &writer, .input = .{ .io = std.testing.io, .queue = &input } };
 
-    try std.testing.expectEqual(null, uart.nextRxEdge(0));
-    try std.testing.expect(try uart.service(500));
+    try expectEqual(null, uart.nextRxEdge(0));
+    try expect(try uart.service(500));
     // a start bit from 500, then 'x' is 0x78, whose bit 3 is its first mark
-    try std.testing.expect(uart.rxHigh(505));
-    try std.testing.expectEqual(540, uart.nextRxEdge(505));
+    try expect(uart.rxHigh(505));
+    try expectEqual(540, uart.nextRxEdge(505));
     // the end of input
-    try std.testing.expect(!try uart.waitForInput(2000));
+    try expect(!try uart.waitForInput(2000));
 }
 
 const Console = @import("Console.zig");
 
 const std = @import("std");
 const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;

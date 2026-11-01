@@ -508,6 +508,9 @@ fn newFile(view: Sim.EditorView) void {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
 
 const dvui = @import("dvui");
 const gasim = @import("gasim");
@@ -535,7 +538,7 @@ test "keys go to the editor, and the color bar recolors words" {
     defer ui.stop();
     try testing.settle(ui.frame);
     try click("view-editor");
-    try std.testing.expectEqual(.editor, ui.view);
+    try expectEqual(.editor, ui.view);
 
     // a space is the editor's, not to run the chip
     try testing.writeText("i");
@@ -544,18 +547,18 @@ test "keys go to the editor, and the color bar recolors words" {
     try testing.settle(ui.frame);
     try testing.pressKey(.escape, .none);
     try testing.settle(ui.frame);
-    try std.testing.expect(!ui.running);
+    try expect(!ui.running);
     const arena = dvui.currentWindow().arena();
     var view = try ui.sim.editing(arena);
-    try std.testing.expectEqual(2, view.tokens.len);
-    try std.testing.expectEqualStrings("dup", view.tokens[0].text);
-    try std.testing.expectEqual(.normal, view.mode);
+    try expectEqual(2, view.tokens.len);
+    try expectEqualStrings("dup", view.tokens[0].text);
+    try expectEqual(.normal, view.mode);
 
     try testing.pressKey(.home, .none);
     try testing.pressKey(.r, .lcontrol);
     try testing.settle(ui.frame);
     view = try ui.sim.editing(arena);
-    try std.testing.expectEqual(.red, view.tokens[0].color);
+    try expectEqual(.red, view.tokens[0].color);
     try click("swatch-red");
     try ui.saveImage(&w, "editor.png");
 
@@ -564,10 +567,10 @@ test "keys go to the editor, and the color bar recolors words" {
     defer std.testing.allocator.free(blocks);
     ui.view = .chip;
     try ui.open("blocks.cf", blocks, &.{0}, null);
-    try std.testing.expectEqual(.editor, ui.view);
+    try expectEqual(.editor, ui.view);
     try testing.settle(ui.frame);
     view = try ui.sim.editing(dvui.currentWindow().arena());
-    try std.testing.expectEqualStrings("dup", view.tokens[0].text);
+    try expectEqualStrings("dup", view.tokens[0].text);
 }
 
 test "the blocks list searches the blocks" {
@@ -577,9 +580,9 @@ test "the blocks list searches the blocks" {
     defer ui.stop();
     ui.view = .editor;
     try testing.settle(ui.frame);
-    try std.testing.expect(matches(.{ .block = 3, .read_only = false, .empty = false, .text = "dup Drop" }, "drop"));
-    try std.testing.expect(matches(.{ .block = 3, .read_only = false, .empty = true, .text = "" }, "3"));
-    try std.testing.expect(!matches(.{ .block = 3, .read_only = false, .empty = false, .text = "dup" }, "swap"));
+    try expect(matches(.{ .block = 3, .read_only = false, .empty = false, .text = "dup Drop" }, "drop"));
+    try expect(matches(.{ .block = 3, .read_only = false, .empty = true, .text = "" }, "3"));
+    try expect(!matches(.{ .block = 3, .read_only = false, .empty = false, .text = "dup" }, "swap"));
     try click("block-0");
-    try std.testing.expectEqual(0, ui.sim.editor.block);
+    try expectEqual(0, ui.sim.editor.block);
 }

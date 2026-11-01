@@ -2191,17 +2191,17 @@ const TestTui = struct {
         var buffer: [4]u8 = undefined;
         const len = try std.unicode.utf8Encode(codepoint, &buffer);
         const text: ?[]const u8 = if (codepoint < 0x80) buffer[0..len] else null;
-        try std.testing.expect(try self.tui.handle(.{ .key_press = .{ .codepoint = codepoint, .text = text } }));
+        try expect(try self.tui.handle(.{ .key_press = .{ .codepoint = codepoint, .text = text } }));
         self.draw();
     }
 
     fn pressWith(self: *TestTui, codepoint: u21, mods: vaxis.Key.Modifiers) !void {
-        try std.testing.expect(try self.tui.handle(.{ .key_press = .{ .codepoint = codepoint, .mods = mods } }));
+        try expect(try self.tui.handle(.{ .key_press = .{ .codepoint = codepoint, .mods = mods } }));
         self.draw();
     }
 
     fn click(self: *TestTui, col: u16, row: u16, kind: vaxis.Mouse.Type) !void {
-        try std.testing.expect(try self.tui.handle(.{ .mouse = .{ .col = @intCast(col), .row = @intCast(row), .button = .left, .mods = .{}, .type = kind } }));
+        try expect(try self.tui.handle(.{ .mouse = .{ .col = @intCast(col), .row = @intCast(row), .button = .left, .mods = .{}, .type = kind } }));
         self.draw();
     }
 
@@ -2222,76 +2222,76 @@ test "draws the chip, console and selected node" {
     defer t.deinit();
     t.draw();
 
-    try std.testing.expect(try t.shows(0, "1 chip 8x18"));
-    try std.testing.expect(try t.shows(0, "3 node 000"));
-    try std.testing.expect(try t.shows(1, "700 701"));
-    try std.testing.expect(try t.shows(8, "000 001"));
-    try std.testing.expect(try t.shows(10, "2 console 000:up"));
-    try std.testing.expect(try t.shows(14, "RAM"));
-    try std.testing.expect(try t.shows(15, ">000"));
+    try expect(try t.shows(0, "1 chip 8x18"));
+    try expect(try t.shows(0, "3 node 000"));
+    try expect(try t.shows(1, "700 701"));
+    try expect(try t.shows(8, "000 001"));
+    try expect(try t.shows(10, "2 console 000:up"));
+    try expect(try t.shows(14, "RAM"));
+    try expect(try t.shows(15, ">000"));
 
     // stepping follows the node that runs, and the console shows its output
     try t.press('s');
     try t.press('s');
-    try std.testing.expect(try t.shows(0, "3 node 001"));
+    try expect(try t.shows(0, "3 node 001"));
     for (0..4) |_| try t.press('n');
     try t.press(vaxis.Key.left);
-    try std.testing.expect(try t.shows(0, "3 node 000"));
+    try expect(try t.shows(0, "3 node 000"));
     // node 000 writes to the console, which takes it in the next round
     try t.press('S');
     try t.press('S');
-    try std.testing.expect(try t.shows(11, "H"));
+    try expect(try t.shows(11, "H"));
 
     // hiding and zooming panels
     try t.press('1');
-    try std.testing.expect(try t.shows(0, "2 console"));
+    try expect(try t.shows(0, "2 console"));
     try t.press('1');
     // tab moves on from the map to the console, which keeps tab, and alt
     // with a digit moves to a panel from anywhere
     t.tui.focus = .map;
     try t.press(vaxis.Key.tab);
-    try std.testing.expectEqual(.console, t.tui.focus);
+    try expectEqual(.console, t.tui.focus);
     try t.press(vaxis.Key.tab);
-    try std.testing.expectEqual(.console, t.tui.focus);
+    try expectEqual(.console, t.tui.focus);
     try t.pressWith('3', .{ .alt = true });
-    try std.testing.expectEqual(.node, t.tui.focus);
+    try expectEqual(.node, t.tui.focus);
     try t.press('f');
-    try std.testing.expect(!try t.shows(0, "1 chip"));
-    try std.testing.expect(try t.shows(0, "3 node 000"));
+    try expect(!try t.shows(0, "1 chip"));
+    try expect(try t.shows(0, "3 node 000"));
     try t.press(vaxis.Key.page_down);
-    try std.testing.expect(t.tui.memory_scroll != null);
+    try expect(t.tui.memory_scroll != null);
     try t.press('g');
-    try std.testing.expectEqual(null, t.tui.memory_scroll);
+    try expectEqual(null, t.tui.memory_scroll);
     try t.press(vaxis.Key.escape);
-    try std.testing.expect(try t.shows(0, "1 chip"));
+    try expect(try t.shows(0, "1 chip"));
 
     // borders move by dragging, or by tapping them and then where they go
     const border = t.tui.column_border.?;
     try t.click(border, 5, .press);
     try t.click(border - 10, 5, .drag);
     try t.click(border - 10, 5, .release);
-    try std.testing.expectEqual(border - 10, t.tui.column_border.?);
-    try std.testing.expectEqual(null, t.tui.message);
+    try expectEqual(border - 10, t.tui.column_border.?);
+    try expectEqual(null, t.tui.message);
     try t.click(border - 10, 5, .press);
     try t.click(border - 10, 5, .release);
     try t.click(border - 4, 5, .press);
     try t.click(border - 4, 5, .release);
-    try std.testing.expectEqual(border - 4, t.tui.column_border.?);
+    try expectEqual(border - 4, t.tui.column_border.?);
     // clicking a node selects it
     try t.click(1, 8, .press);
-    try std.testing.expectEqual(.map, t.tui.focus);
-    try std.testing.expect(try t.shows(0, "3 node 000"));
+    try expectEqual(.map, t.tui.focus);
+    try expect(try t.shows(0, "3 node 000"));
 
     // typing into the console, after the map
     try t.press(vaxis.Key.tab);
-    try std.testing.expectEqual(.console, t.tui.focus);
+    try expectEqual(.console, t.tui.focus);
     try t.press('h');
     try t.press('i');
-    try std.testing.expect(try t.shows(27, "> hi"));
+    try expect(try t.shows(27, "> hi"));
     try t.press(vaxis.Key.enter);
     var sent: [3]u8 = undefined;
-    try std.testing.expectEqual(3, try t.input.get(std.testing.io, &sent, 0));
-    try std.testing.expectEqualStrings("hi\n", &sent);
+    try expectEqual(3, try t.input.get(std.testing.io, &sent, 0));
+    try expectEqualStrings("hi\n", &sent);
 }
 
 test "help lists the keys, and scrolls" {
@@ -2303,35 +2303,35 @@ test "help lists the keys, and scrolls" {
     try t.press('?');
     // more below, after the title in the middle of the screen
     const more = (120 - (help_key_width + 60)) / 2 + 2 + "help ".len;
-    try std.testing.expect(try t.shows(0, "help #"));
-    try std.testing.expectEqualStrings("↓", t.screen.readCell(more, 0).?.char.grapheme);
-    try std.testing.expect(try t.shows(1, "everywhere"));
-    try std.testing.expect(try t.shows(2, "F1, ?"));
+    try expect(try t.shows(0, "help #"));
+    try expectEqualStrings("↓", t.screen.readCell(more, 0).?.char.grapheme);
+    try expect(try t.shows(1, "everywhere"));
+    try expect(try t.shows(2, "F1, ?"));
     // keys scroll it rather than reaching the chip
     try t.press('s');
-    try std.testing.expectEqual(0, t.tui.chip.steps);
+    try expectEqual(0, t.tui.chip.steps);
     try t.press('j');
-    try std.testing.expect(try t.shows(1, "F1, ?"));
+    try expect(try t.shows(1, "F1, ?"));
     try t.press('G');
-    try std.testing.expect(try t.shows(27, "esc, q, ?, F1"));
-    try std.testing.expectEqualStrings("↑", t.screen.readCell(more, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("─", t.screen.readCell(more + 1, 0).?.char.grapheme);
-    try std.testing.expect(try t.tui.handle(.{ .mouse = .{ .col = 50, .row = 10, .button = .wheel_up, .mods = .{}, .type = .press } }));
-    try std.testing.expectEqual(help_rows - t.tui.help_page - 3, t.tui.help_scroll.?);
+    try expect(try t.shows(27, "esc, q, ?, F1"));
+    try expectEqualStrings("↑", t.screen.readCell(more, 0).?.char.grapheme);
+    try expectEqualStrings("─", t.screen.readCell(more + 1, 0).?.char.grapheme);
+    try expect(try t.tui.handle(.{ .mouse = .{ .col = 50, .row = 10, .button = .wheel_up, .mods = .{}, .type = .press } }));
+    try expectEqual(help_rows - t.tui.help_page - 3, t.tui.help_scroll.?);
     try t.press('g');
-    try std.testing.expectEqual(0, t.tui.help_scroll.?);
+    try expectEqual(0, t.tui.help_scroll.?);
     try t.press(vaxis.Key.escape);
-    try std.testing.expectEqual(null, t.tui.help_scroll);
-    try std.testing.expect(try t.shows(0, "1 chip"));
+    try expectEqual(null, t.tui.help_scroll);
+    try expect(try t.shows(0, "1 chip"));
 
     // ? is typed into the console, and F1 shows the help from it
     try t.pressWith('2', .{ .alt = true });
     try t.press('?');
-    try std.testing.expectEqualStrings("?", t.tui.input[0..t.tui.input_len]);
+    try expectEqualStrings("?", t.tui.input[0..t.tui.input_len]);
     try t.press(vaxis.Key.f1);
-    try std.testing.expect(try t.shows(1, "everywhere"));
+    try expect(try t.shows(1, "everywhere"));
     try t.press(vaxis.Key.f1);
-    try std.testing.expectEqual(null, t.tui.help_scroll);
+    try expectEqual(null, t.tui.help_scroll);
 }
 
 test "escapes from the console, and ends moving a border with a key" {
@@ -2343,23 +2343,23 @@ test "escapes from the console, and ends moving a border with a key" {
     // the cursor shows only in the console
     t.tui.focus = .console;
     t.draw();
-    try std.testing.expect(t.screen.cursor_vis);
+    try expect(t.screen.cursor_vis);
     try t.pressWith('1', .{ .alt = true });
-    try std.testing.expect(!t.screen.cursor_vis);
+    try expect(!t.screen.cursor_vis);
 
     // escape from a zoomed console shows the map again
     t.tui.focus = .console;
     t.tui.zoomed = .console;
     try t.press(vaxis.Key.escape);
-    try std.testing.expectEqual(null, t.tui.zoomed);
-    try std.testing.expectEqual(.map, t.tui.focus);
-    try std.testing.expect(try t.shows(0, "1 chip"));
+    try expectEqual(null, t.tui.zoomed);
+    try expectEqual(.map, t.tui.focus);
+    try expect(try t.shows(0, "1 chip"));
 
     // escape with the map hidden goes to the node
     t.tui.focus = .console;
     t.tui.shown.remove(.map);
     try t.press(vaxis.Key.escape);
-    try std.testing.expectEqual(.node, t.tui.focus);
+    try expectEqual(.node, t.tui.focus);
     t.tui.shown.insert(.map);
     t.draw();
 
@@ -2369,7 +2369,7 @@ test "escapes from the console, and ends moving a border with a key" {
     try t.click(border, 5, .release);
     try t.press('j');
     try t.click(1, 8, .press);
-    try std.testing.expectEqual(border, t.tui.column_border.?);
+    try expectEqual(border, t.tui.column_border.?);
 }
 
 test "wraps the console, ends its input, and keeps sizes on screen" {
@@ -2382,44 +2382,44 @@ test "wraps the console, ends its input, and keeps sizes on screen" {
     try t.output.writeAll(&long);
     try t.output.writeAll("\r\nend\n");
     t.draw();
-    try std.testing.expect(try t.shows(13, "#aaaa "));
-    try std.testing.expect(try t.shows(14, "#end "));
+    try expect(try t.shows(13, "#aaaa "));
+    try expect(try t.shows(14, "#end "));
     // scrolling back past the start stops at the first page
     t.tui.console_scroll = 100;
     t.draw();
-    try std.testing.expectEqual(0, t.tui.console_scroll);
+    try expectEqual(0, t.tui.console_scroll);
 
     // ctrl+d sends text typed so far, and then ends the input
     t.tui.focus = .console;
     try t.press('h');
     const ctrl_d: Event = .{ .key_press = .{ .codepoint = 'd', .mods = .{ .ctrl = true } } };
-    try std.testing.expect(try t.tui.handle(ctrl_d));
-    try std.testing.expect(try t.tui.handle(ctrl_d));
+    try expect(try t.tui.handle(ctrl_d));
+    try expect(try t.tui.handle(ctrl_d));
     var sent: [2]u8 = undefined;
-    try std.testing.expectEqual(1, try t.input.get(std.testing.io, &sent, 0));
-    try std.testing.expectEqual('h', sent[0]);
-    try std.testing.expectError(error.Closed, t.input.get(std.testing.io, &sent, 0));
+    try expectEqual(1, try t.input.get(std.testing.io, &sent, 0));
+    try expectEqual('h', sent[0]);
+    try expectError(error.Closed, t.input.get(std.testing.io, &sent, 0));
     try t.press('x');
     try t.press(vaxis.Key.enter);
-    try std.testing.expectEqualStrings("the console's input has ended", t.tui.message.?);
+    try expectEqualStrings("the console's input has ended", t.tui.message.?);
 
     // stepping waits for a pause
     t.tui.focus = .map;
     t.tui.running = true;
     try t.press('s');
-    try std.testing.expectEqualStrings("pause with space to step", t.tui.message.?);
+    try expectEqualStrings("pause with space to step", t.tui.message.?);
     t.tui.running = false;
 
     // growing a panel past the screen, and back
     for (0..100) |_| try t.press('>');
     try t.press('<');
-    try std.testing.expectEqual(120 - 12 - 2, t.tui.column_border.?);
+    try expectEqual(120 - 12 - 2, t.tui.column_border.?);
 
     // titles stay within their panels
     t.tui.left_width = 12;
     t.draw();
-    try std.testing.expect(try t.shows(t.tui.row_border.?, "2 console"));
-    try std.testing.expect(!try t.shows(t.tui.row_border.?, "000:up"));
+    try expect(try t.shows(t.tui.row_border.?, "2 console"));
+    try expect(!try t.shows(t.tui.row_border.?, "000:up"));
 }
 
 test "stops at breakpoints set in the memory listing" {
@@ -2431,24 +2431,24 @@ test "stops at breakpoints set in the memory listing" {
 
     // on the current word, and then the next one
     try t.press('b');
-    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(0, 0)));
-    try std.testing.expect(try t.shows(15, "#>000"));
+    try expect(t.tui.chip.breakpoints.contains(.init(0, 0)));
+    try expect(try t.shows(15, "#>000"));
     try t.press(vaxis.Key.down);
     try t.press('b');
-    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(0, 1)));
+    try expect(t.tui.chip.breakpoints.contains(.init(0, 1)));
     // and cleared by clicking the left edge
     const left: u16 = @intCast(t.tui.memory_window.?.x_off);
     try t.click(left, 16, .press);
-    try std.testing.expect(!t.tui.chip.breakpoints.contains(.init(0, 1)));
+    try expect(!t.tui.chip.breakpoints.contains(.init(0, 1)));
     // clicking a word moves the cursor to it
     try t.click(left + 4, 17, .press);
-    try std.testing.expectEqual(3, t.tui.memory_cursor);
+    try expectEqual(3, t.tui.memory_cursor);
 
     // running stops when the node loops back
     t.tui.running = true;
     try t.tui.run();
-    try std.testing.expect(!t.tui.running);
-    try std.testing.expectEqualStrings("node 000 reached 000", t.tui.message.?);
+    try expect(!t.tui.running);
+    try expectEqualStrings("node 000 reached 000", t.tui.message.?);
 }
 
 test "breakpoints need a word in memory" {
@@ -2459,13 +2459,13 @@ test "breakpoints need a word in memory" {
     // node 001 is waiting for code from its ports
     t.tui.select(1);
     try t.press('b');
-    try std.testing.expectEqualStrings("move to a word in memory first", t.tui.message.?);
-    try std.testing.expectEqual(0, t.tui.chip.breakpoints.len);
+    try expectEqualStrings("move to a word in memory first", t.tui.message.?);
+    try expectEqual(0, t.tui.chip.breakpoints.len);
 
     // moving down starts at its first word
     try t.press('j');
     try t.press('b');
-    try std.testing.expect(t.tui.chip.breakpoints.contains(.init(1, 0)));
+    try expect(t.tui.chip.breakpoints.contains(.init(1, 0)));
 }
 
 test "stops at watched transfers" {
@@ -2474,33 +2474,33 @@ test "stops at watched transfers" {
     defer t.deinit();
     t.tui.focus = .node;
     t.draw();
-    try std.testing.expect(try t.shows(12, "watch none"));
+    try expect(try t.shows(12, "watch none"));
 
     // writes to up, and reads from left
     try t.press('w');
     try t.press('U');
     try t.press('w');
     try t.press('l');
-    try std.testing.expect(try t.shows(12, "watch writes up, reads left"));
+    try expect(try t.shows(12, "watch writes up, reads left"));
     // another key leaves the watches as they were
     try t.press('w');
     try t.press('x');
-    try std.testing.expectEqual(2, t.tui.chip.watches.len);
+    try expectEqual(2, t.tui.chip.watches.len);
 
     // the console reads the write in the round after
     t.tui.running = true;
     try t.tui.run();
-    try std.testing.expectEqualStrings("node 000 wrote 00048 to up", t.tui.message.?);
+    try expectEqualStrings("node 000 wrote 00048 to up", t.tui.message.?);
 }
 
 test memoryRow {
-    try std.testing.expectEqual(1, memoryRow(Address.fromWord(0)));
-    try std.testing.expectEqual(64, memoryRow(Address.fromWord(0x3f)));
+    try expectEqual(1, memoryRow(Address.fromWord(0)));
+    try expectEqual(64, memoryRow(Address.fromWord(0x3f)));
     // RAM repeats at x040
-    try std.testing.expectEqual(1, memoryRow(Address.fromWord(0x40)));
-    try std.testing.expectEqual(66, memoryRow(Address.fromWord(0x80)));
-    try std.testing.expectEqual(76, memoryRow(Address.fromWord(0xca)));
-    try std.testing.expectEqual(null, memoryRow(Address.fromWord(0x1d5)));
+    try expectEqual(1, memoryRow(Address.fromWord(0x40)));
+    try expectEqual(66, memoryRow(Address.fromWord(0x80)));
+    try expectEqual(76, memoryRow(Address.fromWord(0xca)));
+    try expectEqual(null, memoryRow(Address.fromWord(0x1d5)));
 }
 
 test "goes back before steps" {
@@ -2508,28 +2508,28 @@ test "goes back before steps" {
     try t.init("begin 1 + again");
     defer t.deinit();
     try t.press('z');
-    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+    try expectEqualStrings("nothing to go back to", t.tui.message.?);
 
     for (0..3) |_| try t.press('n');
-    try std.testing.expectEqual(3, t.tui.chip.steps);
+    try expectEqual(3, t.tui.chip.steps);
     try t.press('z');
-    try std.testing.expectEqual(2, t.tui.chip.steps);
-    try std.testing.expectEqualStrings("back to 2 steps", t.tui.message.?);
+    try expectEqual(2, t.tui.chip.steps);
+    try expectEqualStrings("back to 2 steps", t.tui.message.?);
     // the test history only keeps the last two
     try t.press('z');
-    try std.testing.expectEqual(1, t.tui.chip.steps);
+    try expectEqual(1, t.tui.chip.steps);
     try t.press('z');
-    try std.testing.expectEqual(1, t.tui.chip.steps);
-    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+    try expectEqual(1, t.tui.chip.steps);
+    try expectEqualStrings("nothing to go back to", t.tui.message.?);
 
     // and before running
     try t.press(' ');
     try t.tui.run();
     try t.press('z');
-    try std.testing.expectEqualStrings("pause with space to go back", t.tui.message.?);
+    try expectEqualStrings("pause with space to go back", t.tui.message.?);
     try t.press(' ');
     try t.press('z');
-    try std.testing.expectEqual(1, t.tui.chip.steps);
+    try expectEqual(1, t.tui.chip.steps);
 }
 
 test "steps that change nothing are not gone back to" {
@@ -2542,9 +2542,9 @@ test "steps that change nothing are not gone back to" {
     try t.press('S');
     try t.press('s');
     try t.press('z');
-    try std.testing.expectEqualStrings("nothing to go back to", t.tui.message.?);
+    try expectEqualStrings("nothing to go back to", t.tui.message.?);
     // each saved over the one before, so only one was allocated
-    try std.testing.expect(t.tui.history[0] != null and t.tui.history[1] == null);
+    try expect(t.tui.history[0] != null and t.tui.history[1] == null);
 }
 
 const gasim = @import("gasim");
@@ -2566,6 +2566,11 @@ const aforth = @import("aforth.zig");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
 const vaxis = @import("vaxis");
 
 test "the aaforth panel interprets arrayForth 3 at the selected node" {
@@ -2584,50 +2589,50 @@ test "the aaforth panel interprets arrayForth 3 at the selected node" {
     t.tui.shown.insert(.forth);
     t.tui.focus = .forth;
     t.draw();
-    try std.testing.expect(try t.shows(19, "4 aforth"));
+    try expect(try t.shows(19, "4 aforth"));
 
     // NODE selects the node, and LIT pushes onto its stack
     for ("707 NODE x15. LIT") |c| try t.press(c);
-    try std.testing.expect(try t.shows(27, "000> 707 NODE x15. LIT"));
+    try expect(try t.shows(27, "000> 707 NODE x15. LIT"));
     try t.press(vaxis.Key.enter);
     const i = t.chip.layout.index(707).?;
-    try std.testing.expectEqual(i, t.tui.selected);
-    try std.testing.expectEqual(0x15, t.chip.nodes[i].data_stack.t);
-    try std.testing.expect(try t.shows(0, "3 node 707"));
-    try std.testing.expect(try t.shows(20, "000> 707 NODE x15. LIT"));
-    try std.testing.expect(try t.shows(21, " ok"));
+    try expectEqual(i, t.tui.selected);
+    try expectEqual(0x15, t.chip.nodes[i].data_stack.t);
+    try expect(try t.shows(0, "3 node 707"));
+    try expect(try t.shows(20, "000> 707 NODE x15. LIT"));
+    try expect(try t.shows(21, " ok"));
 
     // the selected node is the target, and errors are shown
     for ("nothing") |c| try t.press(c);
     try t.press(vaxis.Key.enter);
-    try std.testing.expect(try t.shows(23, "error: UnknownWord at 'nothing'"));
+    try expect(try t.shows(23, "error: UnknownWord at 'nothing'"));
 
     // up recalls lines typed before
     try t.press(vaxis.Key.up);
     try t.press(vaxis.Key.up);
-    try std.testing.expect(try t.shows(27, "707> 707 NODE x15. LIT"));
+    try expect(try t.shows(27, "707> 707 NODE x15. LIT"));
 
     // and down goes back to the line being typed
     try t.press(vaxis.Key.down);
     try t.press(vaxis.Key.down);
-    try std.testing.expect(!try t.shows(27, "707> 707"));
+    try expect(!try t.shows(27, "707> 707"));
 
     // tab completes a word, as far as the words it could be agree, and
     // lists them when that adds nothing
     for ("RDU") |c| try t.press(c);
     try t.press(vaxis.Key.tab);
-    try std.testing.expect(try t.shows(27, "707> RDUP "));
+    try expect(try t.shows(27, "707> RDUP "));
     for ("R2") |c| try t.press(c);
     try t.press(vaxis.Key.tab);
-    try std.testing.expect(try t.shows(27, "707> RDUP R2"));
-    try std.testing.expect(try t.shows(24, " R2* R2/"));
+    try expect(try t.shows(27, "707> RDUP R2"));
+    try expect(try t.shows(24, " R2* R2/"));
     for (0..6) |_| try t.press(vaxis.Key.backspace);
-    try std.testing.expect(try t.shows(27, "707> "));
+    try expect(try t.shows(27, "707> "));
 
     // and the chip can go back to before a line, as before a step
     try t.press(vaxis.Key.escape);
     try t.press('z');
-    try std.testing.expectEqual(0, t.chip.nodes[i].data_stack.t);
+    try expectEqual(0, t.chip.nodes[i].data_stack.t);
 }
 
 test "alt or ctrl and a digit focus a panel, showing it" {
@@ -2636,18 +2641,18 @@ test "alt or ctrl and a digit focus a panel, showing it" {
     defer t.deinit();
     t.draw();
     try t.press('1');
-    try std.testing.expect(!t.tui.shown.contains(.map));
+    try expect(!t.tui.shown.contains(.map));
     t.tui.focus = .console;
     try t.pressWith('1', .{ .ctrl = true });
-    try std.testing.expectEqual(.map, t.tui.focus);
-    try std.testing.expect(t.tui.shown.contains(.map));
+    try expectEqual(.map, t.tui.focus);
+    try expect(t.tui.shown.contains(.map));
     // a panel filling the screen gives way to the one chosen
     t.tui.zoomed = .map;
     try t.pressWith('3', .{ .alt = true });
-    try std.testing.expectEqual(.node, t.tui.zoomed);
+    try expectEqual(.node, t.tui.zoomed);
     // there is no aforth panel without a session
     try t.pressWith('4', .{ .alt = true });
-    try std.testing.expectEqual(.node, t.tui.focus);
+    try expectEqual(.node, t.tui.focus);
 }
 
 test "a short screen leaves text panels no rows" {
@@ -2671,8 +2676,8 @@ test "tiles are no larger than the largest" {
     // too short for comfortable tiles, but wide
     const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 300, .height = 8, .screen = undefined };
     const tiles: Tiles = .fit(win, layout, .auto);
-    try std.testing.expectEqual(Tiles.largest.width, tiles.width);
-    try std.testing.expectEqual(3, tiles.height);
+    try expectEqual(Tiles.largest.width, tiles.width);
+    try expectEqual(3, tiles.height);
 }
 
 test "the map shows nodes as tiles when it has room" {
@@ -2683,24 +2688,24 @@ test "the map shows nodes as tiles when it has room" {
     try t.press('f');
     for (0..3) |_| try t.press('S');
     const tiles = t.tui.tiles;
-    try std.testing.expectEqual(16, tiles.width);
-    try std.testing.expectEqual(6, tiles.height);
+    try expectEqual(16, tiles.width);
+    try expectEqual(6, tiles.height);
 
     // node 000 is at the bottom left, inside the panel's border, with what
     // it is doing and its registers
     const row: u16 = 1 + tiles.height + tiles.gap_y;
-    try std.testing.expect(try t.shows(row, "000 code"));
-    try std.testing.expect(try t.shows(row + 1, "T0 S0"));
+    try expect(try t.shows(row, "000 code"));
+    try expect(try t.shows(row + 1, "T0 S0"));
     // with labels in their own colour, and values not
-    try std.testing.expectEqual(colors.label.fg, t.screen.readCell(1, row + 1).?.style.fg);
-    try std.testing.expectEqual(vaxis.Color.default, t.screen.readCell(2, row + 1).?.style.fg);
+    try expectEqual(colors.label.fg, t.screen.readCell(1, row + 1).?.style.fg);
+    try expectEqual(vaxis.Color.default, t.screen.readCell(2, row + 1).?.style.fg);
     // and every node in view, so nothing out of it to show in the title
-    try std.testing.expectEqualStrings("─", t.screen.readCell(3 + "1 chip 2x3".len, 0).?.char.grapheme);
+    try expectEqualStrings("─", t.screen.readCell(3 + "1 chip 2x3".len, 0).?.char.grapheme);
 
     // nodes waiting for code from each other, as after reset, have no
     // arrows between them
-    try std.testing.expectEqualStrings(" ", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
-    try std.testing.expectEqualStrings(" ", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
+    try expectEqualStrings(" ", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
+    try expectEqualStrings(" ", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
 
     // arrows between tiles point the way words go between nodes
     const chip = &t.chip;
@@ -2710,15 +2715,15 @@ test "the map shows nodes as tiles when it has room" {
     const up = chip.nodes[0].ports[@backingInt(Chip.portToward(0, 0, .north))];
     up.port.?.state = .{ .reading = up.side.other() };
     t.draw();
-    try std.testing.expectEqualStrings("▸", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
-    try std.testing.expectEqualStrings("▴", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
+    try expectEqualStrings("▸", t.screen.readCell(1 + tiles.width + tiles.gap_x / 2, row + tiles.height / 2).?.char.grapheme);
+    try expectEqualStrings("▴", t.screen.readCell(1 + tiles.width / 2, row - 1).?.char.grapheme);
 
     // and clicking a tile selects its node
     try t.click(1 + tiles.width + tiles.gap_x + 2, 2, .press);
-    try std.testing.expectEqual(chip.layout.index(101).?, t.tui.selected);
+    try expectEqual(chip.layout.index(101).?, t.tui.selected);
     // but not the gap beside it
     try t.click(1 + tiles.width, row + 1, .press);
-    try std.testing.expectEqual(chip.layout.index(101).?, t.tui.selected);
+    try expectEqual(chip.layout.index(101).?, t.tui.selected);
 }
 
 test "the map scrolls through tiles too large to show every node" {
@@ -2727,33 +2732,33 @@ test "the map scrolls through tiles too large to show every node" {
     defer t.deinit();
     t.tui.focus = .map;
     try t.press('f');
-    try std.testing.expectEqual(Tiles.comfortable, t.tui.tiles);
+    try expectEqual(Tiles.comfortable, t.tui.tiles);
     // with the north edge in view, clicking the room below the last row in
     // view selects nothing
     for (0..7) |_| try t.press(vaxis.Key.up);
     const selected = t.tui.selected;
-    try std.testing.expect(t.tui.windows.get(.map).?.height > 5 * 5);
+    try expect(t.tui.windows.get(.map).?.height > 5 * 5);
     try t.click(2, 1 + 5 * 5, .press);
-    try std.testing.expectEqual(selected, t.tui.selected);
+    try expectEqual(selected, t.tui.selected);
     for (0..7) |_| try t.press(vaxis.Key.down);
     // eight columns of five rows fit, and node 000 at the bottom left is in
     // view, in the fifth
-    try std.testing.expect(try t.shows(1 + 4 * 5, "000 "));
-    try std.testing.expect(!try t.shows(1, "700 "));
+    try expect(try t.shows(1 + 4 * 5, "000 "));
+    try expect(!try t.shows(1, "700 "));
     // and the title shows there are more nodes north and east
     const after_title = 3 + "1 chip 8x18".len;
-    try std.testing.expectEqualStrings("↑", t.screen.readCell(after_title, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("→", t.screen.readCell(after_title + 1, 0).?.char.grapheme);
+    try expectEqualStrings("↑", t.screen.readCell(after_title, 0).?.char.grapheme);
+    try expectEqualStrings("→", t.screen.readCell(after_title + 1, 0).?.char.grapheme);
 
     // the view follows the selected node to the top right
     for (0..17) |_| try t.press(vaxis.Key.right);
     for (0..7) |_| try t.press(vaxis.Key.up);
-    try std.testing.expectEqual(t.chip.layout.index(717).?, t.tui.selected);
-    try std.testing.expect(try t.shows(1, "717 "));
-    try std.testing.expect(try t.shows(1, "710 "));
-    try std.testing.expect(!try t.shows(1, "709 "));
-    try std.testing.expectEqualStrings("↓", t.screen.readCell(after_title, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("←", t.screen.readCell(after_title + 1, 0).?.char.grapheme);
+    try expectEqual(t.chip.layout.index(717).?, t.tui.selected);
+    try expect(try t.shows(1, "717 "));
+    try expect(try t.shows(1, "710 "));
+    try expect(!try t.shows(1, "709 "));
+    try expectEqualStrings("↓", t.screen.readCell(after_title, 0).?.char.grapheme);
+    try expectEqualStrings("←", t.screen.readCell(after_title + 1, 0).?.char.grapheme);
 }
 
 test "t chooses the map's tiles" {
@@ -2762,16 +2767,16 @@ test "t chooses the map's tiles" {
     defer t.deinit();
     t.draw();
     // too little room for tiles of registers
-    try std.testing.expectEqual(1, t.tui.tiles.height);
+    try expectEqual(1, t.tui.tiles.height);
     try t.press('t');
-    try std.testing.expect(try t.shows(0, "1 chip 8x18 numbers"));
-    try std.testing.expectEqual(Tiles.compact, t.tui.tiles);
+    try expect(try t.shows(0, "1 chip 8x18 numbers"));
+    try expectEqual(Tiles.compact, t.tui.tiles);
     // tiles of registers anyway, to scroll through
     try t.press('t');
-    try std.testing.expect(try t.shows(0, "1 chip 8x18 registers"));
-    try std.testing.expectEqual(Tiles.comfortable, t.tui.tiles);
+    try expect(try t.shows(0, "1 chip 8x18 registers"));
+    try expectEqual(Tiles.comfortable, t.tui.tiles);
     try t.press('t');
-    try std.testing.expectEqual(1, t.tui.tiles.height);
+    try expectEqual(1, t.tui.tiles.height);
 }
 
 /// whether a panel shows `text` on one of its rows, or in its title
@@ -2788,61 +2793,61 @@ test "the debug panel traces, lists breakpoints and watches, and goes back" {
     defer t.deinit();
     t.draw();
     // hidden until asked for
-    try std.testing.expectEqual(null, t.tui.windows.get(.debug));
+    try expectEqual(null, t.tui.windows.get(.debug));
     try t.pressWith('5', .{ .alt = true });
-    try std.testing.expectEqual(.debug, t.tui.focus);
-    try std.testing.expect(try panelShows(&t, .debug, "5 trace"));
+    try expectEqual(.debug, t.tui.focus);
+    try expect(try panelShows(&t, .debug, "5 trace"));
 
     // tracing the steps that run code, of every node or the selected one's
     try t.press('t');
-    try std.testing.expect(t.chip.trace != null);
+    try expect(t.chip.trace != null);
     for (0..3) |_| try t.press('n');
-    try std.testing.expect(try panelShows(&t, .debug, "5 trace, tracing"));
-    try std.testing.expect(try panelShows(&t, .debug, "000 000 "));
+    try expect(try panelShows(&t, .debug, "5 trace, tracing"));
+    try expect(try panelShows(&t, .debug, "000 000 "));
     t.tui.select(1);
     try t.press('o');
-    try std.testing.expect(!try panelShows(&t, .debug, "000 000 "));
-    try std.testing.expect(try panelShows(&t, .debug, "only node 001"));
+    try expect(!try panelShows(&t, .debug, "000 000 "));
+    try expect(try panelShows(&t, .debug, "only node 001"));
     // stopping keeps what was traced, until cleared
     try t.press('t');
-    try std.testing.expectEqual(null, t.chip.trace);
-    try std.testing.expect(t.tui.trace.?.writer.end > 0);
+    try expectEqual(null, t.chip.trace);
+    try expect(t.tui.trace.?.writer.end > 0);
     try t.press('c');
-    try std.testing.expectEqual(0, t.tui.trace.?.writer.end);
+    try expectEqual(0, t.tui.trace.?.writer.end);
 
     // the breakpoints and watches, to show or remove
     try t.press('l');
-    try std.testing.expect(try panelShows(&t, .debug, "none: b sets a breakpoint"));
+    try expect(try panelShows(&t, .debug, "none: b sets a breakpoint"));
     _ = try t.chip.breakpoints.toggle(.init(0, 1));
     _ = try t.chip.watches.toggle(.{ .index = 0, .direction = .right, .write = false });
     t.draw();
-    try std.testing.expect(try panelShows(&t, .debug, "5 breakpoints 1, watches 1"));
-    try std.testing.expect(try panelShows(&t, .debug, "000 stops at 001"));
-    try std.testing.expect(try panelShows(&t, .debug, "000 stops reading right"));
+    try expect(try panelShows(&t, .debug, "5 breakpoints 1, watches 1"));
+    try expect(try panelShows(&t, .debug, "000 stops at 001"));
+    try expect(try panelShows(&t, .debug, "000 stops reading right"));
     try t.press(vaxis.Key.enter);
-    try std.testing.expectEqual(0, t.tui.selected);
-    try std.testing.expectEqual(memoryRow(.fromWord(1)), t.tui.memory_cursor);
+    try expectEqual(0, t.tui.selected);
+    try expectEqual(memoryRow(.fromWord(1)), t.tui.memory_cursor);
     try t.press('j');
     try t.press('x');
-    try std.testing.expectEqual(0, t.chip.watches.len);
+    try expectEqual(0, t.chip.watches.len);
     // one on an I/O register, as --break can set, shows only its node
     _ = try t.chip.breakpoints.toggle(.init(1, 0x15d));
     t.tui.select(5);
     try t.press('j');
     try t.press(vaxis.Key.enter);
-    try std.testing.expectEqual(1, t.tui.selected);
+    try expectEqual(1, t.tui.selected);
     try t.press('X');
-    try std.testing.expectEqual(0, t.chip.breakpoints.len);
+    try expectEqual(0, t.chip.breakpoints.len);
 
     // the steps kept, the latest first, to go back to; the test keeps two
     try t.press('l');
-    try std.testing.expect(try panelShows(&t, .debug, "5 history 2 of 2"));
-    try std.testing.expect(try panelShows(&t, .debug, "before a step of one node"));
+    try expect(try panelShows(&t, .debug, "5 history 2 of 2"));
+    try expect(try panelShows(&t, .debug, "before a step of one node"));
     try t.press('j');
     try t.press('j');
     try t.press(vaxis.Key.enter);
-    try std.testing.expectEqual(1, t.chip.steps);
-    try std.testing.expectEqual(0, t.tui.history_len);
+    try expectEqual(1, t.chip.steps);
+    try expectEqual(0, t.tui.history_len);
 }
 
 test "the history shown while running keeps the run to go back before" {
@@ -2853,14 +2858,14 @@ test "the history shown while running keeps the run to go back before" {
     try t.pressWith('5', .{ .alt = true });
     try t.press('l');
     try t.press('l');
-    try std.testing.expectEqual(.history, t.tui.debug);
+    try expectEqual(.history, t.tui.debug);
     // drawn as the run starts, before the chip has changed
     try t.press(' ');
     try t.press('j');
     try t.tui.run();
     try t.press(' ');
     try t.press('z');
-    try std.testing.expectEqual(1, t.chip.steps);
+    try expectEqual(1, t.chip.steps);
 }
 
 test "steps say what they stepped" {
@@ -2868,12 +2873,12 @@ test "steps say what they stepped" {
     try t.init("begin 1 + again");
     defer t.deinit();
     try t.press('s');
-    try std.testing.expectEqualStrings("stepped node 000", t.tui.message.?);
+    try expectEqualStrings("stepped node 000", t.tui.message.?);
     try t.press('S');
-    try std.testing.expectEqualStrings("stepped each node that could run", t.tui.message.?);
+    try expectEqualStrings("stepped each node that could run", t.tui.message.?);
     t.tui.select(1);
     try t.press('n');
-    try std.testing.expectEqualStrings("node 001 is still waiting", t.tui.message.?);
+    try expectEqualStrings("node 001 is still waiting", t.tui.message.?);
 }
 
 test "the colorForth editor, on a screen of its own" {
@@ -2887,55 +2892,55 @@ test "the colorForth editor, on a screen of its own" {
     t.tui.options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
     t.draw();
 
-    try std.testing.expect(try t.shows(0, "1 chip"));
+    try expect(try t.shows(0, "1 chip"));
     try t.pressWith('6', .{ .alt = true });
-    try std.testing.expect(try t.shows(0, "6 colorforth  block 0  test.cf"));
-    try std.testing.expect(try t.shows(1, "An empty block"));
+    try expect(try t.shows(0, "6 colorforth  block 0  test.cf"));
+    try expect(try t.shows(1, "An empty block"));
     // the help opens at the editor's keys
     try t.press('?');
-    try std.testing.expect(try t.shows(1, "colorForth editor"));
+    try expect(try t.shows(1, "colorForth editor"));
     try t.press('q');
-    try std.testing.expect(try t.shows(0, "6 colorforth"));
+    try expect(try t.shows(0, "6 colorforth"));
     // typing a definition, and making its last word yellow
     for ("iinc 1 + ;") |c| try t.press(c);
-    try std.testing.expect(try t.shows(29, "insert"));
+    try expect(try t.shows(29, "insert"));
     try t.pressWith('y', .{ .ctrl = true });
     try t.press(vaxis.Key.escape);
-    try std.testing.expect(try t.shows(1, "inc 1 + ;"));
-    try std.testing.expectEqual(.execute, editor.tokens[3].tag);
-    try std.testing.expect(try t.shows(0, "block 0 +"));
-    try std.testing.expect(try t.shows(29, "4/256 cells"));
+    try expect(try t.shows(1, "inc 1 + ;"));
+    try expectEqual(.execute, editor.tokens[3].tag);
+    try expect(try t.shows(0, "block 0 +"));
+    try expect(try t.shows(29, "4/256 cells"));
     // a count before g goes to a block, rather than the keys of the map
     try t.press('1');
     try t.press('g');
-    try std.testing.expect(try t.shows(0, "block 1 +"));
-    try std.testing.expect(t.tui.shown.contains(.map));
+    try expect(try t.shows(0, "block 1 +"));
+    try expect(t.tui.shown.contains(.map));
     // named keys, and not keys with alt, or text pasted in normal mode
     try t.press(vaxis.Key.page_up);
-    try std.testing.expect(try t.shows(0, "block 0 +"));
+    try expect(try t.shows(0, "block 0 +"));
     try t.press(vaxis.Key.end);
-    try std.testing.expectEqual(3, editor.cursor);
+    try expectEqual(3, editor.cursor);
     try t.pressWith('h', .{ .alt = true });
-    try std.testing.expectEqual(3, editor.cursor);
-    try std.testing.expect(try t.tui.handle(.{ .key_press = .{ .codepoint = 'x', .text = "xxx" } }));
-    try std.testing.expectEqual(4, editor.len);
+    try expectEqual(3, editor.cursor);
+    try expect(try t.tui.handle(.{ .key_press = .{ .codepoint = 'x', .text = "xxx" } }));
+    try expectEqual(4, editor.len);
     // what the editor cannot do is said, and f hides blue words
     try t.press('9');
     try t.press('g');
-    try std.testing.expect(try t.shows(29, "there is no such block"));
+    try expect(try t.shows(29, "there is no such block"));
     try t.press('f');
-    try std.testing.expect(!t.tui.show_format);
+    try expect(!t.tui.show_format);
     try t.press('f');
 
     // and back to the chip, until alt+6 again
     try t.pressWith('1', .{ .alt = true });
-    try std.testing.expect(try t.shows(0, "1 chip"));
+    try expect(try t.shows(0, "1 chip"));
     try t.pressWith('6', .{ .alt = true });
 
     // quitting with blocks not saved takes asking twice
     try t.press('q');
-    try std.testing.expect(try t.shows(29, "q again quits"));
-    try std.testing.expect(!try t.tui.handle(.{ .key_press = .{ .codepoint = 'q', .text = "q" } }));
+    try expect(try t.shows(29, "q again quits"));
+    try expect(!try t.tui.handle(.{ .key_press = .{ .codepoint = 'q', .text = "q" } }));
 }
 
 test "compiling colorForth in the editor starts the chip again with its code" {
@@ -2968,9 +2973,9 @@ test "compiling colorForth in the editor starts the chip again with its code" {
     for ("main up b! begin @b !b end") |c| try t.press(c);
     try t.press(vaxis.Key.escape);
     try t.press('L');
-    try std.testing.expect(try t.shows(29, "with 1 nodes' code"));
+    try expect(try t.shows(29, "with 1 nodes' code"));
     const echo = try gasim.arrayforth.assemble("ASM[ # 0 NODE ERS # 0 org : main up b! begin @b !b again >BIN ]ASM", &diagnostic);
-    try std.testing.expectEqualSlices(gasim.Word, echo.ram[0..echo.len], t.chip.nodes[0].mem[0..echo.len]);
+    try expectEqualSlices(gasim.Word, echo.ram[0..echo.len], t.chip.nodes[0].mem[0..echo.len]);
 
     // an error moves the cursor to the word
     try t.press('0');
@@ -2983,6 +2988,6 @@ test "compiling colorForth in the editor starts the chip again with its code" {
     try t.press(vaxis.Key.escape);
     editor.first();
     try t.press('L');
-    try std.testing.expect(try t.shows(29, "UnknownWord at nothing in block 0"));
-    try std.testing.expectEqualStrings("nothing", editor.current().?.text());
+    try expect(try t.shows(29, "UnknownWord at nothing in block 0"));
+    try expectEqualStrings("nothing", editor.current().?.text());
 }

@@ -2815,6 +2815,11 @@ const Opcode = @import("opcodes.zig").Opcode;
 
 const std = @import("std");
 const Io = std.Io;
+const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
+const expectStringEndsWith = std.testing.expectStringEndsWith;
 
 fn expectAssembles(source: []const u8, expected: []const Word) !void {
     var diagnostic: Diagnostic = .{};
@@ -2822,12 +2827,12 @@ fn expectAssembles(source: []const u8, expected: []const Word) !void {
         std.debug.print("{t} at line {d} '{s}'\n", .{ err, diagnostic.line, diagnostic.token });
         return err;
     };
-    try std.testing.expectEqualSlices(Word, expected, program.ram[0..program.len]);
+    try expectEqualSlices(Word, expected, program.ram[0..program.len]);
 }
 
-fn expectError(expected: Error, source: []const u8) !void {
+fn expectAssembleError(expected: Error, source: []const u8) !void {
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(expected, assemble(source, &diagnostic));
+    try expectError(expected, assemble(source, &diagnostic));
 }
 
 fn opcodes(slot_0: Opcode, slot_1: Opcode, slot_2: Opcode, slot_3: Opcode) Word {
@@ -2839,19 +2844,19 @@ fn jumpWord(slot_0: Opcode, slot_1: Opcode, slot_2: Opcode, slot: Slot, destinat
 }
 
 test parseNumber {
-    try std.testing.expectEqual(Number{ .single = 708 }, (try parseNumber("708", 10)).?);
-    try std.testing.expectEqual(Number{ .single = -5 }, (try parseNumber("-5", 10)).?);
-    try std.testing.expectEqual(Number{ .double = 17 }, (try parseNumber("17.", 10)).?);
+    try expectEqual(Number{ .single = 708 }, (try parseNumber("708", 10)).?);
+    try expectEqual(Number{ .single = -5 }, (try parseNumber("-5", 10)).?);
+    try expectEqual(Number{ .double = 17 }, (try parseNumber("17.", 10)).?);
     // x makes hex whatever the base, and punctuation only makes a double
-    try std.testing.expectEqual(Number{ .double = 0x3fc00 }, (try parseNumber("x3.FC00", 10)).?);
-    try std.testing.expectEqual(Number{ .single = -0x7f00 }, (try parseNumber("x-7F00", 10)).?);
-    try std.testing.expectEqual(Number{ .double = 0 }, (try parseNumber("00.", 10)).?);
-    try std.testing.expectEqual(Number{ .single = 0x20 }, (try parseNumber("20", 16)).?);
-    try std.testing.expectEqual(null, try parseNumber(".", 10));
-    try std.testing.expectEqual(null, try parseNumber("x", 10));
-    try std.testing.expectEqual(null, try parseNumber("-d--", 10));
-    try std.testing.expectEqual(null, try parseNumber("xor", 10));
-    try std.testing.expectError(error.NumberOutOfRange, parseNumber("x100000000", 10));
+    try expectEqual(Number{ .double = 0x3fc00 }, (try parseNumber("x3.FC00", 10)).?);
+    try expectEqual(Number{ .single = -0x7f00 }, (try parseNumber("x-7F00", 10)).?);
+    try expectEqual(Number{ .double = 0 }, (try parseNumber("00.", 10)).?);
+    try expectEqual(Number{ .single = 0x20 }, (try parseNumber("20", 16)).?);
+    try expectEqual(null, try parseNumber(".", 10));
+    try expectEqual(null, try parseNumber("x", 10));
+    try expectEqual(null, try parseNumber("-d--", 10));
+    try expectEqual(null, try parseNumber("xor", 10));
+    try expectError(error.NumberOutOfRange, parseNumber("x100000000", 10));
 }
 
 test "bins, literals and the fill of unused slots" {
@@ -2862,9 +2867,9 @@ test "bins, literals and the fill of unused slots" {
         \\ : two   drop  : three  over ;
         \\ >BIN ]ASM
     , &diagnostic);
-    try std.testing.expectEqual(5, program.node);
-    try std.testing.expectEqual(null, program.bin);
-    try std.testing.expectEqualSlices(Word, &.{
+    try expectEqual(5, program.node);
+    try expectEqual(null, program.bin);
+    try expectEqualSlices(Word, &.{
         // a word that ends with a return is filled with returns
         opcodes(.@"@p", .dup, .@";", .@";"),
         5,
@@ -2873,7 +2878,7 @@ test "bins, literals and the fill of unused slots" {
         opcodes(.over, .@";", .@";", .@";"),
     }, program.ram[0..program.len]);
     // unused RAM calls warm
-    try std.testing.expectEqual(erased, program.ram[program.len]);
+    try expectEqual(erased, program.ram[program.len]);
 }
 
 test "numbers and labels on the stack" {
@@ -2889,7 +2894,7 @@ test "numbers and labels on the stack" {
     try expectAssembles("ASM[ # 0 NODE  # 2 S>D # 3. D+ lit  # 7 alit  # up , >BIN", &.{
         opcodes(.@"@p", .@"@p", .@".", .@"."), 5, 7, 0x145,
     });
-    try expectError(error.SingleLiteral, "ASM[ # 0 NODE 5");
+    try expectAssembleError(error.SingleLiteral, "ASM[ # 0 NODE 5");
 }
 
 test "calls, tail calls and labels" {
@@ -2909,13 +2914,13 @@ test "calls, tail calls and labels" {
     });
     // -ROM forgets the ROM's labels, and labels cannot be used before they
     // are defined
-    try expectError(error.UnknownWord, "ASM[ # 0 NODE -ROM  warm");
-    try expectError(error.UnknownWord, "ASM[ # 0 NODE  later : later ;");
+    try expectAssembleError(error.UnknownWord, "ASM[ # 0 NODE -ROM  warm");
+    try expectAssembleError(error.UnknownWord, "ASM[ # 0 NODE  later : later ;");
 
     var diagnostic: Diagnostic = .{};
     const rom_word = (try assemble("ASM[ # 0 NODE\n dup warm >BIN", &diagnostic)).rom_word.?;
-    try std.testing.expectEqual(2, rom_word.line);
-    try std.testing.expectEqualStrings("warm", rom_word.token);
+    try expectEqual(2, rom_word.line);
+    try expectEqualStrings("warm", rom_word.token);
 }
 
 test "bins call each other with its" {
@@ -2926,24 +2931,24 @@ test "bins call each other with its" {
         \\ # 2 NODE  # 1 its a ;  # 1 # its a alit >BIN
         \\ # 3 NODE  # 1600 BIN  # 1 its relay >BIN ]ASM
     , &programs, &.{}, &diagnostic)).programs;
-    try std.testing.expectEqual(3, assembled.len);
-    try std.testing.expectEqualSlices(Word, &.{
+    try expectEqual(3, assembled.len);
+    try expectEqualSlices(Word, &.{
         jumpWord(.jump, .@";", .@";", 0, 4),
         opcodes(.@"@p", .@";", .@";", .@";"),
         4,
     }, assembled[1].ram[0..assembled[1].len]);
     // a bin of its own number is kept, but not as its node's program
-    try std.testing.expectEqual(1600, assembled[2].bin);
-    try std.testing.expectEqual(3, assembled[2].node);
+    try expectEqual(1600, assembled[2].bin);
+    try expectEqual(3, assembled[2].node);
     // its finds the ROM labels of bins not assembled here
-    try std.testing.expectEqual(jumpWord(.call, .@";", .@";", 0, 0xa1), assembled[2].ram[0]);
+    try expectEqual(jumpWord(.call, .@";", .@";", 0, 0xa1), assembled[2].ram[0]);
 
     // saving a bin again replaces it
     const saved_twice = (try assembleNodes("ASM[ # 1 NODE dup >BIN  # 1 NODE drop >BIN", &programs, &.{}, &diagnostic)).programs;
-    try std.testing.expectEqual(1, saved_twice.len);
-    try std.testing.expectEqual(opcodes(.drop, .@";", .@";", .@";"), saved_twice[0].ram[0]);
-    try std.testing.expectError(error.UndefinedLabel, assembleNodes("ASM[ # 1 NODE  # 2 its nothing", &programs, &.{}, &diagnostic));
-    try std.testing.expectEqualStrings("nothing", diagnostic.token);
+    try expectEqual(1, saved_twice.len);
+    try expectEqual(opcodes(.drop, .@";", .@";", .@";"), saved_twice[0].ram[0]);
+    try expectError(error.UndefinedLabel, assembleNodes("ASM[ # 1 NODE  # 2 its nothing", &programs, &.{}, &diagnostic));
+    try expectEqualStrings("nothing", diagnostic.token);
 }
 
 test "saving a bin again frees the labels it was saved with" {
@@ -2957,7 +2962,7 @@ test "saving a bin again frees the labels it was saved with" {
     var diagnostic: Diagnostic = .{};
     const assembled = try assembleNodes(source.written(), &programs, &.{}, &diagnostic);
     // and the labels of other bins are kept
-    try std.testing.expectEqual(jumpWord(.call, .@";", .@";", 0, 0), assembled.programs[2].ram[0]);
+    try expectEqual(jumpWord(.call, .@";", .@";", 0, 0), assembled.programs[2].ram[0]);
 }
 
 test "control structures" {
@@ -2966,7 +2971,7 @@ test "control structures" {
         jumpWord(.dup, .dup, .@"if", 2, 2),
         opcodes(.drop, .@".", .@".", .@"."),
     });
-    try expectError(error.UnreachableThen, "ASM[ # 0 NODE  dup dup if  # 9 org then");
+    try expectAssembleError(error.UnreachableThen, "ASM[ # 0 NODE  dup dup if  # 9 org then");
     // while is if SWAP, and repeat is again then
     try expectAssembles("ASM[ # 0 NODE  begin dup while drop repeat >BIN", &.{
         jumpWord(.dup, .@"if", .@";", 1, 2),
@@ -3006,8 +3011,8 @@ test "the location counter" {
     // code runs on past the end of RAM as P does, ignoring bit 6
     var diagnostic: Diagnostic = .{};
     const program = try assemble("ASM[ # 0 NODE  # x3F org  dup dup dup dup  : x drop  # x alit >BIN", &diagnostic);
-    try std.testing.expectEqual(opcodes(.drop, .@"@p", .@";", .@";"), program.ram[0]);
-    try std.testing.expectEqual(0x40, program.ram[1]);
+    try expectEqual(opcodes(.drop, .@"@p", .@";", .@";"), program.ram[0]);
+    try expectEqual(0x40, program.ram[1]);
     // labels assembled with P9 set run in Extended Arithmetic Mode
     try expectAssembles("ASM[ # 0 NODE  +cy : x dup ;  -cy  # x alit  x >BIN", &.{
         opcodes(.dup, .@";", .@";", .@";"),
@@ -3032,16 +3037,16 @@ test "inline instruction words" {
         jumpWord(.@"if", .@";", .@";", 0, 0x115),
         jumpWord(.dup, .@"if", .@";", 1, 0x10),
     });
-    try expectError(error.UnreachableThen, "ASM[ # 0 NODE  A[ if then ]]");
+    try expectAssembleError(error.UnreachableThen, "ASM[ # 0 NODE  A[ if then ]]");
 
     // without =P, P is not known for a short jump, but a slot 1 jump only
     // keeps P9
-    try expectError(error.InlineTooLong, "ASM[ # 0 NODE  A[ @p ! # x10 call ]]");
+    try expectAssembleError(error.InlineTooLong, "ASM[ # 0 NODE  A[ @p ! # x10 call ]]");
     try expectAssembles("ASM[ # 0 NODE  A[ @p # x10 call ]] , >BIN", &.{jumpWord(.@"@p", .call, .@";", 1, 0x10)});
-    try expectError(error.InlineTooLong, "ASM[ # 0 NODE  A[ dup 5. ]]");
-    try expectError(error.NestedInline, "A[ A[");
-    try expectError(error.UnclosedInline, "A[ dup");
-    try expectError(error.NotInline, "ASM[ ]]");
+    try expectAssembleError(error.InlineTooLong, "ASM[ # 0 NODE  A[ dup 5. ]]");
+    try expectAssembleError(error.NestedInline, "A[ A[");
+    try expectAssembleError(error.UnclosedInline, "A[ dup");
+    try expectAssembleError(error.NotInline, "ASM[ ]]");
 }
 
 test "named literals and calls" {
@@ -3051,7 +3056,7 @@ test "named literals and calls" {
         \\ ASM[ # 0 NODE  # east , # north ,  right  rdlu  # -d-- alit >BIN
         \\ # 101 NODE  # east , # north , >BIN ]ASM
     , &programs, &.{}, &diagnostic)).programs;
-    try std.testing.expectEqualSlices(Word, &.{
+    try expectEqualSlices(Word, &.{
         0x1d5,                                   0x115,
         // a call from slot 1 cannot reach a multiport
         opcodes(.@"@p", .@".", .@".", .@"."),    0x1d5,
@@ -3059,7 +3064,7 @@ test "named literals and calls" {
         0x115,
     }, assembled[0].ram[0..assembled[0].len]);
     // cardinal directions depend on the node's row and column
-    try std.testing.expectEqualSlices(Word, &.{ 0x175, 0x145 }, assembled[1].ram[0..2]);
+    try expectEqualSlices(Word, &.{ 0x175, 0x145 }, assembled[1].ram[0..2]);
 
     // NL, NC and CONSTANT define names, and FORGET forgets back to one
     try expectAssembles("ASM 21 NL lit21  x145 NC up?  FORTH  ASM[ # 0 NODE  lit21 up? >BIN", &.{
@@ -3067,33 +3072,33 @@ test "named literals and calls" {
         21,
         jumpWord(.call, .@";", .@";", 0, 0x145),
     });
-    try expectError(error.UnknownWord, "ASM 21 NL lit21 FORTH  FORGET lit21  ASM[ # 0 NODE lit21");
+    try expectAssembleError(error.UnknownWord, "ASM 21 NL lit21 FORTH  FORGET lit21  ASM[ # 0 NODE lit21");
     try expectAssembles("4 CONSTANT four  ASM[ # 0 NODE  four org dup >BIN", &.{
         erased, erased, erased, erased, opcodes(.dup, .@";", .@";", .@";"),
     });
 }
 
 test idle {
-    try std.testing.expectEqual(0x195, idle(0));
-    try std.testing.expectEqual(0x1b5, idle(7));
-    try std.testing.expectEqual(0x185, idle(100));
-    try std.testing.expectEqual(0x1a5, idle(101));
-    try std.testing.expectEqual(0x195, idle(717));
+    try expectEqual(0x195, idle(0));
+    try expectEqual(0x1b5, idle(7));
+    try expectEqual(0x185, idle(100));
+    try expectEqual(0x1a5, idle(101));
+    try expectEqual(0x195, idle(717));
 }
 
 test "errors" {
-    try expectError(error.StackUnderflow, "ASM[ NODE");
-    try expectError(error.NoNode, "ASM[ dup");
-    try expectError(error.UnsavedBin, "ASM[ # 0 NODE dup ]ASM");
-    try expectError(error.UnsavedBin, "ASM[ # 0 NODE dup  # 1 NODE");
-    try expectError(error.UnknownWord, "ASM[ # 0 NODE  push");
-    try expectError(error.UnterminatedComment, "( never closed");
-    try expectError(error.MissingLabelName, "ASM[ # 0 NODE :");
+    try expectAssembleError(error.StackUnderflow, "ASM[ NODE");
+    try expectAssembleError(error.NoNode, "ASM[ dup");
+    try expectAssembleError(error.UnsavedBin, "ASM[ # 0 NODE dup ]ASM");
+    try expectAssembleError(error.UnsavedBin, "ASM[ # 0 NODE dup  # 1 NODE");
+    try expectAssembleError(error.UnknownWord, "ASM[ # 0 NODE  push");
+    try expectAssembleError(error.UnterminatedComment, "( never closed");
+    try expectAssembleError(error.MissingLabelName, "ASM[ # 0 NODE :");
 
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.UnsavedBin, assemble("\n ASM[ # 0 NODE\n dup", &diagnostic));
-    try std.testing.expectEqual(2, diagnostic.line);
-    try std.testing.expectEqualStrings("NODE", diagnostic.token);
+    try expectError(error.UnsavedBin, assemble("\n ASM[ # 0 NODE\n dup", &diagnostic));
+    try expectEqual(2, diagnostic.line);
+    try expectEqualStrings("NODE", diagnostic.token);
 }
 
 test "comments and EXIT" {
@@ -3125,17 +3130,17 @@ test "blocks" {
     var programs: [2]Program = undefined;
     var diagnostic: Diagnostic = .{};
     const assembled = (try assembleBlocks(&disk, &.{0}, &programs, &.{}, &diagnostic)).programs;
-    try std.testing.expectEqual(1, assembled.len);
-    try std.testing.expectEqualSlices(Word, &.{
+    try expectEqual(1, assembled.len);
+    try expectEqualSlices(Word, &.{
         opcodes(.dup, .drop, .@".", .@"."), erased, opcodes(.over, .a, .@";", .@";"),
     }, assembled[0].ram[0..3]);
     // lines count 16 to a block
-    try std.testing.expectEqualSlices(u32, &.{ 1, 0, 33 }, assembled[0].lines[0..3]);
+    try expectEqualSlices(u32, &.{ 1, 0, 33 }, assembled[0].lines[0..3]);
 
     // blocks may be loaded in turn
-    try std.testing.expectEqual(1, (try assembleBlocks(&disk, &.{ 1, 0 }, &programs, &.{}, &diagnostic)).programs.len);
-    try std.testing.expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{4}, &programs, &.{}, &diagnostic));
-    try std.testing.expectEqual(0, diagnostic.line);
+    try expectEqual(1, (try assembleBlocks(&disk, &.{ 1, 0 }, &programs, &.{}, &diagnostic)).programs.len);
+    try expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{4}, &programs, &.{}, &diagnostic));
+    try expectEqual(0, diagnostic.line);
 }
 
 test "loading from within ASM[" {
@@ -3147,7 +3152,7 @@ test "loading from within ASM[" {
     var programs: [1]Program = undefined;
     var diagnostic: Diagnostic = .{};
     const assembled = (try assembleBlocks(&disk, &.{0}, &programs, &.{}, &diagnostic)).programs;
-    try std.testing.expectEqual(opcodes(.drop, .dup, .@";", .@";"), assembled[0].ram[0]);
+    try expectEqual(opcodes(.drop, .dup, .@";", .@";"), assembled[0].ram[0]);
 }
 
 test "conditional assembly" {
@@ -3164,22 +3169,22 @@ test "block errors" {
     });
     var programs: [1]Program = undefined;
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.LoadTooDeep, assembleBlocks(&disk, &.{0}, &programs, &.{}, &diagnostic));
-    try std.testing.expectError(error.UnknownWord, assembleBlocks(&disk, &.{1}, &programs, &.{}, &diagnostic));
-    try std.testing.expectEqual(16 + 3, diagnostic.line);
-    try std.testing.expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{ 2, 3 }, &programs, &.{}, &diagnostic));
-    try std.testing.expectEqual(0, diagnostic.line);
-    try expectError(error.NoSuchBlock, "1 LOAD");
-    try expectError(error.NoSuchBlock, "1 FH");
+    try expectError(error.LoadTooDeep, assembleBlocks(&disk, &.{0}, &programs, &.{}, &diagnostic));
+    try expectError(error.UnknownWord, assembleBlocks(&disk, &.{1}, &programs, &.{}, &diagnostic));
+    try expectEqual(16 + 3, diagnostic.line);
+    try expectError(error.NoSuchBlock, assembleBlocks(&disk, &.{ 2, 3 }, &programs, &.{}, &diagnostic));
+    try expectEqual(0, diagnostic.line);
+    try expectAssembleError(error.NoSuchBlock, "1 LOAD");
+    try expectAssembleError(error.NoSuchBlock, "1 FH");
 }
 
 test blockText {
     const disk = comptime testBlocks(&.{&.{ "first", "second\n" }});
     var text: [16 * 65]u8 = undefined;
     const lines = blockText(&disk, &text);
-    try std.testing.expectEqual(16 * 65, lines.len);
-    try std.testing.expectEqualStrings("first ", lines[0..6]);
-    try std.testing.expectEqualStrings(" \nsecond ", lines[63 .. 65 + 7]);
+    try expectEqual(16 * 65, lines.len);
+    try expectEqualStrings("first ", lines[0..6]);
+    try expectEqualStrings(" \nsecond ", lines[63 .. 65 + 7]);
 }
 
 test "boot descriptors" {
@@ -3196,53 +3201,53 @@ test "boot descriptors" {
         \\ 6 +NODE  1600 /RAM  EAST LEFT 6 ITS go 6 +ND
         \\ 7 +NODE  5 +NODE  7. /B
     , &programs, &descriptors, &diagnostic);
-    try std.testing.expectEqual(3, assembled.descriptors.len);
+    try expectEqual(3, assembled.descriptors.len);
 
     const five = assembled.descriptors[0];
-    try std.testing.expectEqual(5, five.node);
-    try std.testing.expectEqualSlices(boot.Descriptor.Load, &.{
+    try expectEqual(5, five.node);
+    try expectEqualSlices(boot.Descriptor.Load, &.{
         .{ .bin = 5 },
         .{ .bin = 1600, .source = 1, .destination = 2, .len = 3 },
         .{ .bin = 1600, .source = 4, .destination = 4, .len = 1 },
     }, five.loads[0..five.load_count]);
-    try std.testing.expectEqual(0x1d5, five.a);
+    try expectEqual(0x1d5, five.a);
     // +NODE again goes back to the node's descriptor
-    try std.testing.expectEqual(7, five.b);
-    try std.testing.expectEqual(0x15, five.io);
-    try std.testing.expectEqual(1, five.p);
+    try expectEqual(7, five.b);
+    try expectEqual(0x15, five.io);
+    try expectEqual(1, five.p);
     // the last value goes on top, and node 005's row is even
-    try std.testing.expectEqualSlices(Word, &.{ 1, 2, 0x115 }, five.stack[0..five.stack_len]);
-    try std.testing.expectEqualSlices(Word, &@as([9]Word, @splat(-1)), five.return_stack[0..five.return_stack_len]);
+    try expectEqualSlices(Word, &.{ 1, 2, 0x115 }, five.stack[0..five.stack_len]);
+    try expectEqualSlices(Word, &@as([9]Word, @splat(-1)), five.return_stack[0..five.return_stack_len]);
 
     // +ND loads the node's own bin, replacing earlier loads of all of RAM,
     // and sets A, B and P
     const six = assembled.descriptors[1];
-    try std.testing.expectEqualSlices(boot.Descriptor.Load, &.{.{ .bin = 6 }}, six.loads[0..six.load_count]);
+    try expectEqualSlices(boot.Descriptor.Load, &.{.{ .bin = 6 }}, six.loads[0..six.load_count]);
     // east of an even column is right
-    try std.testing.expectEqual(0x1d5, six.a);
-    try std.testing.expectEqual(0x175, six.b);
-    try std.testing.expectEqual(0, six.p);
+    try expectEqual(0x1d5, six.a);
+    try expectEqual(0x175, six.b);
+    try expectEqual(0, six.p);
 
     // nodes start at warm with B addressing IO, unless set otherwise
     const seven = assembled.descriptors[2];
-    try std.testing.expectEqual(0xa9, seven.p);
-    try std.testing.expectEqual(0x15d, seven.b);
-    try std.testing.expectEqual(null, seven.a);
+    try expectEqual(0xa9, seven.p);
+    try expectEqual(0x15d, seven.b);
+    try expectEqual(null, seven.a);
 }
 
 test "boot descriptor errors" {
     var programs: [1]Program = undefined;
     var descriptors: [1]boot.Descriptor = undefined;
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.NoBootNode, assembleNodes("1 /P", &programs, &descriptors, &diagnostic));
-    try std.testing.expectError(error.NoSuchBin, assembleNodes("1 +NODE 1 /RAM", &programs, &descriptors, &diagnostic));
-    try std.testing.expectError(error.TooManyDescriptors, assembleNodes("1 +NODE 2 +NODE", &programs, &descriptors, &diagnostic));
-    try std.testing.expectError(error.TooManyLoads, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  0 1 1 /PART 0 1 1 /PART 0 1 1 /PART 0 1 1 /PART", &programs, &descriptors, &diagnostic));
-    try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  60 5 1 /PART", &programs, &descriptors, &diagnostic));
-    try std.testing.expectError(error.NumberOutOfRange, assembleNodes("1 +NODE  11 /STACK", &programs, &descriptors, &diagnostic));
+    try expectError(error.NoBootNode, assembleNodes("1 /P", &programs, &descriptors, &diagnostic));
+    try expectError(error.NoSuchBin, assembleNodes("1 +NODE 1 /RAM", &programs, &descriptors, &diagnostic));
+    try expectError(error.TooManyDescriptors, assembleNodes("1 +NODE 2 +NODE", &programs, &descriptors, &diagnostic));
+    try expectError(error.TooManyLoads, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  0 1 1 /PART 0 1 1 /PART 0 1 1 /PART 0 1 1 /PART", &programs, &descriptors, &diagnostic));
+    try expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  60 5 1 /PART", &programs, &descriptors, &diagnostic));
+    try expectError(error.NumberOutOfRange, assembleNodes("1 +NODE  11 /STACK", &programs, &descriptors, &diagnostic));
     // values too large to add without overflowing
-    try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  2147483647 1 1 /PART", &programs, &descriptors, &diagnostic));
-    try std.testing.expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  1 2147483647 1 /PART", &programs, &descriptors, &diagnostic));
+    try expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  2147483647 1 1 /PART", &programs, &descriptors, &diagnostic));
+    try expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  1 2147483647 1 /PART", &programs, &descriptors, &diagnostic));
 }
 
 test "assembling into ROM" {
@@ -3251,18 +3256,18 @@ test "assembling into ROM" {
     // is x080 again
     const program = try assemble("ASM[ # 0 NODE -ROM  # xA9 org : warm dup ;  ERS  # xBF org  drop drop drop drop over  # x10 org a >BIN", &diagnostic);
     const rom = program.rom.?;
-    try std.testing.expectEqual(64, rom.len);
-    try std.testing.expectEqual(opcodes(.drop, .over, .@".", .@"."), rom.words[0]);
-    try std.testing.expectEqual(erased, rom.words[1]);
-    try std.testing.expectEqual(opcodes(.dup, .@";", .@";", .@";"), rom.words[0x29]);
-    try std.testing.expectEqual(opcodes(.drop, .drop, .drop, .@"."), rom.words[0x3f]);
-    try std.testing.expectEqual(opcodes(.a, .@";", .@";", .@";"), program.ram[0x10]);
+    try expectEqual(64, rom.len);
+    try expectEqual(opcodes(.drop, .over, .@".", .@"."), rom.words[0]);
+    try expectEqual(erased, rom.words[1]);
+    try expectEqual(opcodes(.dup, .@";", .@";", .@";"), rom.words[0x29]);
+    try expectEqual(opcodes(.drop, .drop, .drop, .@"."), rom.words[0x3f]);
+    try expectEqual(opcodes(.a, .@";", .@";", .@";"), program.ram[0x10]);
     // as does code at xff, which runs on to x80
     const end = try assemble("ASM[ # 0 NODE -ROM  # xFF org  drop drop drop drop over >BIN", &diagnostic);
-    try std.testing.expectEqual(opcodes(.drop, .over, .@";", .@";"), end.rom.?.words[0]);
+    try expectEqual(opcodes(.drop, .over, .@";", .@";"), end.rom.?.words[0]);
 
     // a program with no ROM code has none
-    try std.testing.expectEqual(null, (try assemble("ASM[ # 0 NODE dup >BIN", &diagnostic)).rom);
+    try expectEqual(null, (try assemble("ASM[ # 0 NODE dup >BIN", &diagnostic)).rom);
 }
 
 test "a session acts on a chip, as the IDE does" {
@@ -3280,27 +3285,27 @@ test "a session acts on a chip, as the IDE does" {
     var diagnostic: Diagnostic = .{};
     var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out, .chip = &chip });
 
-    try std.testing.expectError(error.NoTarget, session.interpret("UPD"));
+    try expectError(error.NoTarget, session.interpret("UPD"));
     // the stack is kept from one line to the next
     try session.interpret("HEX 1 2");
     try session.interpret("+ .");
-    try std.testing.expectEqualStrings("3 ", out.buffered());
+    try expectEqualStrings("3 ", out.buffered());
 
     // assemble code, load it into the target, and call it
     try session.interpret("ASM[ # 0 NODE  : inc 1. + ; >BIN ]ASM");
-    try std.testing.expectError(error.NumberOutOfRange, session.interpret("0 NODE  2147483647 2 0 BOOT"));
+    try expectError(error.NumberOutOfRange, session.interpret("0 NODE  2147483647 2 0 BOOT"));
     try session.interpret("0 NODE  0 2 0 BOOT  5. LIT  0 CALL  RDUP");
     out.end = 0;
     try session.interpret("UPD");
-    try std.testing.expectStringEndsWith(out.buffered(), " 00006 00006\nR 00000 00000 00000 00000 00000 00000 00000 00000 00000\n");
+    try expectStringEndsWith(out.buffered(), " 00006 00006\nR 00000 00000 00000 00000 00000 00000 00000 00000 00000\n");
     out.end = 0;
     try session.interpret("0 R@ D.  0 2 -ASM");
     // node 000 has no data register, so x141 is not one
-    try std.testing.expectError(error.PortAccess, session.interpret("x141 R@"));
-    try std.testing.expectError(error.PortAccess, session.interpret("5. x141 R!"));
+    try expectError(error.PortAccess, session.interpret("x141 R@"));
+    try expectError(error.PortAccess, session.interpret("5. x141 R!"));
     // and the node still takes words, rather than waiting on x141
     try session.interpret("RDUP RDROP");
-    try std.testing.expectEqualStrings("4155 000 04155  @p + ;\n001 00001  literal 1\n", out.buffered());
+    try expectEqualStrings("4155 000 04155  @p + ;\n001 00001  literal 1\n", out.buffered());
 
     // completion knows words, opcodes and labels
     const Words = struct {
@@ -3313,21 +3318,21 @@ test "a session acts on a chip, as the IDE does" {
     };
     var words: Words = .{};
     session.complete("@b", &words);
-    try std.testing.expectEqual(1, words.len);
-    try std.testing.expectEqualStrings("@b", words.found[0]);
+    try expectEqual(1, words.len);
+    try expectEqualStrings("@b", words.found[0]);
     words = .{};
     // the bin's labels include its ROM's
     session.complete("in", &words);
-    try std.testing.expectEqual(3, words.len);
-    try std.testing.expectEqualStrings("inv", words.found[0]);
-    try std.testing.expectEqualStrings("interp", words.found[1]);
-    try std.testing.expectEqualStrings("inc", words.found[2]);
+    try expectEqual(3, words.len);
+    try expectEqualStrings("inv", words.found[0]);
+    try expectEqualStrings("interp", words.found[1]);
+    try expectEqualStrings("inc", words.found[2]);
 
     // an error empties the stack and leaves ASM[
-    try std.testing.expectError(error.UnknownWord, session.interpret("1 2 ASM[ nothing"));
-    try std.testing.expectEqual(0, session.stack().len);
+    try expectError(error.UnknownWord, session.interpret("1 2 ASM[ nothing"));
+    try expectEqual(0, session.stack().len);
     try session.interpret("1 2");
-    try std.testing.expectEqual(2, session.stack().len);
+    try expectEqual(2, session.stack().len);
 }
 
 test "host definitions" {
@@ -3348,36 +3353,36 @@ test "host definitions" {
     try session.interpret(": early 1 EXIT 2 ;  early .S");
     // conditional assembly and comments act while defining
     try session.interpret("1 : choose IF{ 10 {ELSE} 20 } { a comment } ;  choose .");
-    try std.testing.expectEqualStrings("42 15 12 1 10 ", out.buffered());
-    try std.testing.expectEqual(0, session.stack().len - 1);
+    try expectEqualStrings("42 15 12 1 10 ", out.buffered());
+    try expectEqual(0, session.stack().len - 1);
 
     // forgetting a definition forgets its words, and those after it
     const used = session.interpreter.defined_len;
     try session.interpret(": more 1 2 3 ;  FORGET more");
-    try std.testing.expectEqual(used, session.interpreter.defined_len);
-    try std.testing.expectError(error.UnknownWord, session.interpret("more"));
+    try expectEqual(used, session.interpreter.defined_len);
+    try expectError(error.UnknownWord, session.interpret("more"));
 
     // numbers are read in the base they were compiled in
     out.end = 0;
     try session.interpret("HEX : sixteen 10 ; DECIMAL sixteen .");
-    try std.testing.expectEqualStrings("16 ", out.buffered());
+    try expectEqualStrings("16 ", out.buffered());
 
     // a definition that fails gives back its words, and the names and
     // memory of its [ ]
     const defined = session.interpreter.defined_len;
     const here = session.interpreter.here;
-    try std.testing.expectError(error.UnmatchedControl, session.interpret(": broken 1 [ VARIABLE w ] 2 THEN"));
-    try std.testing.expectEqual(defined, session.interpreter.defined_len);
-    try std.testing.expectEqual(here, session.interpreter.here);
-    try std.testing.expectError(error.UnknownWord, session.interpret("w"));
+    try expectError(error.UnmatchedControl, session.interpret(": broken 1 [ VARIABLE w ] 2 THEN"));
+    try expectEqual(defined, session.interpreter.defined_len);
+    try expectEqual(here, session.interpreter.here);
+    try expectError(error.UnknownWord, session.interpret("w"));
     // as does one left open at the end of a program
     try session.interpret(": open DUP");
-    try std.testing.expectError(error.UnclosedDefinition, session.finish());
-    try std.testing.expectEqual(defined, session.interpreter.defined_len);
+    try expectError(error.UnclosedDefinition, session.finish());
+    try expectEqual(defined, session.interpreter.defined_len);
     try session.finish();
 
     // a definition cannot forget the names before it
-    try std.testing.expectError(error.ForgetInDefinition, session.interpret("VARIABLE v  : f 1 [ FORGET v ] 2 ;"));
+    try expectError(error.ForgetInDefinition, session.interpret("VARIABLE v  : f 1 [ FORGET v ] 2 ;"));
 }
 
 test "host definitions run as host code, even in ASM[" {
@@ -3390,16 +3395,16 @@ test "host definitions run as host code, even in ASM[" {
     });
 
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.UnclosedDefinition, assemble("1 2\n : unclosed DUP", &diagnostic));
-    try std.testing.expectEqual(2, diagnostic.line);
-    try std.testing.expectEqualStrings(":", diagnostic.token);
+    try expectError(error.UnclosedDefinition, assemble("1 2\n : unclosed DUP", &diagnostic));
+    try expectEqual(2, diagnostic.line);
+    try expectEqualStrings(":", diagnostic.token);
     // errors in a definition's words are where the words were written
-    try std.testing.expectError(error.UnknownWord, assemble(": bad\n nothing ;\n bad", &diagnostic));
-    try std.testing.expectEqual(2, diagnostic.line);
-    try std.testing.expectEqualStrings("nothing", diagnostic.token);
+    try expectError(error.UnknownWord, assemble(": bad\n nothing ;\n bad", &diagnostic));
+    try expectEqual(2, diagnostic.line);
+    try expectEqualStrings("nothing", diagnostic.token);
     // a definition does not mean itself, as it is not defined yet
-    try std.testing.expectError(error.UnknownWord, assemble(": forever forever ;  forever", &diagnostic));
-    try std.testing.expectEqual(1, diagnostic.line);
+    try expectError(error.UnknownWord, assemble(": forever forever ;  forever", &diagnostic));
+    try expectEqual(1, diagnostic.line);
 
     // definitions run definitions as deep as blocks load blocks
     var deep: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -3407,7 +3412,7 @@ test "host definitions run as host code, even in ASM[" {
     try deep.writer.writeAll(": d0 1 ;");
     for (1..17) |i| try deep.writer.print(" : d{d} d{d} ;", .{ i, i - 1 });
     try deep.writer.writeAll(" d16");
-    try std.testing.expectError(error.LoadTooDeep, assemble(deep.written(), &diagnostic));
+    try expectError(error.LoadTooDeep, assemble(deep.written(), &diagnostic));
     deep.clearRetainingCapacity();
     try deep.writer.writeAll(": d0 1 ;");
     for (1..15) |i| try deep.writer.print(" : d{d} d{d} ;", .{ i, i - 1 });
@@ -3425,14 +3430,14 @@ test "host control flow" {
 
     try session.interpret(": sign ( n - n) DUP 0< IF DROP -1 ELSE 0= IF 0 ELSE 1 THEN THEN ;");
     try session.interpret("-5 sign . 0 sign . 7 sign .");
-    try std.testing.expectEqualStrings("-1 0 1 ", out.buffered());
+    try expectEqualStrings("-1 0 1 ", out.buffered());
 
     // FOR counts down to 0, and DO counts up to its limit
     const expectOutput = struct {
         fn expect(s: *Session, o: *Io.Writer, line: []const u8, expected: []const u8) !void {
             o.end = 0;
             try s.interpret(line);
-            try std.testing.expectEqualStrings(expected, o.buffered());
+            try expectEqualStrings(expected, o.buffered());
         }
     }.expect;
     try expectOutput(&session, &out, ": down ( n) FOR I . NEXT ;  2 down", "2 1 0 ");
@@ -3448,20 +3453,20 @@ test "host control flow" {
 
     // EXIT from a loop ends the loop with the definition
     try expectOutput(&session, &out, ": find 10 0 DO I 3 = IF I EXIT THEN LOOP -1 ;  find .", "3 ");
-    try std.testing.expectEqual(0, session.interpreter.loop_len);
-    try std.testing.expectEqual(0, session.stack().len);
+    try expectEqual(0, session.interpreter.loop_len);
+    try expectEqual(0, session.stack().len);
 
     // a negative count of FOR goes round through the largest number
     const it = &session.interpreter;
     try it.startLoop(.{ .index = std.math.minInt(i32), .limit = 0 });
-    try std.testing.expectEqual(5, try it.take(.{ .next = 5 }));
-    try std.testing.expectEqual(std.math.maxInt(i32), it.loops[0].index);
+    try expectEqual(5, try it.take(.{ .next = 5 }));
+    try expectEqual(std.math.maxInt(i32), it.loops[0].index);
     it.loop_len = 0;
 
-    try std.testing.expectError(error.CompileOnly, session.interpret("1 IF"));
-    try std.testing.expectError(error.NoLoop, session.interpret("I"));
-    try std.testing.expectError(error.UnclosedControl, session.interpret(": open IF ;"));
-    try std.testing.expectError(error.UnmatchedControl, session.interpret(": crossed BEGIN THEN ;"));
+    try expectError(error.CompileOnly, session.interpret("1 IF"));
+    try expectError(error.NoLoop, session.interpret("I"));
+    try expectError(error.UnclosedControl, session.interpret(": open IF ;"));
+    try expectError(error.UnmatchedControl, session.interpret(": crossed BEGIN THEN ;"));
 }
 
 test "host definitions keep the words they were compiled with" {
@@ -3485,19 +3490,19 @@ test "host memory" {
     try session.interpret("HERE 10 ALLOT HERE SWAP - .");
     // [ ] interprets within a definition, for LITERAL to compile
     try session.interpret(": seven [ 3 4 + ] LITERAL ;  seven .");
-    try std.testing.expectEqualStrings("5 8 2 3 7 12 1 10 7 ", out.buffered());
+    try expectEqualStrings("5 8 2 3 7 12 1 10 7 ", out.buffered());
 
     // forgetting a name gives back the memory after it
     out.end = 0;
     try session.interpret("HERE VARIABLE v 9 ALLOT FORGET v HERE = .");
-    try std.testing.expectEqualStrings("-1 ", out.buffered());
+    try expectEqualStrings("-1 ", out.buffered());
 
-    try std.testing.expectError(error.NumberOutOfRange, session.interpret("HERE @"));
-    try std.testing.expectError(error.NumberOutOfRange, session.interpret("-1 ALLOT"));
+    try expectError(error.NumberOutOfRange, session.interpret("HERE @"));
+    try expectError(error.NumberOutOfRange, session.interpret("-1 ALLOT"));
     // a name is not made without its memory
-    try std.testing.expectError(error.NumberOutOfRange, session.interpret("-1 ARRAY bad"));
-    try std.testing.expectError(error.UnknownWord, session.interpret("bad"));
-    try std.testing.expectError(error.CompileOnly, session.interpret("1 LITERAL"));
+    try expectError(error.NumberOutOfRange, session.interpret("-1 ARRAY bad"));
+    try expectError(error.UnknownWord, session.interpret("bad"));
+    try expectError(error.CompileOnly, session.interpret("1 LITERAL"));
 }
 
 test "chip configuration words" {
@@ -3508,11 +3513,11 @@ test "chip configuration words" {
     var diagnostic: Diagnostic = .{};
     var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
     try session.interpret("nnx . nny . nns . nnc .  708 nn-b .  134 b-nn .  10005 nn-b .  149 b-nn .  1601 nn-b .  289 b-nn .");
-    try std.testing.expectEqualStrings("18 8 144 576 134 708 149 10005 289 1601 ", out.buffered());
+    try expectEqualStrings("18 8 144 576 134 708 149 10005 289 1601 ", out.buffered());
     // only the nodes of four chips have bins
-    try std.testing.expectError(error.InvalidNode, session.interpret("576 b-nn"));
-    try std.testing.expectError(error.InvalidNode, session.interpret("818 nn-b"));
-    try std.testing.expectError(error.InvalidNode, session.interpret("40000 nn-b"));
+    try expectError(error.InvalidNode, session.interpret("576 b-nn"));
+    try expectError(error.InvalidNode, session.interpret("818 nn-b"));
+    try expectError(error.InvalidNode, session.interpret("40000 nn-b"));
 }
 
 /// colorForth blocks from text, for tests: words separated by spaces, in
@@ -3568,12 +3573,12 @@ fn expectSameAsColorForth(comptime blocks: []const []const u8, source: []const u
         return err;
     }).programs;
     const expected = (try assembleNodes(source, &programs, &.{}, &diagnostic)).programs;
-    try std.testing.expectEqual(expected.len, from_color.len);
+    try expectEqual(expected.len, from_color.len);
     for (expected, from_color) |e, c| {
-        try std.testing.expectEqual(e.node, c.node);
-        try std.testing.expectEqualSlices(Word, &e.ram, &c.ram);
-        try std.testing.expectEqual(e.len, c.len);
-        try std.testing.expectEqual(e.entry, c.entry);
+        try expectEqual(e.node, c.node);
+        try expectEqualSlices(Word, &e.ram, &c.ram);
+        try expectEqual(e.len, c.len);
+        try expectEqual(e.entry, c.entry);
     }
 }
 
@@ -3631,14 +3636,14 @@ test "colorForth loads blocks, and runs yellow words on the host" {
     var programs: [4]Program = undefined;
     var diagnostic: Diagnostic = .{};
     const assembled = (try assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic)).programs;
-    try std.testing.expectEqual(2, assembled.len);
-    try std.testing.expectEqual(5, assembled[0].node);
+    try expectEqual(2, assembled.len);
+    try expectEqual(5, assembled[0].node);
     // ~3 * 4 is -16, xor 7 is -9, and 13 3 /mod leaves 1 4, which add to -4
-    try std.testing.expectEqual(opcodes(.@"@p", .@";", .@";", .@";"), assembled[0].ram[0]);
-    try std.testing.expectEqual(word18(-4), assembled[0].ram[1]);
+    try expectEqual(opcodes(.@"@p", .@";", .@";", .@";"), assembled[0].ram[0]);
+    try expectEqual(word18(-4), assembled[0].ram[1]);
     // code starts at main
-    try std.testing.expectEqual(6, assembled[1].node);
-    try std.testing.expectEqual(0x20, assembled[1].entry.local);
+    try expectEqual(6, assembled[1].node);
+    try expectEqual(0x20, assembled[1].entry.local);
 }
 
 test "colorForth errors say where they are" {
@@ -3653,9 +3658,9 @@ test "colorForth errors say where they are" {
     };
     inline for (cases) |case| {
         const bytes = try colorBlocks(&.{case[1]});
-        try std.testing.expectError(case[0], assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic));
-        try std.testing.expectEqualStrings(case[2], diagnostic.token);
-        try std.testing.expectEqual(colorforth.line(0, case[3]), diagnostic.line);
+        try expectError(case[0], assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic));
+        try expectEqualStrings(case[2], diagnostic.token);
+        try expectEqual(colorforth.line(0, case[3]), diagnostic.line);
     }
 }
 
@@ -3670,11 +3675,11 @@ test "colorForth's gray numbers are checked against where code was assembled" {
     var programs: [4]Program = undefined;
     var diagnostic: Diagnostic = .{};
     const assembled = try assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic);
-    try std.testing.expectEqual(1, assembled.feedback_differs);
+    try expectEqual(1, assembled.feedback_differs);
     const difference = assembled.first_difference.?;
-    try std.testing.expectEqual(colorforth.line(0, 15), difference.line);
-    try std.testing.expectEqual(0xff, difference.noted);
-    try std.testing.expectEqual(0x402, difference.found);
+    try expectEqual(colorforth.line(0, 15), difference.line);
+    try expectEqual(0xff, difference.noted);
+    try expectEqual(0x402, difference.found);
 }
 
 test "colorForth defines words for the host between host and target" {
@@ -3691,7 +3696,7 @@ test "colorForth defines words for the host between host and target" {
     var diagnostic: Diagnostic = .{};
     const assembled = (try assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic)).programs;
     // , ends the instruction word, so ; starts the next
-    try std.testing.expectEqualSlices(Word, &.{ opcodes(.@"@p", .@"b!", .@"@p", .@"."), 0x1f5, 7, 0x1d5 }, assembled[0].ram[0..4]);
+    try expectEqualSlices(Word, &.{ opcodes(.@"@p", .@"b!", .@"@p", .@"."), 0x1f5, 7, 0x1d5 }, assembled[0].ram[0..4]);
 
     // and errors
     const cases = .{
@@ -3702,8 +3707,8 @@ test "colorForth defines words for the host between host and target" {
     };
     inline for (cases) |case| {
         const errors = try colorBlocks(&.{case[1]});
-        try std.testing.expectError(case[0], assembleColorForth(&errors, &.{0}, &programs, &.{}, &diagnostic));
-        try std.testing.expectEqualStrings(case[2], diagnostic.token);
+        try expectError(case[0], assembleColorForth(&errors, &.{0}, &programs, &.{}, &diagnostic));
+        try expectEqualStrings(case[2], diagnostic.token);
     }
 }
 
@@ -3725,8 +3730,8 @@ test "a session compiles colorForth blocks again, replacing what they compiled" 
     });
     // without running out of names, host words or labels
     for (0..200) |_| try session.loadColorForth(&two, 0);
-    try std.testing.expectEqual(3, session.assembled().programs.len);
-    try std.testing.expectEqual(1, session.interpreter.host_word_count);
+    try expectEqual(3, session.assembled().programs.len);
+    try expectEqual(1, session.interpreter.host_word_count);
 
     // a node no longer compiled is forgotten, and the bin from the forth
     // panel kept
@@ -3736,22 +3741,22 @@ test "a session compiles colorForth blocks again, replacing what they compiled" 
     });
     try session.loadColorForth(&one, 0);
     const assembled = session.assembled().programs;
-    try std.testing.expectEqual(2, assembled.len);
-    try std.testing.expectEqual(5, assembled[0].node);
-    try std.testing.expectEqual(0, assembled[1].node);
-    try std.testing.expectEqual(0, session.interpreter.host_word_count);
+    try expectEqual(2, assembled.len);
+    try expectEqual(5, assembled[0].node);
+    try expectEqual(0, assembled[1].node);
+    try expectEqual(0, session.interpreter.host_word_count);
 
     // an error drops the bin it was assembling
     const failing = try colorBlocks(&.{
         \\[ 1 node 0 org
         \\: main ] dup nothing
     });
-    try std.testing.expectError(error.UnknownWord, session.loadColorForth(&failing, 0));
-    try std.testing.expectEqual(null, session.interpreter.bin);
+    try expectError(error.UnknownWord, session.loadColorForth(&failing, 0));
+    try expectEqual(null, session.interpreter.bin);
     // and the place of an error is of this compile
-    try std.testing.expectError(error.NoSuchBlock, session.loadColorForth(&one, 5));
-    try std.testing.expectEqual(colorforth.line(5, 1), diagnostic.line);
-    try std.testing.expectEqualStrings("", diagnostic.token);
+    try expectError(error.NoSuchBlock, session.loadColorForth(&one, 5));
+    try expectEqual(colorforth.line(5, 1), diagnostic.line);
+    try expectEqualStrings("", diagnostic.token);
 }
 
 /// Any source assembles or fails to, without crashing

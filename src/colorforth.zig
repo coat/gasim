@@ -661,6 +661,10 @@ fn setCell(block: *[block_size]u8, i: usize, cell: u32) void {
 
 const std = @import("std");
 const Io = std.Io;
+const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
 
 fn testBlock(cells: []const u32) [block_size]u8 {
     var block: [block_size]u8 = @splat(0);
@@ -672,7 +676,7 @@ fn expectRoundTrip(block: *const [block_size]u8) !void {
     var tokens: [cells_per_block]Token = undefined;
     var encoded: [block_size]u8 = undefined;
     try encode(try decode(block, &tokens), &encoded);
-    try std.testing.expectEqualSlices(u8, block, &encoded);
+    try expectEqualSlices(u8, block, &encoded);
 }
 
 test "words pack as colorForth packs them" {
@@ -685,14 +689,14 @@ test "words pack as colorForth packs them" {
     inline for (words) |w| {
         var block: [block_size]u8 = undefined;
         try encode(&.{try Token.word(.format, w[0])}, &block);
-        try std.testing.expectEqual(w[1], cellAt(&block, 0));
-        try std.testing.expectEqual(0, cellAt(&block, 1));
+        try expectEqual(w[1], cellAt(&block, 0));
+        try expectEqual(0, cellAt(&block, 1));
 
         var tokens: [cells_per_block]Token = undefined;
         const decoded = try decode(&block, &tokens);
-        try std.testing.expectEqual(1, decoded.len);
-        try std.testing.expectEqual(.format, decoded[0].tag);
-        try std.testing.expectEqualStrings(w[0], decoded[0].text());
+        try expectEqual(1, decoded.len);
+        try expectEqual(.format, decoded[0].tag);
+        try expectEqualStrings(w[0], decoded[0].text());
     }
 }
 
@@ -701,19 +705,19 @@ test "long words continue in extension cells" {
     const tokens_in = [_]Token{ try Token.word(.define, "compile"), try Token.word(.compile, "dup") };
     try encode(&tokens_in, &block);
     // "compil" is 30 bits, so the "l" moves to an extension
-    try std.testing.expectEqual(.define, @as(Tag, @fromBackingInt(@intCast(@as(u4, @truncate(cellAt(&block, 0)))))));
-    try std.testing.expectEqual(.extension, @as(Tag, @fromBackingInt(@intCast(@as(u4, @truncate(cellAt(&block, 1)))))));
-    try std.testing.expectEqual(2, tokens_in[0].cells());
+    try expectEqual(.define, @as(Tag, @fromBackingInt(@intCast(@as(u4, @truncate(cellAt(&block, 0)))))));
+    try expectEqual(.extension, @as(Tag, @fromBackingInt(@intCast(@as(u4, @truncate(cellAt(&block, 1)))))));
+    try expectEqual(2, tokens_in[0].cells());
 
     var tokens: [cells_per_block]Token = undefined;
     const decoded = try decode(&block, &tokens);
-    try std.testing.expectEqual(2, decoded.len);
-    try std.testing.expectEqualStrings("compile", decoded[0].text());
-    try std.testing.expectEqualStrings("dup", decoded[1].text());
+    try expectEqual(2, decoded.len);
+    try expectEqualStrings("compile", decoded[0].text());
+    try expectEqualStrings("dup", decoded[1].text());
     try expectRoundTrip(&block);
 
     const long: [max_chars + 1]u8 = @splat('a');
-    try std.testing.expectError(error.WordTooLong, Token.word(.compile, &long));
+    try expectError(error.WordTooLong, Token.word(.compile, &long));
 }
 
 test "numbers short and long, in decimal and hex" {
@@ -724,26 +728,26 @@ test "numbers short and long, in decimal and hex" {
         try Token.number(.yellow, -(1 << 26), false),
         try Token.number(.yellow, std.math.minInt(i32), true),
     };
-    try std.testing.expectEqual(.execute_short, tokens_in[0].tag);
-    try std.testing.expectEqual(.compile_short, tokens_in[1].tag);
-    try std.testing.expectEqual(.compile_long, tokens_in[2].tag);
-    try std.testing.expectEqual(.execute_short, tokens_in[3].tag);
-    try std.testing.expectEqual(.execute_long, tokens_in[4].tag);
+    try expectEqual(.execute_short, tokens_in[0].tag);
+    try expectEqual(.compile_short, tokens_in[1].tag);
+    try expectEqual(.compile_long, tokens_in[2].tag);
+    try expectEqual(.execute_short, tokens_in[3].tag);
+    try expectEqual(.execute_long, tokens_in[4].tag);
 
     var block: [block_size]u8 = undefined;
     try encode(&tokens_in, &block);
-    try std.testing.expectEqual(25 << 5 | 8, cellAt(&block, 0));
-    try std.testing.expectEqual(0xffffffe0 | 0x10 | 6, cellAt(&block, 1));
-    try std.testing.expectEqual(5, cellAt(&block, 2));
-    try std.testing.expectEqual(1 << 26, cellAt(&block, 3));
+    try expectEqual(25 << 5 | 8, cellAt(&block, 0));
+    try expectEqual(0xffffffe0 | 0x10 | 6, cellAt(&block, 1));
+    try expectEqual(5, cellAt(&block, 2));
+    try expectEqual(1 << 26, cellAt(&block, 3));
 
     var tokens: [cells_per_block]Token = undefined;
     const decoded = try decode(&block, &tokens);
-    try std.testing.expectEqual(tokens_in.len, decoded.len);
+    try expectEqual(tokens_in.len, decoded.len);
     for (tokens_in, decoded) |expected, actual| {
-        try std.testing.expectEqual(expected.tag, actual.tag);
-        try std.testing.expectEqual(expected.value, actual.value);
-        try std.testing.expectEqual(expected.hex, actual.hex);
+        try expectEqual(expected.tag, actual.tag);
+        try expectEqual(expected.value, actual.value);
+        try expectEqual(expected.hex, actual.hex);
     }
     try expectRoundTrip(&block);
 }
@@ -753,34 +757,34 @@ test "variables keep their value in the next cell" {
     variable.value = 0x1000;
     var block: [block_size]u8 = undefined;
     try encode(&.{ variable, try Token.word(.compile, "@") }, &block);
-    try std.testing.expectEqual(0x1000, cellAt(&block, 1));
+    try expectEqual(0x1000, cellAt(&block, 1));
 
     var tokens: [cells_per_block]Token = undefined;
     const decoded = try decode(&block, &tokens);
-    try std.testing.expectEqual(2, decoded.len);
-    try std.testing.expectEqual(.variable, decoded[0].tag);
-    try std.testing.expectEqual(0x1000, decoded[0].value);
-    try std.testing.expectEqualStrings("@", decoded[1].text());
+    try expectEqual(2, decoded.len);
+    try expectEqual(.variable, decoded[0].tag);
+    try expectEqual(0x1000, decoded[0].value);
+    try expectEqualStrings("@", decoded[1].text());
 }
 
 test "comments keep their case" {
-    try std.testing.expectEqual(.comment, commentTag("ok"));
-    try std.testing.expectEqual(.capitalized, commentTag("Chuck"));
-    try std.testing.expectEqual(.uppercase, commentTag("GA144"));
-    try std.testing.expectEqual(.capitalized, commentTag("A"));
-    try std.testing.expectEqual(null, commentTag("camelCase"));
-    try std.testing.expectError(error.InvalidCharacter, Token.word(.comment, "camelCase"));
-    try std.testing.expectError(error.InvalidCharacter, Token.word(.compile, "DUP"));
-    try std.testing.expectError(error.InvalidCharacter, Token.word(.compile, "a#b"));
+    try expectEqual(.comment, commentTag("ok"));
+    try expectEqual(.capitalized, commentTag("Chuck"));
+    try expectEqual(.uppercase, commentTag("GA144"));
+    try expectEqual(.capitalized, commentTag("A"));
+    try expectEqual(null, commentTag("camelCase"));
+    try expectError(error.InvalidCharacter, Token.word(.comment, "camelCase"));
+    try expectError(error.InvalidCharacter, Token.word(.compile, "DUP"));
+    try expectError(error.InvalidCharacter, Token.word(.compile, "a#b"));
 
     var block: [block_size]u8 = undefined;
     try encode(&.{ try Token.word(.comment, "Chuck"), try Token.word(.comment, "GA144"), try Token.word(.comment, "moore") }, &block);
     var tokens: [cells_per_block]Token = undefined;
     const decoded = try decode(&block, &tokens);
-    try std.testing.expectEqual(.capitalized, decoded[0].tag);
-    try std.testing.expectEqualStrings("Chuck", decoded[0].text());
-    try std.testing.expectEqualStrings("GA144", decoded[1].text());
-    try std.testing.expectEqualStrings("moore", decoded[2].text());
+    try expectEqual(.capitalized, decoded[0].tag);
+    try expectEqualStrings("Chuck", decoded[0].text());
+    try expectEqualStrings("GA144", decoded[1].text());
+    try expectEqualStrings("moore", decoded[2].text());
 }
 
 test "blocks end at a zero cell and round-trip" {
@@ -792,20 +796,20 @@ test "blocks end at a zero cell and round-trip" {
     cells[cells_per_block - 1] = 2;
     var block = testBlock(&cells);
     var tokens: [cells_per_block]Token = undefined;
-    try std.testing.expectEqual(2, (try decode(&block, &tokens)).len);
-    try std.testing.expectEqual(.extension, tokens[0].tag);
+    try expectEqual(2, (try decode(&block, &tokens)).len);
+    try expectEqual(.extension, tokens[0].tag);
     var encoded: [block_size]u8 = undefined;
     try encode(tokens[0..2], &encoded);
-    try std.testing.expectEqualSlices(u8, block[0 .. block_size - 4], encoded[0 .. block_size - 4]);
-    try std.testing.expectEqual(0, cellAt(&encoded, cells_per_block - 1));
+    try expectEqualSlices(u8, block[0 .. block_size - 4], encoded[0 .. block_size - 4]);
+    try expectEqual(0, cellAt(&encoded, cells_per_block - 1));
 
     @memset(&cells, 0x9080000e);
     cells[cells_per_block - 1] = 0x10 | 2;
     block = testBlock(&cells);
     const decoded = try decode(&block, &tokens);
-    try std.testing.expectEqual(cells_per_block, decoded.len);
-    try std.testing.expectEqual(.execute_long, decoded[cells_per_block - 1].tag);
-    try std.testing.expectError(error.BlockFull, encode(decoded, &block));
+    try expectEqual(cells_per_block, decoded.len);
+    try expectEqual(.execute_long, decoded[cells_per_block - 1].tag);
+    try expectError(error.BlockFull, encode(decoded, &block));
 }
 
 test "blocks as text" {
@@ -822,7 +826,7 @@ test "blocks as text" {
     var buffer: [256]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     try writeText(try decode(&block, &tokens), &writer);
-    try std.testing.expectEqualStrings(
+    try expectEqualStrings(
         \\(Counts
         \\:inc ]1 + ; ~cr
         \\@count 3
@@ -850,30 +854,30 @@ test "arrayForth 2 images compress and decompress" {
         try Token.word(.comment, "GA144"),  try Token.number(.white, 2009, false), try Token.number(.gray, 0x32, true),
         count,                              try Token.word(.format, "...."),
     }, image[(uncompressed_blocks + 2) * block_size ..][0..block_size]);
-    try std.testing.expectEqual(null, compressedBlocks(&image));
+    try expectEqual(null, compressedBlocks(&image));
 
     var compressed: [blocks * block_size]u8 = undefined;
     const len = try compress(&image, &compressed);
-    try std.testing.expectEqual((uncompressed_blocks + 1) * block_size, len);
-    try std.testing.expectEqual(blocks, compressedBlocks(compressed[0..len]));
+    try expectEqual((uncompressed_blocks + 1) * block_size, len);
+    try expectEqual(blocks, compressedBlocks(compressed[0..len]));
     var tokens: [cells_per_block]Token = undefined;
     const header = try decode(compressed[header_block * block_size ..][0..block_size], &tokens);
-    try std.testing.expectEqual(-@as(i32, @intCast(len / 512)), header[0].value);
+    try expectEqual(-@as(i32, @intCast(len / 512)), header[0].value);
     // 37 blocks are three cylinders
-    try std.testing.expectEqual(3, header[2].value);
+    try expectEqual(3, header[2].value);
 
     var decompressed: [blocks * block_size]u8 = undefined;
     try decompress(compressed[0..len], &decompressed);
-    try std.testing.expectEqual(null, compressedBlocks(&decompressed));
-    try std.testing.expectEqualSlices(u8, image[uncompressed_blocks * block_size ..], decompressed[uncompressed_blocks * block_size ..]);
-    try std.testing.expectEqual(0xeb, decompressed[0]);
+    try expectEqual(null, compressedBlocks(&decompressed));
+    try expectEqualSlices(u8, image[uncompressed_blocks * block_size ..], decompressed[uncompressed_blocks * block_size ..]);
+    try expectEqual(0xeb, decompressed[0]);
 
-    try std.testing.expectError(error.ImageTruncated, decompress(compressed[0 .. uncompressed_blocks * block_size + 8], &decompressed));
+    try expectError(error.ImageTruncated, decompress(compressed[0 .. uncompressed_blocks * block_size + 8], &decompressed));
     // even before the blocks it copies, or with ns as low as it goes
-    try std.testing.expectError(error.ImageTruncated, decompress(compressed[0 .. (header_block + 1) * block_size], &decompressed));
+    try expectError(error.ImageTruncated, decompress(compressed[0 .. (header_block + 1) * block_size], &decompressed));
     std.mem.writeInt(i32, compressed[header_block * block_size + 4 ..][0..4], std.math.minInt(i32), .little);
-    try std.testing.expectError(error.ImageTruncated, decompress(compressed[0..len], &decompressed));
-    try std.testing.expectError(error.ImageFull, compress(&image, compressed[0 .. uncompressed_blocks * block_size]));
+    try expectError(error.ImageTruncated, decompress(compressed[0..len], &decompressed));
+    try expectError(error.ImageFull, compress(&image, compressed[0 .. uncompressed_blocks * block_size]));
 }
 
 test "an extension after a variable's value is one on its own" {
@@ -883,11 +887,11 @@ test "an extension after a variable's value is one on its own" {
     try encode(&.{ variable, try Token.word(.extension, "cr") }, &block);
     var tokens: [cells_per_block]Token = undefined;
     const decoded = try decode(&block, &tokens);
-    try std.testing.expectEqual(2, decoded.len);
-    try std.testing.expectEqualStrings("h", decoded[0].text());
-    try std.testing.expectEqual(5, decoded[0].value);
-    try std.testing.expectEqual(.extension, decoded[1].tag);
-    try std.testing.expectEqualStrings("cr", decoded[1].text());
+    try expectEqual(2, decoded.len);
+    try expectEqualStrings("h", decoded[0].text());
+    try expectEqual(5, decoded[0].value);
+    try expectEqual(.extension, decoded[1].tag);
+    try expectEqualStrings("cr", decoded[1].text());
     try expectRoundTrip(&block);
 }
 
@@ -896,20 +900,20 @@ test "compressed bits that end within a cell" {
     const start = uncompressed_blocks * block_size;
     var image: [(uncompressed_blocks + 1) * block_size]u8 = @splat(0);
     var out: [image.len]u8 = undefined;
-    try std.testing.expectError(error.ImageTruncated, decompress(image[0 .. start + 3], &out));
+    try expectError(error.ImageTruncated, decompress(image[0 .. start + 3], &out));
 
     try encode(&.{try Token.word(.compile, "dup")}, image[start..][0..block_size]);
     var compressed: [image.len]u8 = undefined;
-    try std.testing.expectError(error.ImageFull, compress(&image, compressed[0 .. start + 3]));
+    try expectError(error.ImageFull, compress(&image, compressed[0 .. start + 3]));
 }
 
 fn expectSameTokens(expected: []const Token, actual: []const Token) !void {
-    try std.testing.expectEqual(expected.len, actual.len);
+    try expectEqual(expected.len, actual.len);
     for (expected, actual) |e, a| {
-        try std.testing.expectEqual(e.tag, a.tag);
-        try std.testing.expectEqual(e.value, a.value);
-        try std.testing.expectEqual(e.hex, a.hex);
-        try std.testing.expectEqualStrings(e.text(), a.text());
+        try expectEqual(e.tag, a.tag);
+        try expectEqual(e.value, a.value);
+        try expectEqual(e.hex, a.hex);
+        try expectEqualStrings(e.text(), a.text());
     }
 }
 
@@ -945,7 +949,7 @@ fn fuzzBlock(_: void, smith: *std.testing.Smith) !void {
     try expectSameTokens(decoded, redecoded);
     var reencoded: [block_size]u8 = undefined;
     try encode(redecoded, &reencoded);
-    try std.testing.expectEqualSlices(u8, &encoded, &reencoded);
+    try expectEqualSlices(u8, &encoded, &reencoded);
 }
 
 test "fuzz blocks" {
@@ -1002,7 +1006,7 @@ fn fuzzDecompress(_: void, smith: *std.testing.Smith) !void {
     const compressed_len = try compress(&out, &compressed);
     var again: [image.len]u8 = undefined;
     try decompress(compressed[0..compressed_len], &again);
-    try std.testing.expectEqualSlices(u8, out[start..], again[start..]);
+    try expectEqualSlices(u8, out[start..], again[start..]);
 }
 
 test "fuzz decompressing images" {

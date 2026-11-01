@@ -133,10 +133,10 @@ pub fn parseRom(text: []const u8, roms: []NodeRom) error{ InvalidRom, TooManyNod
 }
 
 test romWord {
-    try std.testing.expectEqual(0xa9, romWord(404, "warm"));
-    try std.testing.expectEqual(0xcc, romWord(300, "*.17"));
-    try std.testing.expectEqual(null, romWord(708, "*.17"));
-    try std.testing.expectEqual(0xb0, romWord(1717, "*.17"));
+    try expectEqual(0xa9, romWord(404, "warm"));
+    try expectEqual(0xcc, romWord(300, "*.17"));
+    try expectEqual(null, romWord(708, "*.17"));
+    try expectEqual(0xb0, romWord(1717, "*.17"));
 }
 
 test parseRom {
@@ -149,16 +149,18 @@ test parseRom {
     try writer.writeAll("262143\n");
 
     var roms: [2]NodeRom = undefined;
-    try std.testing.expectError(error.TooManyNodes, parseRom(writer.buffered(), &roms));
-    try std.testing.expectError(error.InvalidRom, parseRom("708\n1\n2\n", &roms));
+    try expectError(error.TooManyNodes, parseRom(writer.buffered(), &roms));
+    try expectError(error.InvalidRom, parseRom("708\n1\n2\n", &roms));
 
     const parsed = try parseRom(writer.buffered()[0 .. writer.buffered().len - "262143\n".len], &roms);
-    try std.testing.expectEqual(2, parsed.len);
-    try std.testing.expectEqual(708, parsed[0].node);
-    try std.testing.expectEqual(9, parsed[1].node);
-    try std.testing.expectEqual(63, parsed[1].words[63]);
+    try expectEqual(2, parsed.len);
+    try expectEqual(708, parsed[0].node);
+    try expectEqual(9, parsed[1].node);
+    try expectEqual(63, parsed[1].words[63]);
 }
 
 const Word = @import("f18.zig").Word;
 
 const std = @import("std");
+const expectEqual = std.testing.expectEqual;
+const expectError = std.testing.expectError;

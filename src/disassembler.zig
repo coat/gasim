@@ -147,7 +147,7 @@ fn expectWrite(expected: []const u8, word: Word, address: u9) !void {
     var buffer: [64]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     try write(&writer, word, address);
-    try std.testing.expectEqualStrings(expected, writer.buffered());
+    try expectEqualStrings(expected, writer.buffered());
 }
 
 test write {
@@ -176,7 +176,7 @@ test listing {
     var writer: Io.Writer = .fixed(&buffer);
     try listing(&writer, try assembler.assemble(source, &diagnostic), source);
     // the words org skips are left empty, and data looks like code
-    try std.testing.expectEqualStrings(
+    try expectEqualStrings(
         \\000 04d12  @p dup @p .                1  : main 5 dup
         \\001 00005  literal 5
         \\002 001d5  literal right              2    right b! !b ;
@@ -197,16 +197,16 @@ test literals {
     // a literal after a jump does not count, nor one after the end
     words[3] = Instruction.encode(.{ .slot_0 = .jump, .slot_1 = .@"@p", .slot_2 = .@".", .slot_3 = 7 });
     words[63] = Instruction.encode(.{ .slot_0 = .@"!p", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
-    try std.testing.expectEqual(0b110, literals(&words));
+    try expectEqual(0b110, literals(&words));
 }
 
 test ioName {
-    try std.testing.expectEqualStrings("io", ioName(0x15d));
-    try std.testing.expectEqualStrings("right", ioName(0x1d5));
-    try std.testing.expectEqualStrings("up", ioName(0x145));
-    try std.testing.expectEqualStrings("rd-u", ioName(0x185));
-    try std.testing.expectEqualStrings("rdlu", ioName(0x1a5));
-    try std.testing.expectEqualStrings("an undefined address", ioName(0x100));
+    try expectEqualStrings("io", ioName(0x15d));
+    try expectEqualStrings("right", ioName(0x1d5));
+    try expectEqualStrings("up", ioName(0x145));
+    try expectEqualStrings("rd-u", ioName(0x185));
+    try expectEqualStrings("rdlu", ioName(0x1a5));
+    try expectEqualStrings("an undefined address", ioName(0x100));
 }
 
 const assembler = @import("assembler.zig");
@@ -221,3 +221,5 @@ const port = @import("port.zig");
 
 const std = @import("std");
 const Io = std.Io;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;

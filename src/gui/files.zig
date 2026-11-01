@@ -459,6 +459,9 @@ fn keep(a: Allocator, path: []const u8) !void {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
 
 const dvui = @import("dvui");
 const examples = @import("examples");
@@ -489,11 +492,11 @@ test "the examples menu opens an example" {
     try click("examples");
     try ui.saveImage(&w, "examples.png");
     try click("example-0");
-    try std.testing.expectEqualStrings("hello.ga", file.?.path);
-    try std.testing.expect(file.?.example);
+    try expectEqualStrings("hello.ga", file.?.path);
+    try expect(file.?.example);
     _ = try ui.sim.run(100_000);
     try testing.settle(ui.frame);
-    try std.testing.expectEqualStrings("Hello, world!\n", dock.consoleText());
+    try expectEqualStrings("Hello, world!\n", dock.consoleText());
 }
 
 test "the blocks to load are numbers" {
@@ -503,12 +506,12 @@ test "the blocks to load are numbers" {
     defer ui.stop();
     openExample(examples.all[2]);
     try testing.settle(ui.frame);
-    try std.testing.expectEqual(.editor, ui.view);
-    try std.testing.expectEqualStrings("0", loads_text.items);
+    try expectEqual(.editor, ui.view);
+    try expectEqualStrings("0", loads_text.items);
     loads_text.clearRetainingCapacity();
     try loads_text.appendSlice(gpa, "0 x");
     loadBlocks();
-    try std.testing.expectEqualStrings("Blocks are numbers, such as 0 or 18 20", ui.message);
+    try expectEqualStrings("Blocks are numbers, such as 0 or 18 20", ui.message);
 }
 
 test "the workspace lasts between runs" {
@@ -533,12 +536,12 @@ test "the workspace lasts between runs" {
     defer ui.stop();
     restoreWorkspace();
     try testing.settle(ui.frame);
-    try std.testing.expectEqualStrings("hello.ga", file.?.path);
-    try std.testing.expectEqual(5, ui.selected);
-    try std.testing.expect(ui.sim.chip.breakpoints.contains(.init(5, 3)));
-    try std.testing.expect(ui.sim.chip.watches.contains(.{ .index = 1, .direction = .right, .write = true }));
-    try std.testing.expectEqualStrings("1 2 +", (try dock.lines(std.testing.allocator))[0]);
-    try std.testing.expectEqual(0.6, ui.panes.node);
+    try expectEqualStrings("hello.ga", file.?.path);
+    try expectEqual(5, ui.selected);
+    try expect(ui.sim.chip.breakpoints.contains(.init(5, 3)));
+    try expect(ui.sim.chip.watches.contains(.{ .index = 1, .direction = .right, .write = true }));
+    try expectEqualStrings("1 2 +", (try dock.lines(std.testing.allocator))[0]);
+    try expectEqual(0.6, ui.panes.node);
 }
 
 test "a file given wins over the last run's, and Recent keeps 8, once each" {
@@ -567,11 +570,11 @@ test "a file given wins over the last run's, and Recent keeps 8, once each" {
     defer ui.stop();
     open(paths[3]);
     restoreWorkspace();
-    try std.testing.expectEqualStrings(paths[3], file.?.path);
-    try std.testing.expectEqual(0, ui.selected);
-    try std.testing.expectEqual(recent_capacity, recent.items.len);
+    try expectEqualStrings(paths[3], file.?.path);
+    try expectEqual(0, ui.selected);
+    try expectEqual(recent_capacity, recent.items.len);
     for (recent.items, 0..) |r, k| for (recent.items[k + 1 ..]) |other| {
-        try std.testing.expect(!std.mem.eql(u8, r.path, other.path));
+        try expect(!std.mem.eql(u8, r.path, other.path));
     };
 }
 
@@ -592,8 +595,8 @@ test "a file dropped on the window opens in the next frame, the first of several
     defer ui.stop();
     for (paths) |p| drop(p);
     try testing.settle(ui.frame);
-    try std.testing.expectEqualStrings(paths[0], file.?.path);
-    try std.testing.expectEqual(null, dropped);
+    try expectEqualStrings(paths[0], file.?.path);
+    try expectEqual(null, dropped);
 }
 
 test "F1 shows the keys, and e and f go to the editor and the prompt" {
@@ -604,19 +607,19 @@ test "F1 shows the keys, and e and f go to the editor and the prompt" {
     try testing.settle(ui.frame);
     try testing.pressKey(.f1, .none);
     try testing.settle(ui.frame);
-    try std.testing.expect(help.open);
+    try expect(help.open);
     try ui.saveImage(&w, "help.png");
     try testing.pressKey(.escape, .none);
     try testing.settle(ui.frame);
-    try std.testing.expect(!help.open);
+    try expect(!help.open);
 
     try testing.pressKey(.f, .none);
     try testing.settle(ui.frame);
-    try std.testing.expect(dock.typing());
+    try expect(dock.typing());
     try testing.pressKey(.escape, .none);
     try testing.settle(ui.frame);
-    try std.testing.expect(!dock.typing());
+    try expect(!dock.typing());
     try testing.pressKey(.e, .none);
     try testing.settle(ui.frame);
-    try std.testing.expectEqual(.editor, ui.view);
+    try expectEqual(.editor, ui.view);
 }

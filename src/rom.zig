@@ -100,7 +100,7 @@ pub fn testRom(roms: *[144]ga144.NodeRom) ![]ga144.NodeRom {
 test "the ROM source assembles to the chip's ROM" {
     var roms: [144]ga144.NodeRom = undefined;
     const assembled = try testRom(&roms);
-    try std.testing.expect(isG144A12(assembled));
+    try expect(isG144A12(assembled));
 }
 
 test write {
@@ -112,13 +112,15 @@ test write {
     var writer: std.Io.Writer = .fixed(&text);
     try write(&writer, &roms);
     var parsed: [2]ga144.NodeRom = undefined;
-    try std.testing.expectEqualDeep(&roms, (try ga144.parseRom(writer.buffered(), &parsed))[0..2]);
-    try std.testing.expect(!isG144A12(&roms));
+    try expectEqualDeep(&roms, (try ga144.parseRom(writer.buffered(), &parsed))[0..2]);
+    try expect(!isG144A12(&roms));
 }
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const expect = std.testing.expect;
+const expectEqualDeep = std.testing.expectEqualDeep;
 
 const arrayforth = @import("arrayforth.zig");
 const assembler = @import("assembler.zig");

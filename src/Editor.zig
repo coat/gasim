@@ -673,6 +673,10 @@ const Token = colorforth.Token;
 
 const std = @import("std");
 const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
 
 /// an editor on a file of `blocks` empty blocks, or ones given
 fn testEditor(comptime blocks: usize) !struct { *Editor, *[blocks * block_size]u8 } {
@@ -697,24 +701,24 @@ fn expectText(editor: *Editor, expected: []const u8) !void {
     var buffer: [1024]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     try colorforth.writeText(editor.tokens[0..editor.len], &writer);
-    try std.testing.expectEqualStrings(expected, writer.buffered());
+    try expectEqualStrings(expected, writer.buffered());
 }
 
 test "typing a definition, with colors following the one before" {
     const editor, const bytes = try testEditor(2);
     defer freeEditor(editor, bytes);
-    try std.testing.expect(!editor.read_only);
-    try std.testing.expect(!editor.unsaved());
+    try expect(!editor.read_only);
+    try expect(!editor.unsaved());
 
     // the first word is red, and green follows it
     try editor.insert(false);
     try typeText(editor, "inc 1 + ;");
     try editor.escape();
-    try std.testing.expectEqual(.normal, editor.mode);
+    try expectEqual(.normal, editor.mode);
     try expectText(editor, ":inc ]1 + ;\n");
-    try std.testing.expect(editor.unsaved());
-    try std.testing.expectEqual(.compile_short, editor.tokens[1].tag);
-    try std.testing.expectEqual(3, editor.cursor);
+    try expect(editor.unsaved());
+    try expectEqual(.compile_short, editor.tokens[1].tag);
+    try expectEqual(3, editor.cursor);
 
     // enter starts a red word on the next line, and a color typed changes
     // the word being typed
@@ -726,36 +730,36 @@ test "typing a definition, with colors following the one before" {
     try editor.setColor(.cyan);
     try editor.escape();
     try expectText(editor, ":inc ]1 + ; ~cr\n:x [$1f -5 \\dup\n");
-    try std.testing.expect(editor.tokens[6].hex);
-    try std.testing.expectEqual(-5, editor.tokens[7].value);
+    try expect(editor.tokens[6].hex);
+    try expectEqual(-5, editor.tokens[7].value);
 
     // the block is written back as the editor leaves it
     try editor.goTo(1);
-    try std.testing.expect(editor.modified);
+    try expect(editor.modified);
     var tokens: [cells_per_block]Token = undefined;
-    try std.testing.expectEqual(9, (try colorforth.decode(bytes[0..block_size], &tokens)).len);
-    try std.testing.expectEqual(2 * block_size, editor.contents().len);
+    try expectEqual(9, (try colorforth.decode(bytes[0..block_size], &tokens)).len);
+    try expectEqual(2 * block_size, editor.contents().len);
     editor.saved();
-    try std.testing.expect(!editor.unsaved());
+    try expect(!editor.unsaved());
 }
 
 test "words that cannot be typed" {
     const editor, const bytes = try testEditor(1);
     defer freeEditor(editor, bytes);
     try editor.insert(false);
-    try std.testing.expectError(error.InvalidWord, editor.typeChar('#'));
-    try std.testing.expectError(error.InvalidWord, editor.typeChar('D'));
+    try expectError(error.InvalidWord, editor.typeChar('#'));
+    try expectError(error.InvalidWord, editor.typeChar('D'));
     // a red word cannot be a hex number, or a name a number
     try typeText(editor, "$1");
-    try std.testing.expectError(error.HexWord, editor.space());
-    try std.testing.expectEqual(.insert, editor.mode);
+    try expectError(error.HexWord, editor.space());
+    try expectEqual(.insert, editor.mode);
     editor.backspace();
     editor.backspace();
     try typeText(editor, "x ");
     try editor.setColor(.white);
     try typeText(editor, "GA144 Chuck");
     try editor.typeChar('M');
-    try std.testing.expectError(error.InvalidWord, editor.escape());
+    try expectError(error.InvalidWord, editor.escape());
     editor.backspace();
     try editor.escape();
     try expectText(editor, ":x (GA144 Chuck\n");
@@ -763,7 +767,7 @@ test "words that cannot be typed" {
     // backspace past the start of a word goes back into the one before
     try editor.insert(true);
     editor.backspace();
-    try std.testing.expectEqualStrings("Chuck", editor.tokens[editor.cursor].text());
+    try expectEqualStrings("Chuck", editor.tokens[editor.cursor].text());
     editor.backspace();
     try editor.escape();
     try expectText(editor, ":x (GA144 Chuc\n");
@@ -783,11 +787,11 @@ test "moving, deleting, putting back, and undoing" {
 
     editor.first();
     editor.nextDefinition();
-    try std.testing.expectEqualStrings("b", editor.current().?.text());
+    try expectEqualStrings("b", editor.current().?.text());
     editor.nextDefinition();
     editor.previousDefinition();
-    try std.testing.expectEqualStrings("b", editor.current().?.text());
-    try std.testing.expect(editor.startsLine(editor.cursor));
+    try expectEqualStrings("b", editor.current().?.text());
+    try expect(editor.startsLine(editor.cursor));
 
     try editor.delete(false);
     try editor.delete(false);
@@ -830,11 +834,11 @@ test "a full block takes no more" {
     try editor.insert(false);
     for (0..cells_per_block - 1) |_| try typeText(editor, "a ");
     try typeText(editor, "b");
-    try std.testing.expectError(error.BlockFull, editor.space());
+    try expectError(error.BlockFull, editor.space());
     try editor.escape();
-    try std.testing.expectEqual(cells_per_block, editor.len);
-    try std.testing.expectEqual(cells_per_block, editor.cells());
-    try std.testing.expectError(error.BlockFull, editor.insert(true));
+    try expectEqual(cells_per_block, editor.len);
+    try expectEqual(cells_per_block, editor.cells());
+    try expectError(error.BlockFull, editor.insert(true));
 
     // a number being typed takes the cells it will, so one too large for a
     // cell of its own does not fit
@@ -842,7 +846,7 @@ test "a full block takes no more" {
     try editor.delete(false);
     try editor.insert(true);
     try typeText(editor, "9999999");
-    try std.testing.expectError(error.BlockFull, editor.typeChar('9'));
+    try expectError(error.BlockFull, editor.typeChar('9'));
 }
 
 test "blocks that are not source cannot be edited" {
@@ -852,26 +856,26 @@ test "blocks that are not source cannot be edited" {
     bytes[8] = 0x12;
     var editor: Editor = undefined;
     editor.open(&bytes, 2);
-    try std.testing.expect(editor.read_only);
-    try std.testing.expectError(error.ReadOnly, editor.insert(false));
+    try expect(editor.read_only);
+    try expectError(error.ReadOnly, editor.insert(false));
     try editor.goTo(1);
-    try std.testing.expect(!editor.read_only);
-    try std.testing.expectError(error.NoSuchBlock, editor.goTo(2));
+    try expect(!editor.read_only);
+    try expectError(error.NoSuchBlock, editor.goTo(2));
     // and leaving them changes nothing
     try editor.goTo(0);
-    try std.testing.expect(!editor.modified);
+    try expect(!editor.modified);
 }
 
 test "numbers as typed" {
-    try std.testing.expectEqual(5, parseNumber("5").?.value);
-    try std.testing.expectEqual(-5, parseNumber("-5").?.value);
-    try std.testing.expectEqual(-1, parseNumber("$ffffffff").?.value);
-    try std.testing.expectEqual(-0x1f, parseNumber("-$1f").?.value);
-    try std.testing.expectEqual(std.math.minInt(i32), parseNumber("-2147483648").?.value);
-    try std.testing.expectEqual(null, parseNumber("2147483648"));
-    try std.testing.expectEqual(null, parseNumber("-"));
-    try std.testing.expectEqual(null, parseNumber("1,"));
-    try std.testing.expectEqual(null, parseNumber("$"));
+    try expectEqual(5, parseNumber("5").?.value);
+    try expectEqual(-5, parseNumber("-5").?.value);
+    try expectEqual(-1, parseNumber("$ffffffff").?.value);
+    try expectEqual(-0x1f, parseNumber("-$1f").?.value);
+    try expectEqual(std.math.minInt(i32), parseNumber("-2147483648").?.value);
+    try expectEqual(null, parseNumber("2147483648"));
+    try expectEqual(null, parseNumber("-"));
+    try expectEqual(null, parseNumber("1,"));
+    try expectEqual(null, parseNumber("$"));
 }
 
 /// gives the editor each character of `text` as a key
@@ -886,38 +890,38 @@ test key {
     defer freeEditor(editor, bytes);
 
     // typing, with ctrl for a color as it is typed
-    try std.testing.expectEqual(.none, try keys(editor, "iinc 1 + ; x"));
-    try std.testing.expectEqual(.none, try editor.key(.{ .code = .{ .char = 'y' }, .ctrl = true }));
+    try expectEqual(.none, try keys(editor, "iinc 1 + ; x"));
+    try expectEqual(.none, try editor.key(.{ .code = .{ .char = 'y' }, .ctrl = true }));
     _ = try editor.key(.{ .code = .escape });
-    try std.testing.expectEqual(.normal, editor.mode);
+    try expectEqual(.normal, editor.mode);
     try expectText(editor, ":inc ]1 + ; [x\n");
 
     // moving and changing a color with shift
     _ = try keys(editor, "0lW");
     try expectText(editor, ":inc (1 ]+ ; [x\n");
     _ = try editor.key(.{ .code = .end });
-    try std.testing.expectEqual(4, editor.cursor);
+    try expectEqual(4, editor.cursor);
 
     // a number before g is a block to go to, and g alone the first token
     _ = try keys(editor, "2g");
-    try std.testing.expectEqual(2, editor.block);
-    try std.testing.expectEqual(null, editor.prefix);
+    try expectEqual(2, editor.block);
+    try expectEqual(null, editor.prefix);
     _ = try editor.key(.{ .code = .page_up });
-    try std.testing.expectEqual(1, editor.block);
+    try expectEqual(1, editor.block);
     _ = try keys(editor, "[");
     _ = try keys(editor, "$g");
-    try std.testing.expectEqual(0, editor.cursor);
+    try expectEqual(0, editor.cursor);
 
     // what the front end does, saving with ctrl+s from typing too
-    try std.testing.expectEqual(.save, try keys(editor, "s"));
-    try std.testing.expectEqual(.compile, try keys(editor, "L"));
-    try std.testing.expectEqual(.toggle_format, try keys(editor, "f"));
-    try std.testing.expectEqual(.quit, try keys(editor, "q"));
+    try expectEqual(.save, try keys(editor, "s"));
+    try expectEqual(.compile, try keys(editor, "L"));
+    try expectEqual(.toggle_format, try keys(editor, "f"));
+    try expectEqual(.quit, try keys(editor, "q"));
     _ = try keys(editor, "a");
-    try std.testing.expectEqual(.save, try editor.key(.{ .code = .{ .char = 's' }, .ctrl = true }));
-    try std.testing.expectEqual(.normal, editor.mode);
+    try expectEqual(.save, try editor.key(.{ .code = .{ .char = 's' }, .ctrl = true }));
+    try expectEqual(.normal, editor.mode);
 
-    try std.testing.expectError(error.NoSuchBlock, keys(editor, "9g"));
+    try expectError(error.NoSuchBlock, keys(editor, "9g"));
 }
 
 test "the rest of the key map" {
@@ -935,33 +939,33 @@ test "the rest of the key map" {
 
     // moving by token and by definition, with letters and named keys
     _ = try keys(editor, "0j");
-    try std.testing.expectEqual(4, editor.cursor);
+    try expectEqual(4, editor.cursor);
     _ = try keys(editor, "k");
-    try std.testing.expectEqual(0, editor.cursor);
+    try expectEqual(0, editor.cursor);
     _ = try editor.key(.{ .code = .down });
-    try std.testing.expectEqual(4, editor.cursor);
+    try expectEqual(4, editor.cursor);
     _ = try editor.key(.{ .code = .up });
-    try std.testing.expectEqual(0, editor.cursor);
+    try expectEqual(0, editor.cursor);
     _ = try keys(editor, "lw");
-    try std.testing.expectEqual(2, editor.cursor);
+    try expectEqual(2, editor.cursor);
     _ = try keys(editor, "h");
     _ = try editor.key(.{ .code = .right });
-    try std.testing.expectEqual(2, editor.cursor);
+    try expectEqual(2, editor.cursor);
     _ = try keys(editor, "b");
     _ = try editor.key(.{ .code = .left });
-    try std.testing.expectEqual(0, editor.cursor);
+    try expectEqual(0, editor.cursor);
     _ = try editor.key(.{ .code = .end });
     _ = try editor.key(.{ .code = .home });
-    try std.testing.expectEqual(0, editor.cursor);
+    try expectEqual(0, editor.cursor);
 
     // escape, enter and backspace do nothing out of insert mode, nor ctrl
     // with a key that is not a character, and a number before another key
     // is forgotten
     for ([_]Key.Code{ .escape, .enter, .backspace }) |code| _ = try editor.key(.{ .code = code });
-    try std.testing.expectEqual(.none, try editor.key(.{ .code = .left, .ctrl = true }));
+    try expectEqual(.none, try editor.key(.{ .code = .left, .ctrl = true }));
     _ = try keys(editor, "3l");
-    try std.testing.expectEqual(null, editor.prefix);
-    try std.testing.expectEqual(1, editor.cursor);
+    try expectEqual(null, editor.prefix);
+    try expectEqual(1, editor.cursor);
 
     // deleting, undoing and redoing
     _ = try keys(editor, "0x");
@@ -983,19 +987,19 @@ test "the rest of the key map" {
 
     // opening a line below and above, to type in
     _ = try keys(editor, "o");
-    try std.testing.expectEqual(.insert, editor.mode);
+    try expectEqual(.insert, editor.mode);
     _ = try keys(editor, "c");
     _ = try editor.key(.{ .code = .escape });
     _ = try keys(editor, "0O");
-    try std.testing.expectEqual(.insert, editor.mode);
+    try expectEqual(.insert, editor.mode);
     _ = try keys(editor, "d");
     _ = try editor.key(.{ .code = .escape });
     try expectText(editor, ":d ~cr\n]1 ; 1 1 ~cr\n:c\n:b ]2 ;\n");
 }
 
 test describe {
-    try std.testing.expectEqualStrings("the block is full", describe(error.BlockFull));
-    try std.testing.expectEqualStrings("there is no such block", describe(error.NoSuchBlock));
+    try expectEqualStrings("the block is full", describe(error.BlockFull));
+    try expectEqualStrings("there is no such block", describe(error.NoSuchBlock));
 }
 
 test moveTo {
@@ -1003,8 +1007,8 @@ test moveTo {
     defer freeEditor(editor, bytes);
     _ = try keys(editor, "ia b c");
     try editor.moveTo(1);
-    try std.testing.expectEqual(.normal, editor.mode);
-    try std.testing.expectEqual(1, editor.cursor);
+    try expectEqual(.normal, editor.mode);
+    try expectEqual(1, editor.cursor);
     try editor.moveTo(10);
-    try std.testing.expectEqual(2, editor.cursor);
+    try expectEqual(2, editor.cursor);
 }
