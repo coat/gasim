@@ -191,13 +191,17 @@ ball.
 The time sync made long runs slower, and the scheduler will cost more, so
 regressions need catching with consistent numbers:
 
-- `zig build bench`: ReleaseFast, and a fixed set of workloads, such as a
-  4 MB run through `upcase.ga`, a `--boot` stream, and a long UART stream.
-- A script comparing two git refs with
+- ✓ `zig build bench`: ReleaseFast, on a fixed set of workloads in
+  `tools/bench`: one node computing, a ring of 36 nodes, and 1 MiB through
+  `upcase.ga`.
+- ✓ Comparing with another git ref (`-Dbench-base=<ref>`), with
   [poop](https://github.com/andrewrk/poop) (instructions, cycles and cache
   misses, which vary far less than wall time; Linux only), falling back to
   [hyperfine](https://github.com/sharkdp/hyperfine) elsewhere.
-- Steps per second from gasim itself, as `Chip.steps` is deterministic.
+- ✓ Steps per second from gasim itself (`run --stats`), as `Chip.steps` is
+  deterministic.
+- Workloads for board mode once it exists: a `--boot` stream and a long
+  UART stream, where the time sync and scheduler cost most.
 - Wall time stays out of CI, where shared runners are too noisy; instruction
   counts could gate later.
 

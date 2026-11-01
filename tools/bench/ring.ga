@@ -1,0 +1,118 @@
+\ ring.ga - a token passed around a ring of 36 nodes, rows 0 and 1, for
+\ port transfers between many nodes: east along row 0 and west along row 1,
+\ 100000 times, adding 1 at node 000 each time, then the low byte of the
+\ count on the console. Written by a script: an even column's west port is
+\ left and its east right, an odd column's the other way round, and rows 0
+\ and 1 share down.
+
+node 000
+: main
+    right b! down a!
+    0 99 for 999 for !b @ 1 + next next
+    up b! !b
+    left b! @b
+
+node 001
+: main right a! left b! begin @ !b again
+
+node 002
+: main left a! right b! begin @ !b again
+
+node 003
+: main right a! left b! begin @ !b again
+
+node 004
+: main left a! right b! begin @ !b again
+
+node 005
+: main right a! left b! begin @ !b again
+
+node 006
+: main left a! right b! begin @ !b again
+
+node 007
+: main right a! left b! begin @ !b again
+
+node 008
+: main left a! right b! begin @ !b again
+
+node 009
+: main right a! left b! begin @ !b again
+
+node 010
+: main left a! right b! begin @ !b again
+
+node 011
+: main right a! left b! begin @ !b again
+
+node 012
+: main left a! right b! begin @ !b again
+
+node 013
+: main right a! left b! begin @ !b again
+
+node 014
+: main left a! right b! begin @ !b again
+
+node 015
+: main right a! left b! begin @ !b again
+
+node 016
+: main left a! right b! begin @ !b again
+
+node 017
+: main right a! down b! begin @ !b again
+
+node 117
+: main down a! right b! begin @ !b again
+
+node 116
+: main right a! left b! begin @ !b again
+
+node 115
+: main left a! right b! begin @ !b again
+
+node 114
+: main right a! left b! begin @ !b again
+
+node 113
+: main left a! right b! begin @ !b again
+
+node 112
+: main right a! left b! begin @ !b again
+
+node 111
+: main left a! right b! begin @ !b again
+
+node 110
+: main right a! left b! begin @ !b again
+
+node 109
+: main left a! right b! begin @ !b again
+
+node 108
+: main right a! left b! begin @ !b again
+
+node 107
+: main left a! right b! begin @ !b again
+
+node 106
+: main right a! left b! begin @ !b again
+
+node 105
+: main left a! right b! begin @ !b again
+
+node 104
+: main right a! left b! begin @ !b again
+
+node 103
+: main left a! right b! begin @ !b again
+
+node 102
+: main right a! left b! begin @ !b again
+
+node 101
+: main left a! right b! begin @ !b again
+
+node 100
+: main right a! down b! begin @ !b again

@@ -57,6 +57,10 @@ const usage =
     \\                             word a node executes
     \\  --why                      with run, say what each node is waiting on
     \\                             once every node is waiting
+    \\  --stats                    with run, say how many steps the nodes took
+    \\                             (each word run, or tried while waiting on a
+    \\                             port), how fast, and how long that is on
+    \\                             the chip
     \\  --load <block>             with a .blk or .cf file, the block to load
     \\                             (default 0). Can be given more than once, to
     \\                             load blocks such as configuration first.
@@ -102,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
     var boot = false;
     var trace = false;
     var why = false;
+    var stats = false;
     var listing = false;
     var loads: [16]u32 = undefined;
     var loads_len: usize = 0;
@@ -177,6 +182,8 @@ pub fn main(init: std.process.Init) !void {
             trace = true;
         } else if (std.mem.eql(u8, arg, "--why")) {
             why = true;
+        } else if (std.mem.eql(u8, arg, "--stats")) {
+            stats = true;
         } else if (std.mem.eql(u8, arg, "--listing")) {
             listing = true;
         } else if (path == null and !std.mem.startsWith(u8, arg, "-")) {
@@ -192,6 +199,7 @@ pub fn main(init: std.process.Init) !void {
     const compile_colorforth = colorforth and (loads_len > 0 or command != .tui);
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
+    if (!listing and stats and command != .run) fatal("--stats needs run", .{});
     if (!listing and uart_node != null and command != .run) fatal("--uart needs run, as stdin and stdout are the UART's", .{});
     if (uart_node != null and console_given) fatal("--uart puts stdin and stdout on the UART, so there is no console for --console", .{});
     if (uart_node != null and boot and path == null) fatal("--boot needs a program to send node {d:0>3}", .{uart_node.?});
@@ -410,7 +418,9 @@ pub fn main(init: std.process.Init) !void {
     });
 
     var stderr_buffer: [4096]u8 = undefined;
-    var stderr_file_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    // streaming, as std.log writes to stderr too: a positional writer would
+    // write over its lines when stderr is a file
+    var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
     if (trace) chip.trace = &stderr_file_writer.interface;
     // what was traced up to an error or a breakpoint. Exiting without
     // returning skips this, so those paths flush first.
@@ -430,7 +440,14 @@ pub fn main(init: std.process.Init) !void {
     var reading = io.concurrent(Console.readInput, .{ io, &stdin_file_reader.interface, &input }) catch |err|
         fatal("cannot read input concurrently: {t}", .{err});
     errdefer reading.cancel(io) catch {};
+    const started: Io.Timestamp = .now(io, .awake);
     try chip.run();
+    if (stats) {
+        // after what was traced
+        const elapsed = started.durationTo(.now(io, .awake));
+        stderr_file_writer.interface.flush() catch {};
+        logStats(chip, elapsed);
+    }
     // stops a read blocked waiting for input that will no longer be taken
     reading.cancel(io) catch |err| switch (err) {
         error.Canceled => {},
@@ -600,6 +617,21 @@ fn writeBlocks(io: Io, arena: Allocator, path: []const u8, loads: []const u32) !
         try colorforth.writeText(decoded, writer);
     }
     try writer.flush();
+}
+
+/// Steps taken, how fast, and the time on the chip, which is as far as any
+/// node has got
+fn logStats(chip: Chip, elapsed: Io.Duration) void {
+    var time: u64 = 0;
+    for (chip.nodes) |n| time = @max(time, n.time);
+    const seconds = @as(f64, @floatFromInt(elapsed.toNanoseconds())) / 1e9;
+    const steps: f64 = @floatFromInt(chip.steps);
+    std.log.info("{d} steps in {d:.3} s, {d:.1}M steps/s, and {d:.3} ms of the chip's time", .{
+        chip.steps,
+        seconds,
+        if (seconds > 0) steps / seconds / 1e6 else 0,
+        @as(f64, @floatFromInt(time)) / 1e9,
+    });
 }
 
 /// Logs what each node is waiting on, such as `node 001 waiting to read

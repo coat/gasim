@@ -1,0 +1,9 @@
+\ compute.ga - one node computing, with no ports, for the F18's opcodes
+\ alone: five million passes of a loop of arithmetic, then the low byte of
+\ the result on the console
+
+: main
+    up b!
+    1 2499 for 1999 for dup 2* + 1 xor next next
+    !b
+    left b! @b             \ left faces off the west edge, so wait forever
