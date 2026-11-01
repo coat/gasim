@@ -20,6 +20,38 @@ github:coat/gasim#gui` for the GUI.
 `gasim-gui` is a desktop GUI, like the web version, in each release beside
 `gasim`. On Linux it needs glibc, and X11 or Wayland.
 
+### Fonts and colors
+
+`gasim-gui` reads its fonts and colors from `gasim/gui.json` under
+`XDG_CONFIG_HOME` (`~/.config`). Fonts are files, since the GUI draws only the
+TrueType and OpenType files it's given; a face left out is made from the
+regular one. The size is in points. The colors are a
+[base16](https://github.com/tinted-theming/home) scheme, shown by the Auto
+theme; Light and Dark keep their own colors, with the fonts chosen.
+
+```json
+{
+  "fonts": {
+    "sans": { "regular": "/path/to/Inter-Regular.ttf", "bold": "/path/to/Inter-Bold.ttf" },
+    "mono": { "regular": "/path/to/JetBrainsMono-Regular.otf" },
+    "size": 11
+  },
+  "colors": { "base00": "#1d2021", "base01": "#3c3836", "...": "...", "base0F": "#d65d0e" }
+}
+```
+
+With Home Manager, the flake's module writes it, from
+[Stylix](https://github.com/nix-community/stylix) when Stylix is on:
+
+```nix
+{
+  imports = [gasim.homeModules.default];
+  programs.gasim.enable = true;
+  # without Stylix, or to override it
+  programs.gasim.fonts.mono = { package = pkgs.jetbrains-mono; name = "JetBrains Mono"; };
+}
+```
+
 ## Usage
 
 ```bash

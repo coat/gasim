@@ -30,6 +30,7 @@ fn init(win: *dvui.Window) !void {
     else
         null else null;
     try ui.start(win.gpa, dirs);
+    if (configDir(arena, environ)) |config| style.load(win, try std.fs.path.join(arena, &.{ config, "gui.json" }));
 
     const args = try process.minimal.args.toSlice(arena);
     var path: ?[]const u8 = null;
@@ -87,6 +88,17 @@ fn stateDir(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const 
         std.fs.path.join(arena, &.{ environ.get("HOME") orelse return null, ".local", "state", "gasim" }) catch null;
 }
 
+/// where gasim's settings are, the GUI's fonts and colors: in gasim under
+/// XDG_CONFIG_HOME, or ~/.config
+fn configDir(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u8 {
+    return if (environ.get("XDG_CONFIG_HOME")) |config|
+        std.fs.path.join(arena, &.{ config, "gasim" }) catch null
+    else if (builtin.os.tag == .windows)
+        std.fs.path.join(arena, &.{ environ.get("APPDATA") orelse return null, "gasim" }) catch null
+    else
+        std.fs.path.join(arena, &.{ environ.get("HOME") orelse return null, ".config", "gasim" }) catch null;
+}
+
 const builtin = @import("builtin");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -95,4 +107,5 @@ const Io = std.Io;
 const dvui = @import("dvui");
 const files = @import("files.zig");
 const help = @import("help.zig");
+const style = @import("style.zig");
 const ui = @import("ui.zig");
