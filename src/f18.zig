@@ -157,6 +157,9 @@ pub const Computer = struct {
     /// io register bits reporting whether the node at the other end of each
     /// port is reading (active low) or writing
     const handshake_bits: u18 = 0x1fe00;
+    /// io register bit that, when set, has a read of the wakeup pin wait for
+    /// it to be low rather than high
+    const wake_low_bit: u18 = 1 << 11;
 
     /// control and status for communication ports and I/O logic.
     io: Word,
@@ -188,6 +191,11 @@ pub const Computer = struct {
     pin_inputs: u18,
     /// the data register, for nodes that have one
     data: ?Word,
+    /// the port that reads GPIO pin 17 as a wakeup pin, for edge nodes that
+    /// have one: Up on the top and bottom edges, Left on the sides. A read
+    /// waits until the pin is in the state WD in io selects, unless a device
+    /// is attached to the port.
+    wake_port: ?port.Direction = null,
 
     state: State = .fetch,
     // keeps track of current slot to help address decoding
@@ -200,7 +208,8 @@ pub const Computer = struct {
     /// from a port.
     transfers: Transfers = .{},
 
-    execution_time: f32,
+    /// picoseconds of execution, which waiting on a port does not add to
+    time: u64,
 
     pub const Status = union(enum) {
         running,
@@ -258,23 +267,23 @@ pub const Computer = struct {
         opcodes.opcodes[code](self);
         if (self.suspended) return;
 
-        self.execution_time += time: switch (code) {
+        self.time += time: switch (code) {
             0x00...0x03, 0x05...0x07 => {
                 // transfer of program control ends the instruction word
                 self.state = .fetch;
-                break :time 5.1;
+                break :time 5100;
             },
             0x04 => {
                 if (self.state == .unext) {
                     self.state = .execution;
                     self.slot = 0;
                 } else self.advance();
-                break :time 2.0;
+                break :time 2000;
             },
             else => {
                 self.advance();
                 // memory read and write (x08-x0F) are slower than ALU and register operations
-                break :time if (code <= 0x0f) 5.1 else 1.5;
+                break :time if (code <= 0x0f) 5100 else 1500;
             },
         };
     }
@@ -327,24 +336,63 @@ pub const Computer = struct {
         return false;
     }
 
-    /// A multiport read completes with the first port that is written
+    /// A multiport read completes with the first port that is written, or
+    /// the wakeup pin reaching the state it waits for
     fn readPorts(self: *Computer, ports: port.Select) ?Word {
         var it = ports.iterator();
         while (it.next()) |direction| {
             const link = self.ports[@backingInt(direction)];
-            const p = link.port orelse continue;
-            if (p.read(link.side)) |word| {
-                self.transfers.read.insert(direction);
-                self.transfers.value_read = word;
-                var others = ports.iterator();
-                while (others.next()) |other| {
-                    const other_link = self.ports[@backingInt(other)];
-                    if (other_link.port) |o| o.cancelRead(other_link.side);
-                }
-                return word;
+            const word = if (link.port) |p|
+                p.read(link.side) orelse continue
+            else if (self.awake(direction))
+                // a value the program must drop
+                0
+            else
+                continue;
+            self.transfers.read.insert(direction);
+            self.transfers.value_read = word;
+            var others = ports.iterator();
+            while (others.next()) |other| {
+                const other_link = self.ports[@backingInt(other)];
+                if (other_link.port) |o| o.cancelRead(other_link.side);
             }
+            return word;
         }
         return null;
+    }
+
+    /// whether a read of the port is of the wakeup pin, and the pin is in
+    /// the state it waits for
+    fn awake(self: Computer, direction: port.Direction) bool {
+        if (self.wake_port != direction) return false;
+        const low = @as(u18, @bitCast(self.io)) & wake_low_bit != 0;
+        return self.pinHigh(1 << 17) != low;
+    }
+
+    /// whether a read of the wakeup pin would complete
+    pub fn pinAwake(self: Computer) bool {
+        return self.awake(self.wake_port orelse return false);
+    }
+
+    /// Whether the node is suspended reading its wakeup pin, alone or with
+    /// other ports
+    pub fn waitsOnPin(self: Computer) bool {
+        const direction = self.wake_port orelse return false;
+        const address = switch (self.status()) {
+            .code, .reading => |address| address,
+            .running, .writing => return false,
+        };
+        const ports = port.select(address) orelse return false;
+        return ports.contains(direction) and self.ports[@backingInt(direction)].port == null;
+    }
+
+    /// The level of a GPIO pin, given by its io bit: driven by the node, or
+    /// following its input when not
+    pub fn pinHigh(self: Computer, bit: u18) bool {
+        const written: u18 = @bitCast(self.io);
+        // a pin's two control bits start at its io bit: 10 drives it low, 11
+        // high, and otherwise it follows its input
+        return if (written & bit != 0) written & (bit >> 1) != 0 else self.pin_inputs & bit != 0;
     }
 
     /// A multiport write is delivered to every port that is already being
@@ -377,14 +425,10 @@ pub const Computer = struct {
     fn readIo(self: Computer) Word {
         const written: u18 = @bitCast(self.io);
         var value: u18 = ~written & ~handshake_bits & ~self.pins;
-        // a pin's two control bits start at its io bit: 10 drives it low, 11
-        // high, and otherwise it follows its input
         var pins = self.pins;
         while (pins != 0) : (pins &= pins - 1) {
             const bit = pins & -%pins;
-            const driven = written & bit != 0;
-            const high = if (driven) written & (bit >> 1) != 0 else self.pin_inputs & bit != 0;
-            if (high) value |= bit;
+            if (self.pinHigh(bit)) value |= bit;
         }
         for (self.ports, 0..) |link, i| {
             // Rr- is bit 16, Rw is bit 15, Dr- is bit 14 and so on
@@ -441,7 +485,7 @@ pub const Computer = struct {
         .state = .fetch,
         .slot = 0,
         .suspended = false,
-        .execution_time = 0.0,
+        .time = 0,
     };
 };
 
@@ -825,19 +869,19 @@ test "execution time depends on the opcode class" {
     computer.slot = 1;
 
     computer.execute(.@".");
-    try expectApproxEqAbs(1.5, computer.execution_time, 0.001);
+    try expectEqual(1500, computer.time);
 
-    computer.execution_time = 0;
+    computer.time = 0;
     computer.execute(.@"@b");
-    try expectApproxEqAbs(5.1, computer.execution_time, 0.001);
+    try expectEqual(5100, computer.time);
 
-    computer.execution_time = 0;
+    computer.time = 0;
     computer.execute(.@"!");
-    try expectApproxEqAbs(5.1, computer.execution_time, 0.001);
+    try expectEqual(5100, computer.time);
 
-    computer.execution_time = 0;
+    computer.time = 0;
     computer.execute(.@"+*");
-    try expectApproxEqAbs(1.5, computer.execution_time, 0.001);
+    try expectEqual(1500, computer.time);
 }
 
 test "instruction encoding" {
@@ -1031,6 +1075,31 @@ test "io register reads GPIO pin levels" {
     try expectEqual(0, value & (1 << 17 | 1 << 1));
 }
 
+test "a read of the wakeup pin waits for the state WD selects" {
+    var node: Computer = .reset;
+    node.pins = 1 << 17;
+    node.wake_port = .up;
+    const up = Address.fromWord(0x145);
+    const rdlu = Address.fromWord(0x1a5);
+
+    // waits for the pin to be high, alone or with other ports
+    try expectEqual(null, node.read(up));
+    try expect(node.suspended);
+    node.pin_inputs = 1 << 17;
+    try expectEqual(0, node.read(up));
+    try expect(node.transfers.read.contains(.up));
+    try expectEqual(0, node.read(rdlu));
+
+    // or low, with WD set
+    try expect(node.write(Address.fromWord(Computer.io_address), @bitCast(@as(u18, 0x15555 | 1 << 11))));
+    try expectEqual(null, node.read(up));
+    node.pin_inputs = 0;
+    try expectEqual(0, node.read(up));
+
+    // other ports never wake on the pin
+    try expectEqual(null, node.read(Address.fromWord(0x175)));
+}
+
 test "data register" {
     var node: Computer = .reset;
     const data = Address.fromWord(Computer.data_address);
@@ -1073,7 +1142,6 @@ const stack = @import("stack.zig");
 const std = @import("std");
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
-const expectApproxEqAbs = std.testing.expectApproxEqAbs;
 
 test "status" {
     var n: Computer = .reset;

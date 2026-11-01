@@ -15,6 +15,11 @@
 //!
 //! What each node is loaded with, and how it starts, is given by a
 //! descriptor, as arrayForth 3's boot descriptors describe nodes.
+//!
+//! An async boot stream is for node 708's ROM, which receives it on a pin
+//! from a UART (see `asyncStream`). It is made of frames, each storing words
+//! into the node's RAM or writing them to a port, for a neighbour to
+//! execute, and then jumping: to read another frame, or to start.
 
 /// What to load into a node's RAM from the programs saved in bins, what to
 /// set its registers and stacks to, and where to start it
@@ -99,57 +104,166 @@ pub fn stream(
     programs: []const Program,
     buffer: []Word,
 ) (Allocator.Error || error{ NoSuchNode, NoSuchBin, StreamTooLong })![]Word {
-    const count = layout.count();
     const root_index = layout.index(root) orelse return error.NoSuchNode;
+    var tree: Tree = try .init(gpa, layout, root_index, descriptors, programs);
+    defer tree.deinit(gpa);
 
-    const descriptor_of = try gpa.alloc(?*const Descriptor, count);
-    defer gpa.free(descriptor_of);
-    @memset(descriptor_of, null);
-    for (descriptors) |*descriptor| {
-        descriptor_of[layout.index(descriptor.node) orelse return error.NoSuchNode] = descriptor;
-        for (descriptor.loads[0..descriptor.load_count]) |load| _ = findBin(programs, load.bin) orelse return error.NoSuchBin;
-    }
-
-    // a breadth first tree, so streams take the shortest path to each node
-    const parent = try gpa.alloc(?u16, count);
-    defer gpa.free(parent);
-    @memset(parent, null);
-    const queue = try gpa.alloc(u16, count);
-    defer gpa.free(queue);
-    parent[root_index] = root_index;
-    queue[0] = root_index;
-    var head: usize = 0;
-    var tail: usize = 1;
-    while (head < tail) : (head += 1) {
-        const i = queue[head];
-        for (directions) |direction| {
-            const child = layout.neighbour(i, direction) orelse continue;
-            if (parent[child] != null) continue;
-            parent[child] = i;
-            queue[tail] = child;
-            tail += 1;
-        }
-    }
-
-    // the nodes whose trees have a program, children before their parents
-    const needed = try gpa.alloc(bool, count);
-    defer gpa.free(needed);
-    @memset(needed, false);
-    var i = tail;
-    while (i > 0) {
-        i -= 1;
-        const node = queue[i];
-        if (descriptor_of[node] != null) needed[node] = true;
-        if (needed[node]) needed[parent[node].?] = true;
-    }
-
-    var builder: Builder = .{ .layout = layout, .root_port = root_port, .parent = parent, .descriptor_of = descriptor_of, .programs = programs, .needed = needed, .buffer = buffer };
-    if (needed[root_index]) {
+    var builder: Builder = .{ .layout = layout, .root_port = root_port, .tree = tree, .programs = programs, .buffer = buffer };
+    if (tree.needed[root_index]) {
         try builder.emit(.load, root_index);
         try builder.emit(.start, root_index);
     }
     return buffer[0..builder.len];
 }
+
+/// where `ser-exec` is in node 708's ROM, which reads a frame of an async
+/// boot stream: a frame that jumps here is followed by another
+pub const read_frame: u10 = 0xae;
+
+/// Builds an async boot stream that sets up nodes as `descriptors` say,
+/// loading RAM from `programs`, for the ROM of node `root` to receive, into
+/// `buffer`. Uses `gpa` for scratch space.
+///
+/// A frame is a word to jump to once it is received, where to store its
+/// words, how many there are, and the words. The streams for the trees
+/// under the root's neighbours are written to the ports facing them: each
+/// tree's loading, and then each tree's start. The root's own loads are
+/// stored in its RAM, and the code that sets its registers and stacks after
+/// them, so that the last frame jumps there, or to where the root starts.
+/// A root without a descriptor goes back to waiting on its ports and its
+/// pin, at cold, so that it can be sent another stream. (Its warm executes
+/// from the ports and the pin, and so the word a pin wakeup reads.)
+pub fn asyncStream(
+    gpa: Allocator,
+    layout: Chip.Layout,
+    root: u16,
+    descriptors: []const Descriptor,
+    programs: []const Program,
+    buffer: []Word,
+) (Allocator.Error || error{ NoSuchNode, NoSuchBin, StreamTooLong, RootTooLong })![]Word {
+    const root_index = layout.index(root) orelse return error.NoSuchNode;
+    var tree: Tree = try .init(gpa, layout, root_index, descriptors, programs);
+    defer tree.deinit(gpa);
+
+    // the root's port is never used, as it does not execute a stream
+    var builder: Builder = .{ .layout = layout, .root_port = .up, .tree = tree, .programs = programs, .buffer = buffer };
+    for ([_]Builder.Pass{ .load, .start }) |pass| for (directions) |direction| {
+        const child = layout.neighbour(root_index, direction) orelse continue;
+        if (tree.parent[child] != root_index or !tree.needed[child]) continue;
+        const header = try builder.reserve(3);
+        const start = builder.len;
+        try builder.emit(pass, child);
+        header.* = frameHeader(read_frame, port.multiport(.initOne(direction)), builder.len - start);
+    };
+
+    const d = tree.descriptor_of[root_index] orelse {
+        (try builder.reserve(3)).* = frameHeader(ga144.romWord(root, "cold").?, 0, 0);
+        return buffer[0..builder.len];
+    };
+    var end: usize = 0;
+    for (d.loads[0..d.load_count]) |load| if (load.len > 0) {
+        const program = findBin(programs, load.bin).?;
+        const words = try builder.reserveSlice(3 + load.len);
+        words[0..3].* = frameHeader(read_frame, load.destination, load.len);
+        @memcpy(words[3..], program.ram[load.source..][0..load.len]);
+        end = @max(end, @as(usize, load.destination) + load.len);
+    };
+    // the code to set registers and stacks, then jump to where it starts
+    const header = try builder.reserve(3);
+    const start = builder.len;
+    try builder.setUp(d);
+    const setup = builder.len - start;
+    if (setup == 1) {
+        // only the jump, which the frame can do itself
+        builder.len -= 4;
+        (try builder.reserve(3)).* = frameHeader(d.p, 0, 0);
+    } else {
+        if (end + setup > 64) return error.RootTooLong;
+        header.* = frameHeader(@intCast(end), @intCast(end), setup);
+    }
+    return buffer[0..builder.len];
+}
+
+fn frameHeader(jump: u10, destination: u9, len: usize) [3]Word {
+    return .{ jump, destination, @intCast(len) };
+}
+
+/// Writes the bytes a UART sends node 708's ROM for each word of an async
+/// boot stream, into `buffer`, which takes 3 bytes for each word. The first
+/// byte's low 6 bits are x2d, a pattern the ROM measures the bit time with,
+/// and its high 2 bits the word's low 2 bits. The ROM reads data bits as
+/// inverted, so the bytes are too.
+pub fn asyncBytes(words: []const Word, buffer: []u8) []u8 {
+    for (words, 0..) |word, i| {
+        const w: u18 = @bitCast(word);
+        buffer[3 * i ..][0..3].* = .{
+            ~(@as(u8, @truncate(w << 6)) | 0x2d),
+            ~@as(u8, @truncate(w >> 2)),
+            ~@as(u8, @truncate(w >> 10)),
+        };
+    }
+    return buffer[0 .. 3 * words.len];
+}
+
+/// The tree a stream takes through the array from its root, and the nodes
+/// whose trees have a program
+const Tree = struct {
+    descriptor_of: []?*const Descriptor,
+    /// each node's parent, and the root its own
+    parent: []?u16,
+    needed: []bool,
+
+    fn init(gpa: Allocator, layout: Chip.Layout, root_index: u16, descriptors: []const Descriptor, programs: []const Program) (Allocator.Error || error{ NoSuchNode, NoSuchBin })!Tree {
+        const count = layout.count();
+        const descriptor_of = try gpa.alloc(?*const Descriptor, count);
+        errdefer gpa.free(descriptor_of);
+        @memset(descriptor_of, null);
+        for (descriptors) |*descriptor| {
+            descriptor_of[layout.index(descriptor.node) orelse return error.NoSuchNode] = descriptor;
+            for (descriptor.loads[0..descriptor.load_count]) |load| _ = findBin(programs, load.bin) orelse return error.NoSuchBin;
+        }
+
+        // a breadth first tree, so streams take the shortest path to each node
+        const parent = try gpa.alloc(?u16, count);
+        errdefer gpa.free(parent);
+        @memset(parent, null);
+        const queue = try gpa.alloc(u16, count);
+        defer gpa.free(queue);
+        parent[root_index] = root_index;
+        queue[0] = root_index;
+        var head: usize = 0;
+        var tail: usize = 1;
+        while (head < tail) : (head += 1) {
+            const i = queue[head];
+            for (directions) |direction| {
+                const child = layout.neighbour(i, direction) orelse continue;
+                if (parent[child] != null) continue;
+                parent[child] = i;
+                queue[tail] = child;
+                tail += 1;
+            }
+        }
+
+        // the nodes whose trees have a program, children before their parents
+        const needed = try gpa.alloc(bool, count);
+        @memset(needed, false);
+        var i = tail;
+        while (i > 0) {
+            i -= 1;
+            const node = queue[i];
+            if (descriptor_of[node] != null) needed[node] = true;
+            if (needed[node]) needed[parent[node].?] = true;
+        }
+        return .{ .descriptor_of = descriptor_of, .parent = parent, .needed = needed };
+    }
+
+    fn deinit(self: *Tree, gpa: Allocator) void {
+        gpa.free(self.descriptor_of);
+        gpa.free(self.parent);
+        gpa.free(self.needed);
+        self.* = undefined;
+    }
+};
 
 /// The most words a stream that sets up `descriptors` on `layout` can take,
 /// to size the buffer for `stream`
@@ -182,10 +296,8 @@ fn copyLoop(set: Opcode, store: Opcode, target: u9, count: usize) [5]Word {
 const Builder = struct {
     layout: Chip.Layout,
     root_port: Direction,
-    parent: []const ?u16,
-    descriptor_of: []const ?*const Descriptor,
+    tree: Tree,
     programs: []const Program,
-    needed: []const bool,
     buffer: []Word,
     len: usize = 0,
 
@@ -193,13 +305,13 @@ const Builder = struct {
 
     /// Emits a pass of the stream for the tree under node `i`
     fn emit(self: *Builder, pass: Pass, i: u16) error{StreamTooLong}!void {
-        const descriptor = self.descriptor_of[i];
+        const descriptor = self.tree.descriptor_of[i];
         // execute only from the port facing the parent from now on
         if (pass == .load) try self.jump(port.multiport(.initOne(self.parentPort(i))));
 
         for (directions) |direction| {
             const child = self.layout.neighbour(i, direction) orelse continue;
-            if (self.parent[child] != i or !self.needed[child]) continue;
+            if (self.tree.parent[child] != i or !self.tree.needed[child]) continue;
 
             const header = self.len;
             _ = try self.reserve(5);
@@ -218,22 +330,26 @@ const Builder = struct {
             // copy each load into RAM through A
             .load => for (d.loads[0..d.load_count]) |load| if (load.len > 0) {
                 const program = findBin(self.programs, load.bin).?;
-                const words = try self.reserve(5 + load.len);
+                const words = try self.reserveSlice(5 + load.len);
                 words[0..5].* = copyLoop(.@"a!", .@"!+", load.destination, load.len);
                 @memcpy(words[5..], program.ram[load.source..][0..load.len]);
             },
-            .start => {
-                if (d.io) |io| {
-                    try self.literal(.@"b!", Computer.io_address);
-                    try self.literal(.@"!b", io);
-                }
-                if (d.a) |a| try self.literal(.@"a!", a);
-                if (d.b) |b| try self.literal(.@"b!", b);
-                for (d.return_stack[0..d.return_stack_len]) |value| try self.literal(.@">r", value);
-                for (d.stack[0..d.stack_len]) |value| try self.literal(.@".", value);
-                try self.jump(d.p);
-            },
+            .start => try self.setUp(d),
         }
+    }
+
+    /// code that sets registers and stacks as a descriptor says, then jumps
+    /// to where the node starts
+    fn setUp(self: *Builder, d: *const Descriptor) error{StreamTooLong}!void {
+        if (d.io) |io| {
+            try self.literal(.@"b!", Computer.io_address);
+            try self.literal(.@"!b", io);
+        }
+        if (d.a) |a| try self.literal(.@"a!", a);
+        if (d.b) |b| try self.literal(.@"b!", b);
+        for (d.return_stack[0..d.return_stack_len]) |value| try self.literal(.@">r", value);
+        for (d.stack[0..d.stack_len]) |value| try self.literal(.@".", value);
+        try self.jump(d.p);
     }
 
     /// code that fetches a literal with @p and then runs `opcode`
@@ -243,7 +359,11 @@ const Builder = struct {
         words[1] = value;
     }
 
-    fn reserve(self: *Builder, n: usize) error{StreamTooLong}![]Word {
+    fn reserve(self: *Builder, comptime n: usize) error{StreamTooLong}!*[n]Word {
+        return (try self.reserveSlice(n))[0..n];
+    }
+
+    fn reserveSlice(self: *Builder, n: usize) error{StreamTooLong}![]Word {
         if (self.buffer.len - self.len < n) return error.StreamTooLong;
         defer self.len += n;
         return self.buffer[self.len..][0..n];
@@ -256,7 +376,7 @@ const Builder = struct {
 
     /// the port of node `i` facing its parent, or the port the stream enters
     fn parentPort(self: Builder, i: u16) Direction {
-        const parent = self.parent[i].?;
+        const parent = self.tree.parent[i].?;
         if (parent == i) return self.root_port;
         for (directions) |direction| if (self.layout.neighbour(i, direction) == parent) return direction;
         unreachable;
@@ -354,6 +474,155 @@ test "boot node 001 from ROM" {
 
     try chip.run();
     try std.testing.expectEqualStrings("BOOT ME", output.buffered());
+}
+
+test "boot node 708 from ROM through a UART" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    try chip.loadRom(parsed);
+
+    // node 707 gives node 708 two bytes, which it sends back on its pin
+    // 708.1, an inverted line, at 921600 baud with a bit time of 1085 ns
+    var programs: [2]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const source =
+        \\ node 707 : main left b! 72 !b 105 !b up b! @b
+        \\ node 708 : main left b! io a! @b send @b send up b! @b
+        \\ : bit ( level ) ! 539 for unext ;
+        \\ : send ( c ) 3 bit 7 for dup 1 and 1 xor 2 + bit 2/ next drop 2 bit ;
+    ;
+    const assembled = try assembler.assembleNodes(source, &programs, &diagnostic);
+    var descriptors: [2]Descriptor = undefined;
+    var words: [256]Word = undefined;
+    const frames = try asyncStream(std.testing.allocator, .ga144, 708, ofPrograms(assembled, &descriptors), assembled, &words);
+    var bytes: [3 * words.len]u8 = undefined;
+
+    var output_buffer: [16]u8 = undefined;
+    var output: Io.Writer = .fixed(&output_buffer);
+    var uart: Uart = .init(921600, &output);
+    uart.preload = asyncBytes(frames, &bytes);
+    try chip.attachUart(&uart, 708);
+    try chip.run();
+
+    try std.testing.expectEqualStrings("Hi", output.buffered());
+    for (assembled) |program| {
+        const n = chip.node(program.node).?;
+        try std.testing.expectEqualSlices(Word, program.ram[0..program.len], n.mem[0..program.len]);
+    }
+    // waiting for its pin on its up port, which the idle line never wakes
+    try std.testing.expect(chip.node(708).?.waitsOnPin());
+}
+
+test "boot node 708 from input that arrives while it waits on its pin" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    try chip.loadRom(parsed);
+
+    var programs: [1]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try assembler.assembleNodes("node 708 : main 5 right b! @b", &programs, &diagnostic);
+    // one frame that loads RAM and jumps to 0, as ga-tools makes for a
+    // single node, which only boots if the node wakes on the start bit of
+    // its first word, and not the next change of the line
+    var words: [67]Word = undefined;
+    words[0..3].* = frameHeader(0, 0, assembled[0].len);
+    @memcpy(words[3..][0..assembled[0].len], assembled[0].ram[0..assembled[0].len]);
+    const frames = words[0 .. 3 + assembled[0].len];
+    var bytes: [3 * words.len]u8 = undefined;
+
+    var output: Io.Writer = .fixed(&.{});
+    var uart: Uart = .init(921600, &output);
+    try chip.attachUart(&uart, 708);
+    // with no input, node 708 waits on its pin
+    try chip.run();
+    try std.testing.expect(chip.node(708).?.waitsOnPin());
+
+    // and its start bit begins as it arrives, at the node's time
+    var input_buffer: [bytes.len]u8 = undefined;
+    var input = try Console.testInput(&input_buffer, asyncBytes(frames, &bytes));
+    uart.input = .{ .io = std.testing.io, .queue = &input };
+    try chip.run();
+    try std.testing.expectEqual(5, chip.node(708).?.data_stack.t);
+}
+
+test "node 708 takes another stream once it has booted only its neighbours" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    try chip.loadRom(parsed);
+
+    var programs: [2]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try assembler.assembleNodes(
+        \\ node 608 : main 6 left b! @b
+        \\ node 708 : main 5 right b! @b
+    , &programs, &diagnostic);
+    // a stream for node 608 only, and then one for node 708
+    const descriptors: [1]Descriptor = .{.ofProgram(assembled[0])};
+    var first_buffer: [256]Word = undefined;
+    const first = try asyncStream(std.testing.allocator, .ga144, 708, &descriptors, assembled, &first_buffer);
+    var first_bytes: [3 * first_buffer.len]u8 = undefined;
+    var second: [67]Word = undefined;
+    second[0..3].* = frameHeader(0, 0, assembled[1].len);
+    @memcpy(second[3..][0..assembled[1].len], assembled[1].ram[0..assembled[1].len]);
+    var second_bytes: [3 * second.len]u8 = undefined;
+
+    var output: Io.Writer = .fixed(&.{});
+    var uart: Uart = .init(921600, &output);
+    uart.preload = asyncBytes(first, &first_bytes);
+    var input_buffer: [second_bytes.len]u8 = undefined;
+    var input = try Console.testInput(&input_buffer, asyncBytes(second[0 .. 3 + assembled[1].len], &second_bytes));
+    uart.input = .{ .io = std.testing.io, .queue = &input };
+    try chip.attachUart(&uart, 708);
+    try chip.run();
+    try std.testing.expectEqual(6, chip.node(608).?.data_stack.t);
+    try std.testing.expectEqual(5, chip.node(708).?.data_stack.t);
+}
+
+test asyncStream {
+    const source =
+        \\ node 708 : main dup ;
+        \\ node 608 : main over ;
+    ;
+    var programs: [2]Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try assembler.assembleNodes(source, &programs, &diagnostic);
+    var buffer: [256]Word = undefined;
+
+    // a root without a descriptor goes to cold
+    var descriptors: [2]Descriptor = .{ .ofProgram(assembled[1]), .ofProgram(assembled[0]) };
+    const without = try asyncStream(std.testing.allocator, .ga144, 708, descriptors[0..1], assembled, &buffer);
+    try std.testing.expectEqualSlices(Word, &.{ 0xaa, 0, 0 }, without[without.len - 3 ..]);
+
+    // node 608 is loaded and started through the port facing it, down
+    const with = try asyncStream(std.testing.allocator, .ga144, 708, &descriptors, assembled, &buffer);
+    try std.testing.expectEqualSlices(Word, &.{ read_frame, port.multiport(.initOne(.down)) }, with[0..2]);
+    // then node 708's RAM, and a frame that jumps to main
+    try std.testing.expectEqualSlices(Word, &.{ assembled[0].entry.toWord(), 0, 0 }, with[with.len - 3 ..]);
+    const load = with.len - 3 - assembled[0].len - 3;
+    try std.testing.expectEqualSlices(Word, &.{ read_frame, 0, assembled[0].len }, with[load..][0..3]);
+
+    // code to set up registers goes in RAM after the program
+    descriptors[1].a = 0x15d;
+    const set_up = try asyncStream(std.testing.allocator, .ga144, 708, &descriptors, assembled, &buffer);
+    try std.testing.expectEqualSlices(Word, &.{ assembled[0].len, assembled[0].len, 3 }, set_up[set_up.len - 6 ..][0..3]);
+    descriptors[1].loads[0].len = 64;
+    descriptors[1].loads[0].bin = 708;
+    try std.testing.expectError(error.RootTooLong, asyncStream(std.testing.allocator, .ga144, 708, &descriptors, assembled, &buffer));
+}
+
+test asyncBytes {
+    var buffer: [6]u8 = undefined;
+    // as ga-tools sends words to node 708
+    try std.testing.expectEqualSlices(u8, &.{ 0xd2, 0xff, 0xff, 0x92, 0xe0, 0x00 }, asyncBytes(&.{ 0, @bitCast(@as(u18, 0x3fc7d)) }, &buffer));
 }
 
 test "descriptors load parts of RAM, set registers and push onto stacks" {
@@ -460,6 +729,7 @@ fn ofPrograms(programs: []const Program, buffer: []Descriptor) []Descriptor {
 const assembler = @import("assembler.zig");
 const Program = assembler.Program;
 const Console = @import("Console.zig");
+const Uart = @import("Uart.zig");
 const ga144 = @import("ga144.zig");
 const testRom = @import("rom.zig").testRom;
 const Chip = @import("Chip.zig");

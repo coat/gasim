@@ -587,7 +587,8 @@ pub const NodeView = struct {
     a: u18,
     b: u9,
     io: u18,
-    time: f32,
+    /// nanoseconds spent executing
+    time: f64,
     /// T, S and the rest from the top
     data_stack: [10]u18,
     /// R and the rest from the top
@@ -629,7 +630,7 @@ pub fn node(self: *Sim, a: Allocator, i: u16) error{OutOfMemory}!NodeView {
         .a = @bitCast(n.a),
         .b = n.b,
         .io = @bitCast(n.io),
-        .time = n.execution_time,
+        .time = @as(f64, @floatFromInt(n.time)) / 1000,
         .data_stack = undefined,
         .return_stack = undefined,
         .here = if (word.io) null else @bitCast(word),

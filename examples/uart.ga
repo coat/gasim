@@ -1,0 +1,26 @@
+\ uart.ga - print a greeting on node 708's serial port
+\
+\ On GreenArrays' evaluation boards a USB serial port is wired to pins 17
+\ and 1 of node 708, with both lines inverted: the pins idle low, and a
+\ start bit is high. Node 708 sends each byte on pin 1 at 921600 baud, a
+\ bit every 1085 ns, which UART takes:
+\
+\     gasim run --uart 708 examples/uart.ga
+
+node 708
+: main
+    io b!                  \ B addresses io, to drive pin 1
+    'message a!            \ A walks through the message
+    @+ for @+ send next    \ the first word is the length - 1
+    right a! @             \ wait forever on node 709
+
+\ drives pin 1 high (3) or low (2) for a bit, 540 unexts of 2 ns each
+: bit ( level ) !b 539 for unext ;
+
+\ a start bit, 8 data bits from the lowest, and a stop bit, inverted
+: send ( c )
+    3 bit
+    7 for dup 1 and 1 xor 2 + bit 2/ next drop
+    2 bit ;
+
+: message 13 , "Hello, world!" 10 ,

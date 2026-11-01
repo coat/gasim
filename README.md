@@ -104,9 +104,24 @@ more info.
 - `--rom <path>`: ROM to load into the nodes: a dump of it, or arrayForth
   3's disk (`sF/pFDISK.blk`) or the directory it is installed in, to
   assemble it from (see [ROM](#rom))
+- `--uart <node>[:<baud>]`: with `run`, put stdin and stdout on a UART on
+  the node's pins 17 and 1 instead of the console. This is how a USB serial
+  port is wired to node 708 on GreenArrays' evaluation boards, with both
+  lines inverted (default 921600 baud). Bytes from the host boot node 708
+  from ROM, so `gasim run --uart 708` without a program boots whatever stdin
+  sends it, such as a stream from ga-tools.
 - `--boot`: load programs with a boot stream through the SERDES port of node
   001, as one GA144 boots another, instead of writing them straight into RAM.
-  This needs ROM.
+  With `--uart 708`, the stream goes through the UART to node 708's ROM
+  instead, before stdin. This needs ROM.
+
+  ```
+  $ gasim run --uart 708 examples/uart.ga
+  Hello, world!
+  $ gasim run --uart 708 --boot examples/uart.ga
+  Hello, world!
+  ```
+
 - `--break <node>:<address>`: stop when the node is about to fetch the word at
   the address, given in hex, and print its stacks and registers. Literals
   are never fetched as instructions, so a breakpoint on one never stops. Can

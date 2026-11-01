@@ -12,6 +12,21 @@ test "upcase" {
     try expectOutput(@embedFile("upcase.ga"), "Hello, World! az{`@[\n", "HELLO, WORLD! AZ{`@[\n");
 }
 
+test "uart" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var programs: [1]gasim.assembler.Program = undefined;
+    var diagnostic: gasim.assembler.Diagnostic = .{};
+    for (try gasim.assembler.assembleNodes(@embedFile("uart.ga"), &programs, &diagnostic)) |program| try chip.load(program);
+
+    var buffer: [32]u8 = undefined;
+    var output: std.Io.Writer = .fixed(&buffer);
+    var uart: gasim.Uart = .init(921600, &output);
+    try chip.attachUart(&uart, 708);
+    try chip.run();
+    try std.testing.expectEqualStrings("Hello, world!\n", output.buffered());
+}
+
 // and the same in arrayForth 3
 
 test "hello.af" {
@@ -54,6 +69,9 @@ test "multiply.cf" {
     try expectColorForthOutput(@embedFile("multiply.cf"), "", "bad\nfe01\n");
 }
 
+const gasim = @import("gasim");
+const Chip = gasim.Chip;
+const std = @import("std");
 const expectOutput = @import("gasim").Chip.expectOutput;
 const expectArrayForthOutput = @import("gasim").Chip.expectArrayForthOutput;
 const expectColorForthOutput = @import("gasim").Chip.expectColorForthOutput;
