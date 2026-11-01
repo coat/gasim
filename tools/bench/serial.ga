@@ -1,0 +1,31 @@
+\ serial.ga - node 708 takes 65536 bytes through the UART on its pins, as
+\ on GreenArrays' evaluation boards, and sends back the low byte of their
+\ sum: a long stream at 921600 baud, timed by unext loops as on a board.
+\ On the board's inverted line a start bit is high, and data bits are low
+\ for 1. Pin 17 is read in io's bit 17, and waited on through up.
+
+node 708
+: main
+    io b! up a!
+    0 63 for 1023 for rx + next next
+    255 and send
+    right a! @             \ wait forever on node 709
+
+\ waits for the start bit, then samples the middle of each data bit, the
+\ first into bit 0, and waits into the stop bit, where the line is low
+: rx ( -- c )
+    @ drop 214 for unext
+    0 7 for
+        414 for unext
+        2/ @b 2/ 2/ 2/ 2/ 2/ 2/ 2/ 2/ 2/ 2/ 0x80 and 0x80 xor +
+    next
+    428 for unext ;
+
+\ drives pin 1 high (3) or low (2) for a bit
+: bit ( level ) !b 428 for unext ;
+
+\ a start bit, 8 data bits from the lowest, and a stop bit, inverted
+: send ( c )
+    3 bit
+    7 for dup 1 and 1 xor 2 + bit 2/ next drop
+    2 bit ;

@@ -1734,7 +1734,7 @@ const Tui = struct {
     }
 
     fn drawNode(self: *Tui, win: vaxis.Window) void {
-        const n = self.chip.nodes[self.selected];
+        const n = &self.chip.nodes[self.selected];
         const node_status = n.status();
         _ = win.printSegment(.{ .text = switch (node_status) {
             .running => "running",
@@ -1769,7 +1769,7 @@ const Tui = struct {
     }
 
     /// RAM and ROM, following the current word unless scrolled
-    fn drawMemory(self: *Tui, win: vaxis.Window, n: Computer) void {
+    fn drawMemory(self: *Tui, win: vaxis.Window, n: *const Computer) void {
         const page = @max(win.height, 1);
         const first = self.memoryFirstRow();
         const here = memoryRow(n.current());

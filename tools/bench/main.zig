@@ -15,14 +15,34 @@ const Workload = struct {
     /// what it measures
     about: []const u8,
     program: []const u8,
-    /// bytes of generated text for the console, if any
+    /// bytes of generated text for stdin, if any
     input: usize = 0,
+    /// options for `gasim run`, such as board mode's `--uart`
+    options: []const []const u8 = &.{},
+    /// whether it needs a ROM, and is left out without one
+    rom: bool = false,
 };
 
 const workloads = [_]Workload{
     .{ .name = "compute", .about = "one node's opcodes, with no ports", .program = "tools/bench/compute.ga" },
     .{ .name = "ring", .about = "port transfers around 36 nodes", .program = "tools/bench/ring.ga" },
     .{ .name = "upcase", .about = "1 MiB through the console and two nodes", .program = "examples/upcase.ga", .input = 1 << 20 },
+    .{
+        .name = "boot",
+        // with no console, node 000's count is never output, so there is
+        // nothing to compare with the base's
+        .about = "board mode: the ring booted through the UART and 708's ROM, then run (no output)",
+        .program = "tools/bench/ring.ga",
+        .options = &.{ "--uart", "708", "--boot" },
+        .rom = true,
+    },
+    .{
+        .name = "serial",
+        .about = "board mode: 64 KiB through the UART to 708, a bit at a time",
+        .program = "tools/bench/serial.ga",
+        .input = 1 << 16,
+        .options = &.{ "--uart", "708" },
+    },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -38,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     for (args[6..]) |name| {
         for (workloads) |w| {
             if (std.mem.eql(u8, w.name, name)) break try chosen.append(arena, w);
-        } else fatal("no workload {s}: there are compute, ring and upcase", .{name});
+        } else fatal("no workload {s}: there are compute, ring, upcase, boot and serial", .{name});
     }
     if (chosen.items.len == 0) try chosen.appendSlice(arena, &workloads);
 
@@ -58,9 +78,17 @@ pub fn main(init: std.process.Init) !void {
 
         // the steps once, and that both make the same output
         const run = try runScript(io, arena, script, true);
+        if (!run.term.success()) {
+            if (w.rom and std.mem.indexOf(u8, run.stderr, "needs a ROM") != null) {
+                try out.print("  left out, as gasim has no ROM (see --rom in the README)\n", .{});
+                continue;
+            }
+            fatal("{s} failed: {s}", .{ script, run.stderr });
+        }
         try out.print("{s}", .{run.stderr});
         if (base_script) |s| {
             const base_run = try runScript(io, arena, s, false);
+            if (!base_run.term.success()) fatal("{s} failed: {s}", .{ s, base_run.stderr });
             if (!std.mem.eql(u8, run.stdout, base_run.stdout)) try out.print("warning: {s}'s output differs from this one's\n", .{base.?.label});
         }
         try out.flush();
@@ -137,9 +165,11 @@ fn generateInput(io: Io, arena: Allocator, work: []const u8, len: usize) ![]cons
 fn writeScript(io: Io, arena: Allocator, work: []const u8, w: Workload, name: []const u8, gasim: []const u8, input: []const u8) ![]const u8 {
     const path = try absolute(io, arena, try std.fs.path.join(arena, &.{ work, try std.fmt.allocPrint(arena, "{s}-{s}.sh", .{ w.name, name }) }));
     const program = try absolute(io, arena, w.program);
+    var options: std.ArrayList(u8) = .empty;
+    for (w.options) |o| try options.print(arena, "{f} ", .{Quoted{ .s = o }});
     try Io.Dir.cwd().writeFile(io, .{
         .sub_path = path,
-        .data = try std.fmt.allocPrint(arena, "exec {f} run \"$@\" {f} < {f}\n", .{ Quoted{ .s = gasim }, Quoted{ .s = program }, Quoted{ .s = input } }),
+        .data = try std.fmt.allocPrint(arena, "exec {f} run {s}\"$@\" {f} < {f}\n", .{ Quoted{ .s = gasim }, options.items, Quoted{ .s = program }, Quoted{ .s = input } }),
     });
     return path;
 }
@@ -159,9 +189,7 @@ const Quoted = struct {
 /// --stats if it is this gasim, as a base ref's may not have it
 fn runScript(io: Io, arena: Allocator, script: []const u8, stats: bool) !std.process.RunResult {
     const argv: []const []const u8 = if (stats) &.{ "sh", script, "--stats" } else &.{ "sh", script };
-    const result = try std.process.run(arena, io, .{ .argv = argv, .stdout_limit = .limited(64 << 20) });
-    if (!result.term.success()) fatal("{s} failed: {s}", .{ script, result.stderr });
-    return result;
+    return std.process.run(arena, io, .{ .argv = argv, .stdout_limit = .limited(64 << 20) });
 }
 
 fn timeRuns(io: Io, arena: Allocator, out: *Io.Writer, label: []const u8, script: []const u8) !void {

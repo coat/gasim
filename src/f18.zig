@@ -196,6 +196,9 @@ pub const Computer = struct {
     /// waits until the pin is in the state WD in io selects, unless a device
     /// is attached to the port.
     wake_port: ?port.Direction = null,
+    /// a device on the pins, which sees them as the node reads and writes
+    /// io, at its time then, as a word can run a long `unext` loop first
+    pin_device: ?PinDevice = null,
 
     state: State = .fetch,
     // keeps track of current slot to help address decoding
@@ -211,6 +214,17 @@ pub const Computer = struct {
     /// picoseconds of execution, which waiting on a port does not add to
     time: u64,
 
+    /// A device on a node's pins, told when the node reads io or a port,
+    /// to set `pin_inputs` as they are at the node's time, and when it
+    /// writes io, which can change the pins it drives. A read of a port
+    /// that catches up with the writer's time does so after the word, so
+    /// io later in the same word is at the time before.
+    pub const PinDevice = struct {
+        context: *anyopaque,
+        read: *const fn (context: *anyopaque, node: *Computer) void,
+        written: *const fn (context: *anyopaque, node: *const Computer) void,
+    };
+
     pub const Status = union(enum) {
         running,
         /// executing from a port, waiting for code
@@ -221,7 +235,7 @@ pub const Computer = struct {
 
     /// what the computer is doing, and if it is waiting, the address it
     /// waits on
-    pub fn status(self: Computer) Status {
+    pub fn status(self: *const Computer) Status {
         if (!self.suspended) return .running;
         if (self.state == .fetch) return .{ .code = @bitCast(self.p.address) };
         const opcode = Instruction.decode(self.i).getSlot(self.slot);
@@ -258,7 +272,7 @@ pub const Computer = struct {
 
     /// The address of the instruction word being executed, or between words,
     /// of the word to be fetched next
-    pub fn current(self: Computer) Address {
+    pub fn current(self: *const Computer) Address {
         return if (self.state == .fetch) self.p.address else self.word_address;
     }
 
@@ -337,6 +351,8 @@ pub const Computer = struct {
     /// while waiting on a comm port. Undefined I/O addresses hang forever.
     pub fn read(self: *Computer, address: Address) ?Word {
         if (!address.io) return self.fetch(address);
+        // the pins, read in io and on the wakeup pin's port
+        if (self.pin_device) |device| device.read(device.context, self);
 
         const raw: u9 = @bitCast(address);
         if (raw == io_address) return self.readIo();
@@ -359,6 +375,7 @@ pub const Computer = struct {
         const raw: u9 = @bitCast(address);
         if (raw == io_address) {
             self.io = value;
+            if (self.pin_device) |device| device.written(device.context, self);
             return true;
         }
         if (raw == data_address and self.data != null) {
@@ -399,20 +416,20 @@ pub const Computer = struct {
 
     /// whether a read of the port is of the wakeup pin, and the pin is in
     /// the state it waits for
-    fn awake(self: Computer, direction: port.Direction) bool {
+    fn awake(self: *const Computer, direction: port.Direction) bool {
         if (self.wake_port != direction) return false;
         const low = @as(u18, @bitCast(self.io)) & wake_low_bit != 0;
         return self.pinHigh(1 << 17) != low;
     }
 
     /// whether a read of the wakeup pin would complete
-    pub fn pinAwake(self: Computer) bool {
+    pub fn pinAwake(self: *const Computer) bool {
         return self.awake(self.wake_port orelse return false);
     }
 
     /// Whether the node is suspended reading its wakeup pin, alone or with
     /// other ports
-    pub fn waitsOnPin(self: Computer) bool {
+    pub fn waitsOnPin(self: *const Computer) bool {
         const direction = self.wake_port orelse return false;
         const address = switch (self.status()) {
             .code, .reading => |address| address,
@@ -424,7 +441,7 @@ pub const Computer = struct {
 
     /// The level of a GPIO pin, given by its io bit: driven by the node, or
     /// following its input when not
-    pub fn pinHigh(self: Computer, bit: u18) bool {
+    pub fn pinHigh(self: *const Computer, bit: u18) bool {
         const written: u18 = @bitCast(self.io);
         // a pin's two control bits start at its io bit: 10 drives it low, 11
         // high, and otherwise it follows its input
@@ -458,7 +475,7 @@ pub const Computer = struct {
     /// Bits without I/O facilities read as the inverse of what was last
     /// written. Handshake bits report the state of the far end of each port,
     /// and pin bits the level of each GPIO pin.
-    fn readIo(self: Computer) Word {
+    fn readIo(self: *const Computer) Word {
         const written: u18 = @bitCast(self.io);
         var value: u18 = ~written & ~handshake_bits & ~self.pins;
         var pins = self.pins;
@@ -478,7 +495,7 @@ pub const Computer = struct {
     }
 
     /// Reads RAM or ROM
-    pub fn fetch(self: Computer, address: Address) Word {
+    pub fn fetch(self: *const Computer, address: Address) Word {
         var local = address.local;
         if (local >= 0x40) {
             local -%= 0x40;

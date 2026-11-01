@@ -109,11 +109,11 @@ the device on its other end. So there are two ways to run:
   scheduler should step the node furthest behind.
 
 Board mode is on when a board file or a timed device such as `--uart` is
-in use. Without one, gasim keeps round-robin stepping and skips syncing node
-times on transfers, which today costs every run about 8% on a long console
-run. Only board mode syncs times, and steps the node furthest behind. The
-two should share one scheduler with the timing switched on, rather than be
-two copies of it.
+in use (`Chip.board`). Without one, gasim keeps round-robin stepping and
+skips syncing node times on transfers, which saved 1.7% of instructions on
+the ring benchmark and less on the others. Only board mode syncs times, and
+should step the node furthest behind. The two should share one scheduler
+with the timing switched on, rather than be two copies of it.
 
 ## Next: the EVB002
 
@@ -132,8 +132,11 @@ did.
 2. **A shared clock, in board mode.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
      later of their times as a word passes between them.
-   - Board mode (see above): the time sync only with a board file or a
-     timed device, so that runs on the console are fast again.
+   - ✓ Board mode (see above): the time sync only with a board file or a
+     timed device, so that runs on the console are fast again. More of
+     the cost was copying each node, RAM and all, on every fetch from
+     memory, through a method that took the node by value; without that,
+     the benchmarks run 9–23% fewer instructions than before.
    - Stepping the node furthest behind in time, benchmarked against
      round-robin, as pF/144 runs a lot of cycles.
    - ✓ Instruction times from the G144A12's data book (DB002 §5.3),
@@ -142,6 +145,9 @@ did.
 3. **Pins and devices.**
    - ✓ Pin 17 wakeup (DB001 §3.4.1), and a bit-level UART on stdin and
      stdout (`--uart`).
+   - ✓ Pins read and driven at the node's time as it reads or writes io,
+     not at the start of the word, which can run a long `unext` loop
+     first, as a bit loop usually does.
    - Pins as connections with drivers: node outputs, devices and pull-ups.
    - The UART on a pty, TCP or the TUI; SPI flash backed by a file; the 2 MB
      SRAM on 007, 008 and 009; reset lines; the analog nodes' outputs.
@@ -200,8 +206,8 @@ regressions need catching with consistent numbers:
   [hyperfine](https://github.com/sharkdp/hyperfine) elsewhere.
 - ✓ Steps per second from gasim itself (`run --stats`), as `Chip.steps` is
   deterministic.
-- Workloads for board mode once it exists: a `--boot` stream and a long
-  UART stream, where the time sync and scheduler cost most.
+- ✓ Workloads for board mode: a `--boot` stream and a long UART stream,
+  where the time sync and scheduler cost most.
 - Wall time stays out of CI, where shared runners are too noisy; instruction
   counts could gate later.
 
