@@ -692,7 +692,14 @@ pub fn stepNode(self: *Chip, i: u16) void {
     n.step();
     self.steps += 1;
     self.started = true;
-    if (uart) |u| u.observe(n.time, n.pinHigh(u.tx_pin));
+    if (uart) |u| {
+        u.observe(n.time, n.pinHigh(u.tx_pin));
+        // a read of the wakeup pin, not a device on its port, that did not
+        // have to wait for it
+        if (n.wake_port) |w| if (n.transfers.read.contains(w) and n.ports[@backingInt(w)].port == null) {
+            u.used = true;
+        };
+    }
     if (!n.suspended) self.wake(i);
     // unless the node is still waiting for a word to execute, or still
     // waiting on the same port
@@ -1201,6 +1208,28 @@ test "a node waiting on its pin wakes as the line changes" {
     try expect(n.suspended and !n.waitsOnPin());
     try expect(n.time >= 5_000_000 and n.time < 5_100_000);
     try expect(chip.node(0).?.time > 6_000_000);
+}
+
+test "a node that reads its pin once input has arrived uses the UART" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [2]assembler.Program = undefined;
+    // node 708 is busy until the start bit has begun, so its read of the
+    // pin does not wait
+    for (try assembler.assembleNodes(
+        \\ left b! @b
+        \\ node 708 : main 999 for unext up a! @ drop right b! @b
+    , &programs, &diagnostic)) |program| try chip.load(program);
+
+    var writer: Io.Writer = .fixed(&.{});
+    var uart: Uart = .init(921600, &writer);
+    uart.preload = "\x00";
+    try chip.attachUart(&uart, 708);
+
+    try chip.run();
+    try expect(!chip.node(708).?.waitsOnPin());
+    try expect(uart.used);
 }
 
 test "waits for UART input that has not arrived" {
