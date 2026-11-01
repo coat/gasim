@@ -206,8 +206,8 @@ regressions need catching with consistent numbers:
   [hyperfine](https://github.com/sharkdp/hyperfine) elsewhere.
 - ✓ Steps per second from gasim itself (`run --stats`), as `Chip.steps` is
   deterministic.
-- Workloads for board mode once it exists: a `--boot` stream and a long
-  UART stream, where the time sync and scheduler cost most.
+- ✓ Workloads for board mode: a `--boot` stream and a long UART stream,
+  where the time sync and scheduler cost most.
 - Wall time stays out of CI, where shared runners are too noisy; instruction
   counts could gate later.
 
