@@ -138,7 +138,7 @@ pub fn waitForInput(self: *Uart, now: u64) !bool {
 }
 
 /// whether there is a byte to send after the frame being sent
-fn hasByte(self: Uart) bool {
+fn hasByte(self: *const Uart) bool {
     return self.preload.len > 0 or self.taken_start < self.taken_end;
 }
 
@@ -168,7 +168,7 @@ fn nextByte(self: *Uart) ?u8 {
 }
 
 /// whether the line is a mark at `now`
-fn levelAt(self: Uart, now: u64) bool {
+fn levelAt(self: *const Uart, now: u64) bool {
     const frame = self.sending orelse return true;
     if (now < frame.start) return true;
     return bitMark(frame.byte, @intCast((now - frame.start) / self.bit_time));
