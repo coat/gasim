@@ -13,9 +13,12 @@
 //! Nodes are configured like the GA144 node of the same number, with its
 //! GPIO pins and, once loaded, its ROM. See `ga144`.
 //!
-//! Each node keeps its own time, as it executes. A node that waits on a port
-//! catches up with the node it transfers a word with, so that devices on a
-//! node's pins, which work at its time, see what it does when it does it.
+//! Each node keeps its own time, as it executes. In board mode, with a
+//! device on a node's pins that works at the node's time, a node that waits
+//! on a port catches up with the node it transfers a word with, so that the
+//! device sees what it does when it does it. Ports are blocking rendezvous,
+//! so without such a device times cannot change what the chip computes, and
+//! are not synced.
 
 layout: Layout,
 nodes: []Computer,
@@ -50,6 +53,9 @@ console: ?struct { device: *Console, index: u16 } = null,
 feeder: ?struct { device: *Feeder, index: u16 } = null,
 /// the UART on a node's pins, and the index of that node
 uart: ?struct { device: *Uart, index: u16 } = null,
+/// board mode: nodes take the later of their times as a word passes between
+/// them, as a device on pins needs. Attaching one turns it on.
+board: bool = false,
 
 const Chip = @This();
 
@@ -612,6 +618,7 @@ pub fn attachUart(self: *Chip, uart: *Uart, number: u16) error{ NoSuchNode, NoPi
     const pins = self.nodes[i].pins;
     if (pins & uart.rx_pin == 0 or pins & uart.tx_pin == 0) return error.NoPins;
     self.uart = .{ .device = uart, .index = i };
+    self.board = true;
 }
 
 /// feeds the next word, waking the node that takes it
@@ -706,7 +713,7 @@ pub fn stepNode(self: *Chip, i: u16) void {
         // a word passes between neighbours when the second of them gets to
         // the port, at the later of their times, and not when the first
         // wakes to finish, as the second may have run on by then
-        if (transfers.contains(direction) and (state == .reading or state == .writing)) {
+        if (self.board and transfers.contains(direction) and (state == .reading or state == .writing)) {
             const other = &self.nodes[j];
             const time = @max(n.time, other.time);
             n.time = time;
@@ -994,9 +1001,10 @@ test "a node can send code to a neighbour" {
     try expect(chip.node(1).?.suspended);
 }
 
-test "a word arrives at the time it was written" {
+test "a word arrives at the time it was written, in board mode" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 3 });
     defer chip.deinit(std.testing.allocator);
+    chip.board = true;
 
     // node 001 writes to node 000, which waits for it, and then reads at
     // once from node 002, which is far ahead by then
@@ -1013,6 +1021,23 @@ test "a word arrives at the time it was written" {
     try expectEqual(7, chip.node(1).?.data_stack.t);
     // 000 takes the word at 001's time, not at 002's
     try expect(chip.node(0).?.time < chip.node(2).?.time / 10);
+}
+
+test "times are not synced outside board mode" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 2 });
+    defer chip.deinit(std.testing.allocator);
+
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [2]assembler.Program = undefined;
+    for (try assembler.assembleNodes(
+        \\ right b! @b
+        \\ node 001 10000 for unext right b! 5 !b
+    , &programs, &diagnostic)) |program| try chip.load(program);
+
+    try chip.run();
+    try expectEqual(5, chip.node(0).?.data_stack.t);
+    // 000 waited without its clock running
+    try expect(chip.node(0).?.time < chip.node(1).?.time / 10);
 }
 
 test "warm in ROM goes to the ports each node is wired to" {

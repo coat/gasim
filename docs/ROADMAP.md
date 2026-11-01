@@ -109,11 +109,11 @@ the device on its other end. So there are two ways to run:
   scheduler should step the node furthest behind.
 
 Board mode is on when a board file or a timed device such as `--uart` is
-in use. Without one, gasim keeps round-robin stepping and skips syncing node
-times on transfers, which today costs every run about 8% on a long console
-run. Only board mode syncs times, and steps the node furthest behind. The
-two should share one scheduler with the timing switched on, rather than be
-two copies of it.
+in use (`Chip.board`). Without one, gasim keeps round-robin stepping and
+skips syncing node times on transfers, which saved 1.7% of instructions on
+the ring benchmark and less on the others. Only board mode syncs times, and
+should step the node furthest behind. The two should share one scheduler
+with the timing switched on, rather than be two copies of it.
 
 ## Next: the EVB002
 
@@ -132,8 +132,11 @@ did.
 2. **A shared clock, in board mode.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
      later of their times as a word passes between them.
-   - Board mode (see above): the time sync only with a board file or a
-     timed device, so that runs on the console are fast again.
+   - ✓ Board mode (see above): the time sync only with a board file or a
+     timed device, so that runs on the console are fast again. More of
+     the cost was copying each node, RAM and all, on every fetch from
+     memory, through a method that took the node by value; without that,
+     the benchmarks run 9–23% fewer instructions than before.
    - Stepping the node furthest behind in time, benchmarked against
      round-robin, as pF/144 runs a lot of cycles.
    - ✓ Instruction times from the G144A12's data book (DB002 §5.3),
