@@ -106,14 +106,15 @@ the device on its other end. So there are two ways to run:
   chip, a byte per word. Round-robin stepping, as fast as possible.
 - **The board (use 2):** pins wired to devices that keep real time (the UART
   today; SPI flash, SRAM and VGA later). Each node's time counts, and the
-  scheduler should step the node furthest behind.
+  scheduler steps the node furthest behind.
 
 Board mode is on when a board file or a timed device such as `--uart` is
 in use (`Chip.board`). Without one, gasim keeps round-robin stepping and
 skips syncing node times on transfers, which saved 1.7% of instructions on
 the ring benchmark and less on the others. Only board mode syncs times, and
-should step the node furthest behind. The two should share one scheduler
-with the timing switched on, rather than be two copies of it.
+steps the node furthest behind, its queue a heap ordered by time. The two
+share one scheduler, specialized at compile time for each mode, so that
+round-robin stepping pays nothing for board mode's.
 
 ## Next: the EVB002
 
@@ -137,8 +138,13 @@ did.
      the cost was copying each node, RAM and all, on every fetch from
      memory, through a method that took the node by value; without that,
      the benchmarks run 9–23% fewer instructions than before.
-   - Stepping the node furthest behind in time, benchmarked against
-     round-robin, as pF/144 runs a lot of cycles.
+   - ✓ Stepping the node furthest behind in time, benchmarked against
+     round-robin: the same output and chip time on the board-mode
+     workloads, but 15% more instructions on `boot`, all of them in
+     retries. Round-robin retries a node waiting on several ports once a
+     round however many of them changed; furthest behind first retries
+     it at once, as it is behind, on each change. A cheap check of
+     whether a retry can complete might win this back, in both modes.
    - ✓ Instruction times from the G144A12's data book (DB002 §5.3),
      including the time to fetch each word, and 2.4 ns per `unext`, as
      ga-tools takes it, rather than DB001's approximate 2.0.
