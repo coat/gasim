@@ -1,76 +1,114 @@
-/* gasim's own styles, over Pico's. Colors that mean something, such as a
-   node's status, are tokens here, with their own values in dark mode. */
+/* gasim's styles. Colors are tokens here, each light-dark(light, dark):
+   the page follows the system's theme, or the one chosen in the toolbar,
+   which sets data-theme. */
 
 :root {
-  --running: #d3f0d9;
-  --reading: #d6e6fa;
-  --writing: #e8dcf7;
+  color-scheme: light dark;
+
+  /* the accent, of filled buttons, switches, the current view and focus.
+     Its other shades are mixed from it here, so set it here, on :root;
+     where it is light, --primary-inverse, the text on it, wants to be dark. */
+  --primary: #525f7a;
+  --primary-inverse: #fff;
+  --primary-hover: color-mix(in oklab, var(--primary), light-dark(black, white) 12%);
+  /* the accent as text and lines, lighter to read on dark */
+  --primary-text: light-dark(var(--primary), color-mix(in oklab, var(--primary), white 40%));
+  --primary-text-hover: light-dark(var(--primary-hover), color-mix(in oklab, var(--primary), white 60%));
+  --focus: color-mix(in oklab, color-mix(in oklab, var(--primary), white 35%) 50%, transparent);
+
+  /* the neutral, of most buttons, outlined */
+  --secondary: light-dark(#5d6b89, #969eaf);
+  --secondary-hover: light-dark(#48536b, #b3b9c5);
+  --secondary-background: #525f7a;
+  --secondary-background-hover: light-dark(#48536b, #5d6b89);
+  --secondary-inverse: #fff;
+
+  --background: light-dark(#fff, #13171f);
+  --surface: light-dark(#fff, #181c25);
+  --surface-head: light-dark(#fbfcfc, #1a1f28);
+  --hover: light-dark(#eff1f4, #202632);
+  --text: light-dark(#373c44, #c2c7d0);
+  --heading: light-dark(#373c44, #e0e3e7);
+  --contrast: light-dark(#181c25, #dfe3eb);
+  --muted: light-dark(#646b79, #7b8495);
+  --border: light-dark(#e7eaf0, #202632);
+  --selection: light-dark(rgb(129 145 181 / 25%), rgb(144 158 190 / 19%));
+  --code-background: light-dark(#f3f5f7, #1a1f28);
+  --code-text: light-dark(#646b79, #8891a4);
+  --input-background: light-dark(#fbfcfc, #1c212c);
+  --input-focus-background: light-dark(#fff, #1a1f28);
+  --input-border: light-dark(#cfd5e2, #2a3140);
+  --input-text: light-dark(#23262c, #e0e3e7);
+  --placeholder: light-dark(#646b79, #8891a4);
+  --switch-off: light-dark(#bfc7d9, #333c4e);
+  --overlay: light-dark(rgb(232 234 237 / 75%), rgb(8 9 10 / 75%));
+  --shadow:
+    0 0.125rem 0.75rem light-dark(rgb(129 145 181 / 12%), rgb(7 9 12 / 30%)),
+    0 0.5rem 3rem light-dark(rgb(129 145 181 / 15%), rgb(7 9 12 / 40%)),
+    0 0 0 1px light-dark(rgb(129 145 181 / 5%), rgb(7 9 12 / 10%));
+
+  --sans: system-ui, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, Helvetica, Arial, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --radius: 0.25rem;
+  --transition: 0.2s ease-in-out;
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  --close: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E");
+  /* the same in gray, where they are a field's background, not a mask */
+  --chevron-gray: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238891a4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  --search-gray: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238891a4' stroke-width='1.5' stroke-linecap='round'%3E%3Ccircle cx='10.5' cy='10.5' r='7.5'/%3E%3Cpath d='M16 16l5 5'/%3E%3C/svg%3E");
+
+  /* what a node is doing, and where */
+  --running: light-dark(#d3f0d9, #1f4a2c);
+  --reading: light-dark(#d6e6fa, #1d3a5e);
+  --writing: light-dark(#e8dcf7, #3d2c5c);
   --code: transparent;
-  --moved: #2f9e55;
-  --breakpoint: #d6334a;
-  --here: #fff3c4;
-  --literal: #8a5a00;
+  --moved: light-dark(#2f9e55, #5fd585);
+  --breakpoint: light-dark(#d6334a, #ff6b7f);
+  --here: light-dark(#fff3c4, #4a4120);
+  --literal: light-dark(#8a5a00, #e3b65c);
   --gutter-size: 6px;
-  --tile-text: #1c2128;
+  --tile-text: light-dark(#1c2128, #e6e9ee);
   /* colorForth's colors, darker to read on white */
-  --cf-background: #ffffff;
-  --cf-red: #c4122f;
-  --cf-yellow: #8a6200;
-  --cf-green: #1a7f37;
-  --cf-cyan: #0b7285;
-  --cf-white: #3b3f45;
-  --cf-magenta: #a3268f;
-  --cf-gray: #8a8f98;
-  --cf-blue: #2f5bd3;
-  --cf-cursor: #e7ebf0;
+  --cf-background: light-dark(#ffffff, #050505);
+  --cf-red: light-dark(#c4122f, #ff5f5f);
+  --cf-yellow: light-dark(#8a6200, #ffd75f);
+  --cf-green: light-dark(#1a7f37, #5fd75f);
+  --cf-cyan: light-dark(#0b7285, #5fd7ff);
+  --cf-white: light-dark(#3b3f45, #e8e8e8);
+  --cf-magenta: light-dark(#a3268f, #ff7fd4);
+  --cf-gray: light-dark(#8a8f98, #8f8f8f);
+  --cf-blue: light-dark(#2f5bd3, #7f9cff);
+  --cf-cursor: light-dark(#e7ebf0, #303540);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --running: #1f4a2c;
-    --reading: #1d3a5e;
-    --writing: #3d2c5c;
-    --moved: #5fd585;
-    --breakpoint: #ff6b7f;
-    --here: #4a4120;
-    --literal: #e3b65c;
-    --tile-text: #e6e9ee;
-    --cf-background: #050505;
-    --cf-red: #ff5f5f;
-    --cf-yellow: #ffd75f;
-    --cf-green: #5fd75f;
-    --cf-cyan: #5fd7ff;
-    --cf-white: #e8e8e8;
-    --cf-magenta: #ff7fd4;
-    --cf-gray: #8f8f8f;
-    --cf-blue: #7f9cff;
-    --cf-cursor: #303540;
-  }
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --running: #1f4a2c;
-  --reading: #1d3a5e;
-  --writing: #3d2c5c;
-  --moved: #5fd585;
-  --breakpoint: #ff6b7f;
-  --here: #4a4120;
-  --literal: #e3b65c;
-  --tile-text: #e6e9ee;
-  --cf-background: #050505;
-  --cf-red: #ff5f5f;
-  --cf-yellow: #ffd75f;
-  --cf-green: #5fd75f;
-  --cf-cyan: #5fd7ff;
-  --cf-white: #e8e8e8;
-  --cf-magenta: #ff7fd4;
-  --cf-gray: #8f8f8f;
-  --cf-blue: #7f9cff;
-  --cf-cursor: #303540;
+  color-scheme: dark;
+}
+
+/* ---------- the elements the page is made of ---------- */
+
+*,
+::before,
+::after {
+  box-sizing: border-box;
 }
 
 :root {
-  --pico-font-size: 93.75%;
+  background: var(--background);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 93.75%;
+  line-height: 1.5;
+  text-underline-offset: 0.1rem;
+  overflow-wrap: break-word;
+  tab-size: 4;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 html,
@@ -80,8 +118,462 @@ body {
 
 body {
   margin: 0;
-  background: var(--pico-background-color);
+  background: var(--background);
 }
+
+::selection {
+  background: var(--selection);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+h2,
+h3 {
+  margin: 0 0 1rem;
+  color: var(--heading);
+  font-weight: 700;
+}
+
+h2 {
+  font-size: 1.75rem;
+  line-height: 1.15;
+}
+
+h3 {
+  font-size: 1.5rem;
+  line-height: 1.175;
+}
+
+p,
+ol,
+ul,
+dl,
+pre,
+table {
+  margin: 0 0 1rem;
+}
+
+li {
+  margin-bottom: 0.25rem;
+}
+
+ul li {
+  list-style: square;
+}
+
+:where(a) {
+  color: var(--primary-text);
+  text-decoration-color: color-mix(in oklab, currentColor 50%, transparent);
+  text-underline-offset: 0.125em;
+  transition: color var(--transition);
+}
+
+:where(a):hover {
+  color: var(--primary-text-hover);
+}
+
+:where(a):focus-visible {
+  outline: 2px solid var(--focus);
+}
+
+code,
+kbd,
+pre {
+  border-radius: var(--radius);
+  background: var(--code-background);
+  color: var(--code-text);
+  font-family: var(--mono);
+  font-size: 0.875em;
+  line-height: initial;
+}
+
+code,
+kbd {
+  display: inline-block;
+  padding: 0.375rem;
+}
+
+kbd {
+  background: var(--text);
+  color: var(--background);
+  font-weight: bolder;
+}
+
+pre {
+  overflow: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+td,
+th {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+  text-align: start;
+}
+
+/* buttons, filled in the accent; .secondary in the neutral, and .outline
+   only their border and text. The variants set only the colors' tokens,
+   and these rules no more than (0,1,0), so a component's own background
+   or border outweighs them, hovered too. */
+button,
+[role="button"] {
+  --fill: var(--primary);
+  --fill-hover: var(--primary-hover);
+  --ink: var(--primary-inverse);
+  --ink-hover: var(--primary-inverse);
+  --edge: var(--fill);
+  --edge-hover: var(--fill-hover);
+  --ring: var(--focus);
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  outline: none;
+  background-color: var(--fill);
+  color: var(--ink);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.5;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color var(--transition), border-color var(--transition), color var(--transition), box-shadow var(--transition);
+}
+
+:where(button, [role="button"]):is(:hover, :active, :focus-visible) {
+  border-color: var(--edge-hover);
+  background-color: var(--fill-hover);
+  color: var(--ink-hover);
+}
+
+:where(button, [role="button"]):focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+:where(button, [role="button"]).secondary {
+  --fill: var(--secondary-background);
+  --fill-hover: var(--secondary-background-hover);
+  --ink: var(--secondary-inverse);
+  --ink-hover: var(--secondary-inverse);
+  --ring: color-mix(in oklab, var(--secondary) 25%, transparent);
+}
+
+:where(button, [role="button"]).outline {
+  --fill: transparent;
+  --fill-hover: transparent;
+  --ink: var(--primary-text);
+  --ink-hover: var(--primary-text-hover);
+  --edge: var(--ink);
+  --edge-hover: var(--ink-hover);
+}
+
+:where(button, [role="button"]).outline.secondary {
+  --ink: var(--secondary);
+  --ink-hover: var(--secondary-hover);
+}
+
+:where(button, [role="button"])[disabled] {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* buttons side by side, joined */
+[role="group"] {
+  display: inline-flex;
+  border-radius: var(--radius);
+  vertical-align: middle;
+}
+
+[role="group"] > * {
+  position: relative;
+  flex: 1 1 auto;
+}
+
+[role="group"] > :focus-visible {
+  z-index: 1;
+}
+
+[role="group"] > :not(:first-child) {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+[role="group"] > :not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+button {
+  margin: 0;
+}
+
+label {
+  display: block;
+  margin-bottom: 0.375rem;
+}
+
+label:has([type="checkbox"]) {
+  width: fit-content;
+  cursor: pointer;
+}
+
+input,
+select {
+  width: 100%;
+  height: calc(3rem + 0.125rem);
+  margin: 0;
+  padding: 0.75rem 1rem;
+  border: 0.0625rem solid var(--input-border);
+  border-radius: var(--radius);
+  outline: none;
+  background-color: var(--input-background);
+  color: var(--input-text);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.5;
+  appearance: none;
+  transition: background-color var(--transition), border-color var(--transition), box-shadow var(--transition);
+}
+
+:is(input, select):focus {
+  border-color: var(--primary);
+  background-color: var(--input-focus-background);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
+input::placeholder {
+  color: var(--placeholder);
+}
+
+select {
+  padding-inline-end: 2.5rem;
+  background-image: var(--chevron-gray);
+  background-position: center right 0.75rem;
+  background-size: 1rem auto;
+  background-repeat: no-repeat;
+}
+
+input[type="search"] {
+  padding-inline-start: 2.75rem;
+  border-radius: 5rem;
+  background-image: var(--search-gray);
+  background-position: center left 1.125rem;
+  background-size: 1rem auto;
+  background-repeat: no-repeat;
+}
+
+input[type="search"]::-webkit-search-decoration {
+  appearance: none;
+}
+
+/* a checkbox drawn as a switch, its knob at the end it is set to. No
+   more than (0,1,1), so a component's margin outweighs it; its states
+   come after input:focus's, which they reset. */
+input:where([type="checkbox"][role="switch"]) {
+  flex: none;
+  width: 2.25em;
+  height: 1.25em;
+  margin: -0.125em 0.5em 0 0;
+  padding: 0;
+  border: 0.1875rem solid var(--switch-off);
+  border-radius: 1.25em;
+  background-color: var(--switch-off);
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+input:where([type="checkbox"][role="switch"])::before {
+  content: "";
+  display: block;
+  height: 100%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: #fff;
+  transition: margin 0.1s ease-in-out;
+}
+
+input:where([type="checkbox"][role="switch"]):focus {
+  border-color: var(--switch-off);
+  background-color: var(--switch-off);
+  box-shadow: none;
+}
+
+input:where([type="checkbox"][role="switch"]):checked {
+  border-color: var(--primary);
+  background-color: var(--primary);
+}
+
+input:where([type="checkbox"][role="switch"]):checked::before {
+  margin-inline-start: 1em;
+}
+
+input:where([type="checkbox"][role="switch"]):focus-visible {
+  box-shadow: 0 0 0 2px var(--focus);
+}
+
+/* a menu: a button with a chevron, over a list of links */
+details.dropdown {
+  position: relative;
+}
+
+details.dropdown summary {
+  list-style: none;
+}
+
+details.dropdown summary::-webkit-details-marker {
+  display: none;
+}
+
+details.dropdown summary::after {
+  content: "";
+  display: block;
+  width: 1rem;
+  height: 1rem;
+  margin-inline-start: 0.25rem;
+  background: currentColor;
+  -webkit-mask: var(--chevron) center / contain no-repeat;
+  mask: var(--chevron) center / contain no-repeat;
+}
+
+/* where it is open, a click anywhere else closes it, on the summary */
+details.dropdown[open] summary::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  cursor: default;
+}
+
+details.dropdown summary + ul {
+  position: absolute;
+  z-index: 99;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 100%;
+  margin: 2px 0 0;
+  padding: 0.375rem 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+}
+
+details.dropdown summary + ul li {
+  margin: 0;
+  list-style: none;
+}
+
+details.dropdown summary + ul a {
+  display: block;
+  padding: 0.375rem 1rem;
+  color: var(--text);
+  text-decoration: none;
+}
+
+details.dropdown summary + ul a:is(:hover, :focus-visible) {
+  outline: none;
+  background: var(--hover);
+}
+
+/* a dialog, open as its open attribute says, over the page faded */
+dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--overlay);
+  -webkit-backdrop-filter: blur(0.375rem);
+  backdrop-filter: blur(0.375rem);
+  color: var(--text);
+}
+
+dialog[open] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+dialog article {
+  width: 100%;
+  max-width: 700px;
+  max-height: calc(100dvh - 2rem);
+  margin: 1rem;
+  padding: 1rem;
+  overflow: auto;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+dialog article > header {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: -1rem -1rem 1rem;
+  padding: 0.66rem 1rem;
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--surface-head);
+}
+
+dialog article > header > * {
+  margin: 0;
+}
+
+/* the close button, a cross */
+dialog button[rel="prev"] {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  opacity: 0.5;
+}
+
+dialog button[rel="prev"]::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: currentColor;
+  -webkit-mask: var(--close) center / 1rem no-repeat;
+  mask: var(--close) center / 1rem no-repeat;
+}
+
+dialog button[rel="prev"]:is(:hover, :focus-visible) {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* ---------- the page's layout ---------- */
 
 #app {
   display: grid;
@@ -95,7 +587,7 @@ body {
 }
 
 .muted {
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 code,
@@ -104,7 +596,7 @@ code,
 .registers dd,
 .stack li,
 .output {
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
 }
 
 /* ---------- the toolbar and status bar ---------- */
@@ -115,7 +607,7 @@ code,
   align-items: center;
   gap: 0.5rem 1rem;
   padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--pico-muted-border-color);
+  border-bottom: 1px solid var(--border);
 }
 
 .toolbar .group {
@@ -182,8 +674,8 @@ code,
 
 .views {
   display: flex;
-  border: 1px solid var(--pico-muted-border-color);
-  border-radius: var(--pico-border-radius);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   overflow: hidden;
 }
 
@@ -193,13 +685,13 @@ code,
   min-height: 2.75rem;
   padding: 0 0.875rem;
   font-size: 0.875rem;
-  color: var(--pico-muted-color);
+  color: var(--muted);
   text-decoration: none;
 }
 
 .views a.current {
-  background: var(--pico-primary-background);
-  color: var(--pico-primary-inverse);
+  background: var(--primary);
+  color: var(--primary-inverse);
 }
 
 .file {
@@ -207,7 +699,7 @@ code,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--pico-muted-color);
+  color: var(--muted);
   font-size: 0.875rem;
 }
 
@@ -230,15 +722,14 @@ code,
 .steps {
   font-variant-numeric: tabular-nums;
   font-size: 0.875rem;
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .examples {
   margin: 0;
 }
 
-/* Pico lays a menu's summary out as a list item, its text at the top; a
-   row centred as the buttons' are, its arrow after the label */
+/* a row centred as the buttons' are, its arrow after the label */
 .examples summary {
   display: flex;
   align-items: center;
@@ -250,22 +741,21 @@ code,
   overflow: auto;
 }
 
-/* the name over what it does; the details and dropdown outweigh Pico's
-   details.dropdown summary + ul li a, which makes it a block */
+/* the name over what it does */
 details.dropdown.examples li a {
   display: flex;
   flex-direction: column;
 }
 
 .examples small {
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .status-bar {
   display: flex;
   gap: 1rem;
   padding: 0.25rem 1rem;
-  border-top: 1px solid var(--pico-muted-border-color);
+  border-top: 1px solid var(--border);
   font-size: 0.875rem;
   min-height: 1.75rem;
 }
@@ -329,7 +819,7 @@ dialog .actions {
 
 .chip-view > .gutter:hover,
 .chip-view > .gutter:focus-visible {
-  background: var(--pico-muted-border-color);
+  background: var(--border);
   outline: none;
 }
 
@@ -337,9 +827,8 @@ dialog .actions {
   display: none;
 }
 
-/* tabs, as Pico has none: the label, underlined where it is chosen. Pico
-   sets --pico-color to a button's text, so these take --pico-contrast.
-   The tablist in the selector outweighs .panel-head button, for the dock's. */
+/* tabs: the label, underlined where it is chosen. The tablist in the
+   selector outweighs .panel-head button, for the dock's. */
 [role="tablist"] button[role="tab"] {
   margin: 0;
   padding: 0.375rem 0.75rem;
@@ -349,23 +838,23 @@ dialog .actions {
   border-radius: 0;
   background: transparent;
   box-shadow: none;
-  color: var(--pico-muted-color);
+  color: var(--muted);
   font-size: 0.875rem;
   white-space: nowrap;
 }
 
 [role="tablist"] button[role="tab"]:hover {
-  color: var(--pico-contrast);
+  color: var(--contrast);
 }
 
 [role="tablist"] button[role="tab"]:focus-visible {
-  outline: 2px solid var(--pico-primary-focus);
+  outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
 
 [role="tablist"] button[role="tab"][aria-selected="true"] {
-  border-bottom-color: var(--pico-primary);
-  color: var(--pico-contrast);
+  border-bottom-color: var(--primary-text);
+  color: var(--contrast);
 }
 
 .panel {
@@ -374,9 +863,9 @@ dialog .actions {
   min-width: 0;
   min-height: 0;
   margin: 0;
-  border: 1px solid var(--pico-muted-border-color);
-  border-radius: var(--pico-border-radius);
-  background: var(--pico-card-background-color);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
 }
 
 .panel-head {
@@ -385,7 +874,7 @@ dialog .actions {
   align-items: center;
   gap: 0.5rem 0.75rem;
   padding: 0.375rem 0.75rem;
-  border-bottom: 1px solid var(--pico-muted-border-color);
+  border-bottom: 1px solid var(--border);
 }
 
 .panel-head h2 {
@@ -441,7 +930,7 @@ dialog .actions {
     width: 2.5rem;
     height: 4px;
     border-radius: 2px;
-    background: var(--pico-muted-border-color);
+    background: var(--border);
   }
 
   .chip-view > .stack-gutter:hover,
@@ -451,7 +940,7 @@ dialog .actions {
 
   .stack-gutter:hover::before,
   .stack-gutter:focus-visible::before {
-    background: var(--pico-primary);
+    background: var(--primary-text);
   }
 
   /* a row of tabs, scrolling sideways where they do not fit */
@@ -461,7 +950,7 @@ dialog .actions {
     justify-content: flex-start;
     overflow-x: auto;
     scrollbar-width: none;
-    border-bottom: 1px solid var(--pico-muted-border-color);
+    border-bottom: 1px solid var(--border);
   }
 
   .tabs button {
@@ -500,7 +989,7 @@ dialog .actions {
   margin: 0 0 0 auto;
   padding: 0;
   font-size: 0.75rem;
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .legend li {
@@ -516,7 +1005,7 @@ dialog .actions {
   width: 0.75rem;
   height: 0.75rem;
   border-radius: 2px;
-  border: 1px solid var(--pico-muted-border-color);
+  border: 1px solid var(--border);
   background: var(--status);
 }
 
@@ -553,7 +1042,7 @@ dialog .actions {
   position: relative;
   margin: 0;
   padding: 0;
-  border: 1px solid var(--pico-muted-border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--status);
   color: var(--tile-text);
@@ -563,17 +1052,17 @@ dialog .actions {
 }
 
 .tile:hover {
-  border-color: var(--pico-primary-hover-border);
+  border-color: var(--primary-hover);
 }
 
 .tile:focus-visible {
-  outline: 2px solid var(--pico-primary-focus);
+  outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
 
 .tile.selected {
-  border-color: var(--pico-contrast);
-  box-shadow: 0 0 0 2px var(--pico-contrast);
+  border-color: var(--contrast);
+  box-shadow: 0 0 0 2px var(--contrast);
 }
 
 .tile.has-breakpoint::after {
@@ -614,7 +1103,7 @@ dialog .actions {
 /* a line of the tiles' font, to size them by */
 .measure,
 .tiles.large {
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
   font-size: 0.75rem;
   line-height: 1.25;
 }
@@ -748,7 +1237,7 @@ dialog .actions {
 
 /* the port the console is attached to, facing off the chip */
 .edge.console {
-  background: var(--pico-primary);
+  background: var(--primary-text);
   opacity: 0.8;
 }
 
@@ -796,7 +1285,7 @@ dialog .actions {
   padding: 0.125rem 0.5rem;
   border-radius: 999px;
   background: var(--status);
-  border: 1px solid var(--pico-muted-border-color);
+  border: 1px solid var(--border);
 }
 
 .doing.running {
@@ -824,7 +1313,7 @@ dialog .actions {
 }
 
 .registers dt {
-  color: var(--pico-muted-color);
+  color: var(--muted);
   font-weight: normal;
 }
 
@@ -856,7 +1345,7 @@ dialog .actions {
   font-size: 0.8125rem;
   font-weight: 600;
   margin: 0 0 0.25rem;
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .stack ol {
@@ -873,7 +1362,7 @@ dialog .actions {
 }
 
 .stack li.below {
-  color: var(--pico-muted-color);
+  color: var(--muted);
   padding-left: 1.25rem;
 }
 
@@ -885,7 +1374,7 @@ dialog .actions {
 
 .stack .reg {
   width: 0.75rem;
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 /* the registers and stacks stay, and the listing scrolls below them */
@@ -901,7 +1390,7 @@ dialog .actions {
   overflow: auto;
   margin: 0 -0.75rem -0.5rem;
   padding: 0 0.75rem;
-  border-top: 1px solid var(--pico-muted-border-color);
+  border-top: 1px solid var(--border);
 }
 
 .memory {
@@ -921,7 +1410,7 @@ dialog .actions {
 .memory tr.heading th {
   padding-top: 0.5rem;
   font-weight: 600;
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .memory tr.here td {
@@ -930,15 +1419,15 @@ dialog .actions {
 
 .memory tr.zero td.code,
 .memory tr.zero td.value {
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .memory .address {
-  color: var(--pico-primary);
+  color: var(--primary-text);
 }
 
 .memory .value {
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .memory .literal {
@@ -975,7 +1464,7 @@ dialog .actions {
 }
 
 .breakpoint:hover::before {
-  background: var(--pico-muted-border-color);
+  background: var(--border);
 }
 
 .breakpoint.set::before {
@@ -1048,7 +1537,7 @@ dialog .actions {
 }
 
 .entries {
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
   font-size: 0.875rem;
 }
 
@@ -1058,7 +1547,7 @@ dialog .actions {
 }
 
 .entries .hint {
-  font-family: var(--pico-font-family-sans-serif);
+  font-family: var(--sans);
 }
 
 .entry .line {
@@ -1069,7 +1558,7 @@ dialog .actions {
   border: none;
   background: none;
   box-shadow: none;
-  /* Pico sets --pico-color to the inverse inside buttons */
+  /* the text around it, not a button's */
   color: inherit;
   font: inherit;
   text-align: left;
@@ -1078,11 +1567,11 @@ dialog .actions {
 
 .entry .line:hover {
   text-decoration: underline;
-  text-decoration-color: var(--pico-muted-border-color);
+  text-decoration-color: var(--border);
 }
 
 .target {
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .printed {
@@ -1125,7 +1614,7 @@ dialog .actions {
 .stack-row li {
   margin: 0;
   padding: 0 0.375rem;
-  border: 1px solid var(--pico-muted-border-color);
+  border: 1px solid var(--border);
   border-radius: 4px;
   font-variant-numeric: tabular-nums;
 }
@@ -1137,7 +1626,7 @@ dialog .actions {
   max-height: 6.5rem;
   overflow: auto;
   padding: 0.375rem 0.75rem;
-  border-top: 1px solid var(--pico-muted-border-color);
+  border-top: 1px solid var(--border);
   font-size: 0.875rem;
 }
 
@@ -1145,7 +1634,7 @@ dialog .actions {
   margin: 0;
   padding: 0.125rem 0.5rem;
   width: auto;
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
   font-size: 0.8125rem;
 }
 
@@ -1155,12 +1644,12 @@ dialog .actions {
   gap: 0.375rem;
   margin: 0;
   padding: 0.375rem 0.75rem;
-  border-top: 1px solid var(--pico-muted-border-color);
+  border-top: 1px solid var(--border);
 }
 
 .prompt .target {
   margin: 0;
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
 }
 
 .prompt input:not([type="checkbox"]) {
@@ -1169,7 +1658,7 @@ dialog .actions {
   margin: 0;
   padding: 0.375rem 0.625rem;
   height: 2.75rem;
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
 }
 
 .prompt button {
@@ -1267,8 +1756,8 @@ dialog .actions {
   font-size: 0.75rem;
   padding: 0.125rem 0.5rem;
   border-radius: 999px;
-  border: 1px solid var(--pico-muted-border-color);
-  color: var(--pico-muted-color);
+  border: 1px solid var(--border);
+  color: var(--muted);
 }
 
 .editing .panel-body {
@@ -1280,14 +1769,14 @@ dialog .actions {
   position: relative;
   min-height: 100%;
   padding: 0.75rem 1rem;
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
   font-size: 0.9375rem;
   line-height: 1.6;
   cursor: text;
 }
 
 .cf-block:focus-within {
-  outline: 2px solid var(--pico-primary-focus);
+  outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
 
@@ -1371,7 +1860,7 @@ dialog .actions {
   align-items: center;
   gap: 0.375rem 0.75rem;
   padding: 0.375rem 0.75rem;
-  border-top: 1px solid var(--pico-muted-border-color);
+  border-top: 1px solid var(--border);
   font-size: 0.875rem;
 }
 
@@ -1386,9 +1875,9 @@ dialog .actions {
   min-height: 2.75rem;
   padding: 0.25rem 0.625rem;
   width: auto;
-  border: 1px solid var(--pico-muted-border-color);
+  border: 1px solid var(--border);
   background: var(--cf-background);
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
   font-size: 0.8125rem;
 }
 
@@ -1399,7 +1888,7 @@ dialog .actions {
 .mode {
   padding: 0.125rem 0.5rem;
   border-radius: 999px;
-  border: 1px solid var(--pico-muted-border-color);
+  border: 1px solid var(--border);
 }
 
 .mode.insert {
@@ -1407,7 +1896,7 @@ dialog .actions {
 }
 
 .prefix {
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
 }
 
 .block-index .panel-body input[type="search"] {
@@ -1440,7 +1929,7 @@ dialog .actions {
 }
 
 .block-list button:hover {
-  background: var(--pico-muted-border-color);
+  background: var(--border);
 }
 
 .block-list button.current {
@@ -1448,20 +1937,20 @@ dialog .actions {
 }
 
 .block-list button.muted {
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .block-list .number {
   min-width: 2rem;
-  font-family: var(--pico-font-family-monospace);
-  color: var(--pico-muted-color);
+  font-family: var(--mono);
+  color: var(--muted);
 }
 
 .block-list .first-line {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
 }
 
 /* a tablet held sideways: tiles small enough that the map's 18 columns fit
@@ -1558,7 +2047,7 @@ button.link {
   background: none;
   box-shadow: none;
   color: inherit;
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
   text-align: left;
 }
 
@@ -1590,7 +2079,7 @@ button.link:hover {
 
 .watch-form input {
   width: 4.5rem;
-  font-family: var(--pico-font-family-monospace);
+  font-family: var(--mono);
 }
 
 .watch-form select {
@@ -1607,7 +2096,7 @@ button.link:hover {
 
 .moments li {
   justify-content: flex-start;
-  border-bottom: 1px solid var(--pico-muted-border-color);
+  border-bottom: 1px solid var(--border);
   min-height: 2.5rem;
 }
 
@@ -1616,7 +2105,7 @@ button.link:hover {
 }
 
 .moments .steps {
-  color: var(--pico-muted-color);
+  color: var(--muted);
 }
 
 .moments .now {
