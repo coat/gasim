@@ -195,6 +195,41 @@ pub fn build(b: *std.Build) void {
     const serve_step = b.step("serve", "Build the web version and serve it on http://localhost:8080 (-- PORT for another)");
     serve_step.dependOn(&serve_cmd.step);
 
+    // ga-tools (github.com/mschuldt/ga-tools) compiles the programs, and
+    // node 708 boots from ROM, so neither CI nor `test` runs this
+    const ga = b.option([]const u8, "ga", "ga-tools' ga command, for the ga-tools step (default: ga on PATH)") orelse
+        b.findProgram(.{ .names = &.{"ga"} });
+    const ga_rom = b.option([]const u8, "ga-rom", "ROM for the ga-tools step: arrayForth 3's disk or a dump (default: rom/pFDISK.blk, or the ROM gasim saved)") orelse "";
+    const ga_tools_step = b.step("ga-tools", "Boot node 708 with streams ga-tools compiles from tests/ga-tools, and check what they send");
+    if (ga) |command| {
+        const ga_tools_check = b.addExecutable(.{
+            .name = "ga-tools-check",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/ga-tools/main.zig"),
+                .target = b.graph.host,
+                // streams at 115200 baud run for seconds of the chip's time
+                .optimize = .ReleaseSafe,
+                .imports = &.{.{ .name = "gasim", .module = b.createModule(.{
+                    .root_source_file = b.path("src/root.zig"),
+                    .target = b.graph.host,
+                    .optimize = .ReleaseSafe,
+                }) }},
+            }),
+        });
+        const check = b.addRunArtifact(ga_tools_check);
+        // a path, rather than a command on PATH, from the repository's root
+        if (std.mem.indexOfScalar(u8, command, '/') == null)
+            check.addArg(command)
+        else
+            check.addFileArg(if (std.fs.path.isAbsolute(command)) .{ .cwd_relative = command } else b.path(command));
+        check.addArg(ga_rom);
+        for ([_][]const u8{ "words.ga", "row.ga" }) |program| check.addFileArg(b.path(b.fmt("tests/ga-tools/{s}", .{program})));
+        // where rom/pFDISK.blk is looked for
+        check.setCwd(b.path("."));
+        check.has_side_effects = true;
+        ga_tools_step.dependOn(&check.step);
+    } else ga_tools_step.dependOn(&b.addFail("the ga-tools step needs ga-tools' ga on PATH, or -Dga=<path>").step);
+
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .use_llvm = if (coverage or fuzz) true else null,

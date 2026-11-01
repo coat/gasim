@@ -151,8 +151,9 @@ did.
 4. **The real boot paths.**
    - ✓ Async boot of node 708 from its ROM, through the UART (`--boot
      --uart 708`, or any stream on stdin).
-   - A stream made by [ga-tools](https://github.com/mschuldt/ga-tools)
-     booting 708: a check that doesn't involve GreenArrays' code.
+   - ✓ Streams made by [ga-tools](https://github.com/mschuldt/ga-tools)
+     booting 708 (`zig build ga-tools`): a check that doesn't involve
+     GreenArrays' code.
    - SPI boot through 705's ROM, and two chips over SERDES and 300↔300.
 5. **arrayForth 3 under Wine, driving gasim.** The board's USB ports A, B and
    C as ptys, mapped to Wine COM ports, so that the unmodified

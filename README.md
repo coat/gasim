@@ -220,6 +220,16 @@ inputs each. `-Dfuzz` builds the tests with LLVM, which the fuzzer needs for
 its coverage. The examples seed the fuzzer, as does arrayForth 3's disk if it
 is in `rom/` (see [rom/README.md](rom/README.md)).
 
+`zig build ga-tools` checks gasim against
+[ga-tools](https://github.com/mschuldt/ga-tools). Its `ga` command compiles
+each program in `tests/ga-tools` into an async boot stream at a few bauds.
+gasim boots node 708 with it from ROM, through a UART as on the evaluation
+board. The step checks the words each program sends, and each node's RAM
+against what ga-tools compiled. It needs `ga` on `PATH`, or `-Dga=<path>`,
+and the ROM: `rom/pFDISK.blk`, the ROM gasim saved, or `-Dga-rom=<path>`.
+ga-tools' `--json` only works with Python 3.11 or older, whose `argparse`
+still takes its `nargs=-1` options. Neither `zig build test` nor CI runs it.
+
 ## Prior Art
 
 - GreenArrays' own SOFTSIM available in their free [arrayForth

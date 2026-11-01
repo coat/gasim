@@ -1,0 +1,9 @@
+\ words.ga - node 708 sends a few words
+\ expect: 0x7c 0x3ffff 0x15555 0x3
+
+node 708
+include serial.ga
+: main
+    io b!
+    0x7c send 0x3ffff send 0x15555 send 3 send
+    done warm

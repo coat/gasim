@@ -1,0 +1,33 @@
+\ row.ga - a word passed along row 6, gaining 1 at each node, then to node
+\ 708 to send, with code in corners of the chip so that the boot reaches
+\ them
+\ expect: 0x2a
+
+node 600
+: main east b! 1 !b warm
+node 601
+: main west a! east b! @ 1 + !b warm
+node 602
+: main west a! east b! @ 1 + !b warm
+node 603
+: main west a! east b! @ 1 + !b warm
+node 604
+: main west a! east b! @ 1 + !b warm
+node 605
+: main west a! east b! @ 1 + !b warm
+node 606
+: main west a! east b! @ 1 + !b warm
+node 607
+: main west a! east b! @ 1 + !b warm
+node 608
+: main west a! north b! @ 34 + !b warm
+node 708
+include serial.ga
+: main south a! io b! @ send done warm
+node 0
+: double ( n - n ) 2* ;
+: main 21 double warm
+node 17
+: main 0x3ffff warm
+node 717
+: main 717 warm
