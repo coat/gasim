@@ -250,6 +250,30 @@ pub const Computer = struct {
         };
     }
 
+    /// Whether stepping the suspended computer again would only suspend it
+    /// again, changing nothing: each port it waits on would still wait. A
+    /// read of the wakeup pin is never counted as waiting, as only reading
+    /// it tells.
+    pub fn retryWaits(self: *const Computer) bool {
+        const reading, const address = switch (self.status()) {
+            .running => return false,
+            .code, .reading => |address| .{ true, address },
+            .writing => |address| .{ false, address },
+        };
+        // an address that is not a port waits forever
+        const ports = port.select(address) orelse return true;
+        var it = ports.iterator();
+        while (it.next()) |direction| {
+            const link = self.ports[@backingInt(direction)];
+            const p = link.port orelse {
+                if (reading and self.wake_port == direction) return false;
+                continue;
+            };
+            if (!(if (reading) p.readWaits(link.side) else p.writeWaits(link.side))) return false;
+        }
+        return true;
+    }
+
     /// Executes the rest of the current instruction word, fetching a new one
     /// first if needed. Returns early with `suspended` set when an opcode
     /// must wait on a comm port.

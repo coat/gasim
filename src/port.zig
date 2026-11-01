@@ -106,6 +106,28 @@ pub const Port = struct {
         return false;
     }
 
+    /// Whether `read` by `side` would return null and change nothing, as
+    /// when retried while still waiting
+    pub fn readWaits(self: Port, side: Side) bool {
+        return switch (self.state) {
+            .idle => false,
+            .writing => |w| w.side == side,
+            .delivered => |d| d.side != side,
+            .reading, .taken => true,
+        };
+    }
+
+    /// Whether `write` by `side` would return false and change nothing, as
+    /// when retried while still waiting
+    pub fn writeWaits(self: Port, side: Side) bool {
+        return switch (self.state) {
+            .idle => false,
+            .reading => |r| r == side,
+            .taken => |t| t != side,
+            .writing, .delivered => true,
+        };
+    }
+
     /// Withdraws a read by `side`, used when another port of a multiport read
     /// completed instead. A value already delivered to `side` is discarded:
     /// its writer has completed, and only one port's value is taken.
@@ -166,6 +188,28 @@ test multiport {
         for (0..4) |d| ports.setPresent(@fromBackingInt(@intCast(d)), bits & (@as(usize, 1) << @intCast(d)) != 0);
         try expectEqual(ports, select(multiport(ports)).?);
     }
+}
+
+test "readWaits and writeWaits are true when read and write change nothing" {
+    const states = [_]Port.State{
+        .idle,
+        .{ .reading = .a },
+        .{ .reading = .b },
+        .{ .writing = .{ .side = .a, .value = 1 } },
+        .{ .writing = .{ .side = .b, .value = 1 } },
+        .{ .delivered = .{ .side = .a, .value = 1 } },
+        .{ .delivered = .{ .side = .b, .value = 1 } },
+        .{ .taken = .a },
+        .{ .taken = .b },
+    };
+    for (states) |state| for ([_]Side{ .a, .b }) |side| {
+        var port: Port = .{ .state = state };
+        const read = port.read(side);
+        try expectEqual(read == null and std.meta.eql(port.state, state), Port.readWaits(.{ .state = state }, side));
+        port = .{ .state = state };
+        const written = port.write(side, 2);
+        try expectEqual(!written and std.meta.eql(port.state, state), Port.writeWaits(.{ .state = state }, side));
+    };
 }
 
 test "reader arrives first" {

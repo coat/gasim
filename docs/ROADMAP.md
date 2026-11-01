@@ -140,11 +140,13 @@ did.
      the benchmarks run 9–23% fewer instructions than before.
    - ✓ Stepping the node furthest behind in time, benchmarked against
      round-robin: the same output and chip time on the board-mode
-     workloads, but 15% more instructions on `boot`, all of them in
-     retries. Round-robin retries a node waiting on several ports once a
-     round however many of them changed; furthest behind first retries
-     it at once, as it is behind, on each change. A cheap check of
-     whether a retry can complete might win this back, in both modes.
+     workloads. Round-robin retries a waiting node once a round however
+     many of its ports changed, while furthest behind first would retry
+     it at once on each change, as it is behind, which cost 15% more
+     instructions on `boot`. So board mode wakes a waiting neighbour only
+     when the change lets it go on (`Computer.retryWaits`), which leaves
+     `boot` 5% under `main`. Round-robin skips the check, which costs
+     its rounds more than it saves.
    - ✓ Instruction times from the G144A12's data book (DB002 §5.3),
      including the time to fetch each word, and 2.4 ns per `unext`, as
      ga-tools takes it, rather than DB001's approximate 2.0.
