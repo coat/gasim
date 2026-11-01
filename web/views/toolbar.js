@@ -174,7 +174,7 @@ export const Toolbar = {
         m('span.steps', { title: 'Steps taken by all the nodes' }, `${state.chip.steps.toLocaleString()} steps`),
         tool(state.running ? 'Pause' : 'Run', toggleRun, { class: state.running ? 'secondary run-pause' : 'run-pause', title: 'Run or pause (space)' }, state.running ? 'pause' : 'play'),
         tool('Step', stepNext, { disabled: !stopped, class: 'secondary outline', title: 'Step the next node to run (s)' }, 'step'),
-        tool('Round', stepRound, { disabled: !stopped, class: 'secondary outline', title: 'Step each node that can run once (shift+s)' }, 'round'),
+        tool('Round', stepRound, { disabled: !stopped, class: 'secondary outline', title: 'Take a step for each node that can run, the furthest behind first (shift+s)' }, 'round'),
         tool('Node', stepNode, { disabled: !stopped, class: 'secondary outline', title: 'Step the selected node (n)' }, 'step-node'),
         tool('Back', back, { disabled: !stopped || state.chip.history === 0, class: 'secondary outline', title: 'Go back before the last step or run (z)' }, 'step-back'),
         tool('Reset', reset, { class: 'secondary outline', title: 'Start the chip again as it was loaded' }, 'arrow-path'),
@@ -273,7 +273,7 @@ export const RomDialog = {
 const keys = [
   ['space', 'Run or pause'],
   ['s', 'Step the next node to run'],
-  ['shift+s', 'Step each node that can run once'],
+  ['shift+s', 'Take a step for each node that can run, the furthest behind first'],
   ['n', 'Step the selected node'],
   ['z', 'Go back before the last step or run'],
   ['arrows or h j k l', 'Select a node'],

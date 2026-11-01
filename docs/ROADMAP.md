@@ -99,22 +99,21 @@ on a port is suspended and costs nothing until a port operation wakes it.
 Ports are blocking rendezvous, so a program that only talks through ports
 computes the same thing in any order of stepping, and simulated time cannot
 change its output. Time matters only when something watches it: a pin and
-the device on its other end. So there are two ways to run:
+the device on its other end.
 
 - **Programs (use 1):** the console, a convenience device with no
   counterpart on a real board (like semihosting), on a port facing off the
-  chip, a byte per word. Round-robin stepping, as fast as possible.
+  chip, a byte per word.
 - **The board (use 2):** pins wired to devices that keep real time (the UART
-  today; SPI flash, SRAM and VGA later). Each node's time counts, and the
-  scheduler steps the node furthest behind.
+  today; SPI flash, SRAM and VGA later).
 
-Board mode is on when a board file or a timed device such as `--uart` is
-in use (`Chip.board`). Without one, gasim keeps round-robin stepping and
-skips syncing node times on transfers, which saved 1.7% of instructions on
-the ring benchmark and less on the others. Only board mode syncs times, and
-steps the node furthest behind, its queue a heap ordered by time. The two
-share one scheduler, specialized at compile time for each mode, so that
-round-robin stepping pays nothing for board mode's.
+Both run the same way: each node's time counts, nodes take the later of
+their times as a word passes between them, and the node furthest behind
+steps next, its queue a heap ordered by time. For a while only board mode,
+with a timed device such as `--uart`, did so, and the console stepped
+round-robin without syncing times; once measured, that saved 3–7% of
+instructions on console runs, which did not pay for two schedulers, and
+node times that meant something different in each.
 
 ## Next: the EVB002
 
@@ -130,23 +129,20 @@ did.
    Ship `ga144` and `evb002`. ZON, read on the host side, so the core still
    does no allocation. Custom layouts would get no pins unless their file
    declares them, which changes how they behave today.
-2. **A shared clock, in board mode.**
+2. **A shared clock.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
      later of their times as a word passes between them.
-   - ✓ Board mode (see above): the time sync only with a board file or a
-     timed device, so that runs on the console are fast again. More of
-     the cost was copying each node, RAM and all, on every fetch from
-     memory, through a method that took the node by value; without that,
-     the benchmarks run 9–23% fewer instructions than before.
+   - ✓ Running fast again. Most of the cost of the time sync turned out
+     to be copying each node, RAM and all, on every fetch from memory,
+     through a method that took the node by value; without that, the
+     benchmarks run 9–23% fewer instructions than before.
    - ✓ Stepping the node furthest behind in time, benchmarked against
-     round-robin: the same output and chip time on the board-mode
-     workloads. Round-robin retries a waiting node once a round however
-     many of its ports changed, while furthest behind first would retry
-     it at once on each change, as it is behind, which cost 15% more
-     instructions on `boot`. So board mode wakes a waiting neighbour only
-     when the change lets it go on (`Computer.retryWaits`), which leaves
-     `boot` 5% under `main`. Round-robin skips the check, which costs
-     its rounds more than it saves.
+     round-robin: the same output and chip time on the UART workloads.
+     Round-robin retries a waiting node once a round however many of its
+     ports changed, while furthest behind first would retry it at once on
+     each change, as it is behind, which cost 15% more instructions on
+     `boot`. So a change wakes a waiting neighbour only when it lets it go
+     on (`Computer.retryWaits`).
    - ✓ Instruction times from the G144A12's data book (DB002 §5.3),
      including the time to fetch each word, and 2.4 ns per `unext`, as
      ga-tools takes it, rather than DB001's approximate 2.0.
@@ -214,8 +210,7 @@ regressions need catching with consistent numbers:
   [hyperfine](https://github.com/sharkdp/hyperfine) elsewhere.
 - ✓ Steps per second from gasim itself (`run --stats`), as `Chip.steps` is
   deterministic.
-- ✓ Workloads for board mode: a `--boot` stream and a long UART stream,
-  where the time sync and scheduler cost most.
+- ✓ Workloads on the UART: a `--boot` stream and a long UART stream.
 - Wall time stays out of CI, where shared runners are too noisy; instruction
   counts could gate later.
 
@@ -281,9 +276,6 @@ blocks.
 - **Pins on custom layouts.** Today they come from the GA144 by node number,
   so a 9x18 layout's 708 has pins but no wakeup. Should custom layouts have
   no pins unless a chip file declares them?
-- **Time outside the board.** Without the time sync, node times in the
-  TUI, GUI and web are only roughly comparable between nodes, as before PR
-  #33. Should they say so, or be hidden outside board mode?
 - Should `.af` stay the extension for arrayForth 3 text, or should the syntax
   be chosen by a flag or by finding `ASM[`?
 - Should going back in the TUI also restore the forth session's stack and

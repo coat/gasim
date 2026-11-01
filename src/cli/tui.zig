@@ -138,7 +138,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
     .{ "map and node panels", &.{
         .{ "space", "run or pause" },
         .{ "s", "step the next node to run, and select it" },
-        .{ "S", "step every node once" },
+        .{ "S", "a round of steps, the furthest behind first" },
         .{ "n", "step the selected node" },
         .{ "z", "go back to before the last step or run, up to 64 times" },
         .{ "tab, shift+tab", "the next or previous panel" },
@@ -515,7 +515,7 @@ const Tui = struct {
             }
             if (k.matches('S', .{})) {
                 self.remember(.round);
-                self.message = if (try self.advance()) "stepped each node that could run" else "every node is waiting";
+                self.message = if (try self.advance()) "took a round of steps, the furthest behind first" else "every node is waiting";
             }
             if (k.matches('n', .{})) {
                 self.remember(.node);
@@ -2875,7 +2875,7 @@ test "steps say what they stepped" {
     try t.press('s');
     try expectEqualStrings("stepped node 000", t.tui.message.?);
     try t.press('S');
-    try expectEqualStrings("stepped each node that could run", t.tui.message.?);
+    try expectEqualStrings("took a round of steps, the furthest behind first", t.tui.message.?);
     t.tui.select(1);
     try t.press('n');
     try expectEqualStrings("node 001 is still waiting", t.tui.message.?);

@@ -291,7 +291,7 @@ const Where = struct {
 // ---------- running ----------
 
 /// Runs for at most `budget` rounds, each giving the console what it has
-/// and stepping each runnable node once
+/// and taking a round of steps (see `Chip.step`)
 pub fn run(self: *Sim, budget: usize) error{OutOfMemory}!Stop {
     self.chip.hit = null;
     for (0..budget) |_| {
@@ -318,7 +318,8 @@ pub fn stepNext(self: *Sim) error{OutOfMemory}!?u16 {
     return self.chip.stepNext() catch error.OutOfMemory;
 }
 
-/// Steps each runnable node once. Returns false when every node is waiting.
+/// Takes a round of steps, the node furthest behind first. Returns false
+/// when every node is waiting.
 pub fn stepRound(self: *Sim) error{OutOfMemory}!bool {
     self.remember(.round);
     return self.chip.advance() catch error.OutOfMemory;

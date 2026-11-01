@@ -16,7 +16,7 @@ executing.
 | --- | --- |
 | `space` | run or pause |
 | `s` | step the next node to run, and select it |
-| `S` | step every node once |
+| `S` | a round of steps, the furthest behind first |
 | `n` | step the selected node |
 | `z` | go back to before the last step or run, up to 64 times |
 | `hjkl`, arrows | select a node on the map, or move through memory in the node panel |

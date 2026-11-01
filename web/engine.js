@@ -94,7 +94,7 @@ export async function loadEngine(url = 'gasim.wasm') {
       const i = x.stepNext();
       return i < 0 ? null : i;
     },
-    /** Steps each runnable node once; false when every node waits. */
+    /** Takes a round of steps, the node furthest behind first; false when every node waits. */
     stepRound: () => !!x.stepRound(),
     /** Steps one node; false if it is still waiting. */
     stepNode: (i) => !!x.stepNode(i),
