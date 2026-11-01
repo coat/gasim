@@ -3,7 +3,7 @@
 const usage =
     \\usage: gasim [options] [program.ga | program.af | program.blk | source.cf]
     \\       gasim run [options] <program.ga | program.af | program.blk | source.cf>
-    \\       gasim repl [options] [program.ga | program.af | program.blk | source.cf]
+    \\       gasim aforth [options] [program.ga | program.af | program.blk | source.cf]
     \\       gasim blocks [--load <block>]... <source.cf>
     \\
     \\Opens the chip in a terminal user interface, with the program loaded if
@@ -17,7 +17,7 @@ const usage =
     \\names. The interface opens it in its editor instead, compiling it at
     \\the start only with --load, and creates it if it does not exist.
     \\
-    \\With repl, reads lines of arrayForth 3 from stdin and interprets them,
+    \\With aforth, reads lines of arrayForth 3 from stdin and interprets them,
     \\to assemble code and act on the chip with the words of arrayForth 3's
     \\IDE, such as 708 NODE UPD, after loading the program if there is one.
     \\
@@ -65,7 +65,7 @@ const max_blocks_len = 64 * 1024 * 1024;
 /// the console stopped by ctrl+c
 var interruptible: ?*Console = null;
 
-const Command = enum { run, tui, repl, blocks };
+const Command = enum { run, tui, aforth, blocks };
 
 /// restores the terminal from the user interface before reporting a panic
 pub const panic = std.debug.FullPanic(struct {
@@ -209,8 +209,8 @@ pub fn main(init: std.process.Init) !void {
     const descriptor_buffer = try arena.alloc(gasim.boot.Descriptor, layout.count());
     var diagnostic: assembler.Diagnostic = .{};
     // the prompt, and the console with it, write here
-    var repl_buffer: [4096]u8 = undefined;
-    var repl_writer: Io.File.Writer = .init(.stdout(), io, &repl_buffer);
+    var aforth_buffer: [4096]u8 = undefined;
+    var aforth_writer: Io.File.Writer = .init(.stdout(), io, &aforth_buffer);
     // and the terminal user interface's forth panel here
     var forth_buffer: [tui.forth_capacity]u8 = undefined;
     var forth_output: Io.Writer = .fixed(&forth_buffer);
@@ -219,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
     const session: ?*gasim.arrayforth.Session = if (command != .run) session: {
         const session = try arena.create(gasim.arrayforth.Session);
         session.* = .init(program_buffer, descriptor_buffer, &diagnostic, .{
-            .out = if (command == .tui) &forth_output else &repl_writer.interface,
+            .out = if (command == .tui) &forth_output else &aforth_writer.interface,
             .chip = &chip,
             .blocks = if (blocks) file else null,
         });
@@ -335,7 +335,7 @@ pub fn main(init: std.process.Init) !void {
         .output = switch (command) {
             .run => &stdout_file_writer.interface,
             .tui => &screen,
-            .repl => &repl_writer.interface,
+            .aforth => &aforth_writer.interface,
             .blocks => unreachable,
         },
     };
@@ -344,7 +344,7 @@ pub fn main(init: std.process.Init) !void {
         error.PortConnected => fatal("console port {t} of node {d:0>3} is connected to another node", .{ console_port, console_node }),
     };
 
-    if (command == .repl) return repl.run(io, arena, &chip, session.?, &diagnostic, &repl_writer.interface, .{
+    if (command == .aforth) return aforth.run(io, arena, &chip, session.?, &diagnostic, &aforth_writer.interface, .{
         .edit = try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io),
         .history = historyPath(io, arena, init.environ_map),
     });
@@ -410,9 +410,9 @@ pub fn main(init: std.process.Init) !void {
     if (!console.used) std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
 }
 
-/// whether the arguments start with a command, run or repl
+/// whether the arguments start with a command, run, aforth or blocks
 fn named(args: []const []const u8) bool {
-    return args.len > 1 and (std.mem.eql(u8, args[1], "run") or std.mem.eql(u8, args[1], "repl") or std.mem.eql(u8, args[1], "blocks"));
+    return args.len > 1 and (std.mem.eql(u8, args[1], "run") or std.mem.eql(u8, args[1], "aforth") or std.mem.eql(u8, args[1], "blocks"));
 }
 
 /// The command the arguments start with, or without one the terminal user
@@ -689,7 +689,7 @@ fn handleInterrupt(_: posix.SIG) callconv(.c) void {
     }
 }
 
-/// where the repl keeps its history: in gasim under XDG_STATE_HOME, or
+/// where aforth keeps its history: in gasim under XDG_STATE_HOME, or
 /// ~/.local/state
 fn historyPath(io: Io, arena: Allocator, environ: *const std.process.Environ.Map) ?[:0]const u8 {
     const dir = if (environ.get("XDG_STATE_HOME")) |state|
@@ -775,25 +775,25 @@ const Console = gasim.Console;
 const Direction = gasim.Direction;
 const ga144 = gasim.ga144;
 const ioName = gasim.disassembler.ioName;
-const repl = @import("repl.zig");
+const aforth = @import("aforth.zig");
 const tui = @import("tui.zig");
 const vaxis = @import("vaxis");
 
 test {
-    _ = repl;
+    _ = aforth;
     _ = tui;
 }
 
 test "the terminal user interface and the prompt start without a program" {
     try std.testing.expectEqual(.tui, commandOf(&.{"gasim"}, true));
-    try std.testing.expectEqual(.repl, commandOf(&.{ "gasim", "repl" }, true));
+    try std.testing.expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, true));
     try std.testing.expect(!needsProgram(.tui, false));
-    try std.testing.expect(!needsProgram(.repl, false));
+    try std.testing.expect(!needsProgram(.aforth, false));
     // but running a program, or listing one, needs one
     try std.testing.expectEqual(.run, commandOf(&.{ "gasim", "run" }, true));
     try std.testing.expect(needsProgram(.run, false));
     try std.testing.expect(needsProgram(.tui, true));
     // as does a pipe or file, which runs it
     try std.testing.expectEqual(.run, commandOf(&.{"gasim"}, false));
-    try std.testing.expectEqual(.repl, commandOf(&.{ "gasim", "repl" }, false));
+    try std.testing.expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, false));
 }

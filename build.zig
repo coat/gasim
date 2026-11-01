@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const coverage = b.option(bool, "coverage", "Generate a coverage report with kcov") orelse false;
     const fuzz = b.option(bool, "fuzz", "Build the tests with LLVM, which --fuzz needs for its coverage") orelse false;
-    const isocline = b.option(bool, "isocline", "Edit lines at the repl with isocline, which links libc (default true)") orelse true;
+    const isocline = b.option(bool, "isocline", "Edit lines at the aforth prompt with isocline, which links libc (default true)") orelse true;
     const strip = b.option(bool, "strip", "Leave out debug info, as the releases do");
     // only with it are dvui, and SDL3's source, fetched
     const with_gui = b.option(bool, "gui", "Build the GUI, gasim-gui, too, with dvui and SDL3") orelse false;

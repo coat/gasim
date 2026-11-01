@@ -11,7 +11,7 @@ const chip_keys = [_][2][]const u8{
     .{ "z", "Go back before the last step or run" },
     .{ "arrows or h j k l", "Select a node" },
     .{ "e", "The colorForth editor, and q in it to come back" },
-    .{ "f", "Type at the Forth prompt" },
+    .{ "f", "Type at the arrayForth prompt" },
     .{ "c", "Type into the console" },
     .{ "esc", "Stop typing" },
     .{ "tab", "Complete a word at the prompt" },

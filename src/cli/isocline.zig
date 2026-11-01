@@ -1,4 +1,4 @@
-//! The isocline functions the repl uses for line editing, declared by hand.
+//! The isocline functions aforth uses for line editing, declared by hand.
 //! isocline is MIT licensed, by Daan Leijen: https://github.com/daanx/isocline
 
 pub const CompletionEnv = opaque {};

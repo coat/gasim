@@ -173,7 +173,7 @@ pub fn draw() void {
 
 fn tabButton(which: Tab) void {
     const label, const tag = switch (which) {
-        .forth => .{ "Forth", "tab-forth" },
+        .forth => .{ "aForth", "tab-forth" },
         .console => .{ if (unseen) "Console \u{2022}" else "Console", "tab-console" },
         .trace => .{ "Trace", "tab-trace" },
         .breakpoints => .{ "Breakpoints", "tab-breakpoints" },

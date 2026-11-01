@@ -196,7 +196,7 @@ export function showDock(tab) {
 /** the dock's panels: the tab's label, what goes beside the tabs, and the panel */
 export const panels = {
   forth: {
-    label: 'Forth',
+    label: 'aForth',
     head: () => m('button.secondary.outline.small', { onclick: () => (state.entries = []), disabled: state.entries.length === 0 }, 'Clear'),
     body: Forth,
   },

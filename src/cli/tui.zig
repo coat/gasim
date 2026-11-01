@@ -15,7 +15,7 @@ pub const Options = struct {
     console: *Console,
     console_node: u16,
     console_port: Direction,
-    /// arrayForth 3 typed into the forth panel, if it is shown
+    /// arrayForth 3 typed into the aaforth panel, if it is shown
     forth: ?Forth = null,
     /// colorForth blocks to edit, if a file was opened
     colorforth: ?ColorForth = null,
@@ -41,10 +41,10 @@ pub const Forth = struct {
     arena: Allocator,
 };
 
-/// bytes of the forth panel's output kept for display
+/// bytes of the aaforth panel's output kept for display
 pub const forth_capacity = 16 * 1024;
 
-/// lines typed into the forth panel that up and down recall
+/// lines typed into the aaforth panel that up and down recall
 const recall_capacity = 32;
 
 const Event = union(enum) {
@@ -88,7 +88,7 @@ const Cause = enum {
     round,
     node,
     run,
-    /// a line typed into the forth panel
+    /// a line typed into the aaforth panel
     line,
     compile,
 
@@ -130,7 +130,7 @@ const Hint = struct { []const u8, []const u8 };
 const help: []const struct { []const u8, []const Hint } = &.{
     .{ "everywhere", &.{
         .{ "F1, ?", "show or hide this help, with ? where it is not typed" },
-        .{ "alt+1-5", "the map, console, node, forth or debug panel, showing it" },
+        .{ "alt+1-5", "the map, console, node, aforth or debug panel, showing it" },
         .{ "ctrl+1-5", "the same, in terminals that report it" },
         .{ "alt+6", "the colorForth editor, with a .cf file open" },
         .{ "ctrl+c", "quit" },
@@ -142,7 +142,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "n", "step the selected node" },
         .{ "z", "go back to before the last step or run, up to 64 times" },
         .{ "tab, shift+tab", "the next or previous panel" },
-        .{ "1 2 3 4 5", "show or hide the map, console, node, forth and debug panels" },
+        .{ "1 2 3 4 5", "show or hide the map, console, node, aforth and debug panels" },
         .{ "f, esc", "fill the screen with the panel, and go back" },
         .{ "< >", "narrow or widen the panels on the left" },
         .{ "- +", "shorten or lengthen the map" },
@@ -166,12 +166,12 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "pgup pgdn", "scroll" },
         .{ "esc", "leave the console" },
     } },
-    .{ "forth", &.{
+    .{ "aforth", &.{
         .{ "enter", "interpret the line, with the selected node as the target" },
         .{ "tab", "complete a word" },
         .{ "up down", "recall lines typed" },
         .{ "pgup pgdn", "scroll" },
-        .{ "esc", "leave the forth panel" },
+        .{ "esc", "leave the aaforth panel" },
     } },
     .{ "debug", &.{
         .{ "h l, left right", "trace, breakpoints and watches, or history" },
@@ -211,7 +211,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
     .{ "mouse", &.{
         .{ "click", "focus a panel, select a node, or move to a word in memory" },
         .{ "click memory's edge", "set or clear a breakpoint" },
-        .{ "wheel", "scroll memory, the console, the forth panel or this help" },
+        .{ "wheel", "scroll memory, the console, the aaforth panel or this help" },
         .{ "drag a border", "resize panels, or tap it and then where it goes" },
     } },
     .{ "this help", &.{
@@ -273,12 +273,12 @@ const Tui = struct {
     input_len: u8 = 0,
     /// rows of console output scrolled back from the end
     console_scroll: usize = 0,
-    /// the line being typed into the forth panel, and rows of its output
+    /// the line being typed into the aaforth panel, and rows of its output
     /// scrolled back from the end
     forth_input: [256]u8 = undefined,
     forth_input_len: u8 = 0,
     forth_scroll: usize = 0,
-    /// lines typed into the forth panel, the latest last, and how far back
+    /// lines typed into the aaforth panel, the latest last, and how far back
     /// up has recalled
     recalled: [recall_capacity][]const u8 = undefined,
     recalled_len: usize = 0,
@@ -893,7 +893,7 @@ const Tui = struct {
         return true;
     }
 
-    /// Handles keys typed into the forth panel, returning false for keys it
+    /// Handles keys typed into the aaforth panel, returning false for keys it
     /// leaves to the panels. Escape leaves it, and tab completes words.
     fn forthKey(self: *Tui, k: vaxis.Key) !bool {
         if (k.codepoint == vaxis.Key.tab) {
@@ -925,7 +925,7 @@ const Tui = struct {
         return true;
     }
 
-    /// Completes the word being typed into the forth panel, as far as the
+    /// Completes the word being typed into the aaforth panel, as far as the
     /// words it could be agree, or lists them when that adds nothing
     fn complete(self: *Tui) void {
         const forth = self.options.forth.?;
@@ -956,7 +956,7 @@ const Tui = struct {
         output.writeByte('\n') catch {};
     }
 
-    /// puts the line typed `lines_back` lines ago into the forth panel's
+    /// puts the line typed `lines_back` lines ago into the aaforth panel's
     /// input, or an empty line for none
     fn recall(self: *Tui, lines_back: usize) void {
         self.recalling = lines_back;
@@ -966,7 +966,7 @@ const Tui = struct {
         self.forth_input_len = @intCast(len);
     }
 
-    /// Interprets the line typed into the forth panel, with the selected node
+    /// Interprets the line typed into the aaforth panel, with the selected node
     /// as the target, and selects the target it leaves. The chip is
     /// remembered first, to go back to as after a step.
     fn interpret(self: *Tui) !void {
@@ -991,8 +991,8 @@ const Tui = struct {
         if (!self.running) self.remember(.line);
         forth.session.setTarget(layout.nodeNumber(self.selected));
         output.print("{d:0>3}> {s}\n", .{ layout.nodeNumber(self.selected), line }) catch {};
-        repl.interpret(forth.session, line, forth.diagnostic, output) catch {
-            self.message = "the forth panel's output is full";
+        aforth.interpret(forth.session, line, forth.diagnostic, output) catch {
+            self.message = "the aaforth panel's output is full";
         };
         if (forth.session.target()) |node| if (layout.index(node)) |i| self.select(i);
         self.memory_scroll = null;
@@ -1287,7 +1287,7 @@ const Tui = struct {
         return self.textPage(.console);
     }
 
-    /// rows of output a page of the console or forth panel shows
+    /// rows of output a page of the console or aforth panel shows
     fn textPage(self: Tui, panel: Panel) u16 {
         return if (self.windows.get(panel)) |w| @max(w.height -| 1, 1) else 8;
     }
@@ -1374,7 +1374,7 @@ const Tui = struct {
             const height = if (drawn == below_count) body_height - y else rest / below_count;
             const title = switch (panel) {
                 .console => self.print("2 console {d:0>3}:{t}", .{ self.options.console_node, self.options.console_port }),
-                .forth => "4 forth",
+                .forth => "4 aforth",
                 else => self.debugTitle(),
             };
             const inside = self.drawPanel(win, panel, 0, y, left_width, height, title);
@@ -2072,7 +2072,7 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
     }
 }
 
-/// words that could complete what was typed into the forth panel, up to as
+/// words that could complete what was typed into the aaforth panel, up to as
 /// many as are listed
 const Completions = struct {
     partial: []const u8,
@@ -2561,14 +2561,14 @@ const Instruction = gasim.Instruction;
 const Word = gasim.Word;
 const disassembler = gasim.disassembler;
 const Session = gasim.arrayforth.Session;
-const repl = @import("repl.zig");
+const aforth = @import("aforth.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const vaxis = @import("vaxis");
 
-test "the forth panel interprets arrayForth 3 at the selected node" {
+test "the aaforth panel interprets arrayForth 3 at the selected node" {
     var t: TestTui = .{ .chip = undefined };
     try t.init("up b! @b");
     defer t.deinit();
@@ -2584,7 +2584,7 @@ test "the forth panel interprets arrayForth 3 at the selected node" {
     t.tui.shown.insert(.forth);
     t.tui.focus = .forth;
     t.draw();
-    try std.testing.expect(try t.shows(19, "4 forth"));
+    try std.testing.expect(try t.shows(19, "4 aforth"));
 
     // NODE selects the node, and LIT pushes onto its stack
     for ("707 NODE x15. LIT") |c| try t.press(c);
@@ -2645,7 +2645,7 @@ test "alt or ctrl and a digit focus a panel, showing it" {
     t.tui.zoomed = .map;
     try t.pressWith('3', .{ .alt = true });
     try std.testing.expectEqual(.node, t.tui.zoomed);
-    // there is no forth panel without a session
+    // there is no aforth panel without a session
     try t.pressWith('4', .{ .alt = true });
     try std.testing.expectEqual(.node, t.tui.focus);
 }

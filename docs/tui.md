@@ -22,11 +22,11 @@ executing.
 | `hjkl`, arrows | select a node on the map, or move through memory in the node panel |
 | `tab`, `shift+tab` | move to the next or previous panel, from the map and node panels |
 | `t` | on the map, show tiles where they fit and numbers otherwise, numbers, or tiles to scroll through |
-| `alt+1`-`5` | move to the map, console, node, forth or debug panel from any panel, showing it, as does `ctrl` in terminals that report it |
-| `1` `2` `3` `4` `5` | show or hide the map, console, node, forth and debug panels |
+| `alt+1`-`5` | move to the map, console, node, aforth or debug panel from any panel, showing it, as does `ctrl` in terminals that report it |
+| `1` `2` `3` `4` `5` | show or hide the map, console, node, aforth and debug panels |
 | `f`, `esc` | fill the screen with the panel, and go back |
 | `<` `>` `-` `+` | resize the panels, as can dragging their borders |
-| `pgup` `pgdn` | page through memory, or scroll the console or forth panel |
+| `pgup` `pgdn` | page through memory, or scroll the console or aforth panel |
 | `b` | set or clear a breakpoint on the word in memory under the cursor |
 | `w` | watch the selected node's reads from a port, with `r` `d` `l` `u`, or its writes to one, with `R` `D` `L` `U`, or stop watching it |
 | `g` | follow the word the node is executing again |
@@ -45,7 +45,7 @@ the console, typed text is sent as input with `enter`, `ctrl+d` ends the
 input as the end of a pipe would, and `esc` goes back to the map. Long lines
 of output wrap.
 
-The forth panel takes lines of arrayForth 3, as `gasim repl` does, with the
+The aforth panel takes lines of arrayForth 3, as `gasim aforth` does, with the
 selected node as the target of the IDE's words: `x15. LIT` pushes onto its
 stack, and `NODE` selects another node. `up` and `down` recall lines typed
 before, `tab` completes a word or lists the words it could be, and `z`

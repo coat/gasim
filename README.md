@@ -4,7 +4,7 @@ A cross-platform simulator for the [GreenArrays,
 Inc.](https://www.greenarraychips.com) [GA144 multi-computer
 chip](https://www.greenarraychips.com/home/documents/index.php#GA144).
 
-![The chip, console, forth and node panels](docs/screenshot-chip.png)
+![The chip, console, aforth and node panels](docs/screenshot-chip.png)
 
 ## Running
 
@@ -55,7 +55,7 @@ echo "hello" | gasim examples/upcase.ga
 
 This is a work in progress, but basically everything you need is on
 one page in panels that you can resize, maximize and hide. Tab and
-Shift+Tab to move around. That gets tricky when using the forth or
+Shift+Tab to move around. That gets tricky when using the aforth or
 console panels which have an input prompt, so you can use
 alt/ctrl+1-5 to jump to a different panel. There's also mouse
 support.
@@ -79,7 +79,7 @@ documentation](docs/colorForth.md).
 
 ### arrayForth
 
-The `forth` panel in the TUI is essentially an arrayForth outer interpreter.
+The `aforth` panel in the TUI is essentially an arrayForth outer interpreter.
 
 Files ending in `.af` are read as arrayForth 3 source, the F18 assembler
 syntax of GreenArrays' current tools.

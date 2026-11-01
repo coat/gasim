@@ -76,7 +76,7 @@ fn dataDir(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u
         std.fs.path.join(arena, &.{ environ.get("HOME") orelse return null, ".local", "share", "gasim" }) catch null;
 }
 
-/// where gasim keeps its state, as the repl's history: in gasim under
+/// where gasim keeps its state, as the history of gasim aforth: in gasim under
 /// XDG_STATE_HOME, or ~/.local/state
 fn stateDir(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u8 {
     return if (environ.get("XDG_STATE_HOME")) |state|
