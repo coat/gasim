@@ -25,7 +25,8 @@ nodes: []Computer,
 /// ports between neighbours
 ports: []Port,
 
-/// nodes to step, in order. Each node is in the queue at most once.
+/// nodes to step, in order, or in board mode a binary heap of them, the
+/// earliest in time first. Each node is in the queue at most once.
 queue: []u16,
 queue_head: usize = 0,
 queue_len: usize = 0,
@@ -54,8 +55,12 @@ feeder: ?struct { device: *Feeder, index: u16 } = null,
 /// the UART on a node's pins, and the index of that node
 uart: ?struct { device: *Uart, index: u16 } = null,
 /// board mode: nodes take the later of their times as a word passes between
-/// them, as a device on pins needs. Attaching one turns it on.
+/// them, and the node furthest behind in time steps first, as a device on
+/// pins needs. Attaching one turns it on (`setBoard`).
 board: bool = false,
+/// when the UART's line next changes, for its node waiting on the pin while
+/// a node earlier in time runs (see `wakeOnPin`)
+pin_edge: ?u64 = null,
 
 const Chip = @This();
 
@@ -450,11 +455,14 @@ pub fn restore(self: *Chip, snapshot: *const Snapshot) void {
     self.steps = snapshot.steps;
     self.started = snapshot.started;
     self.hit = null;
+    self.pin_edge = null;
     if (self.console) |console| console.device.port = snapshot.console_port;
     if (self.feeder) |feeder| {
         feeder.device.port = snapshot.feeder_port;
         feeder.device.next = snapshot.feeder_next;
     }
+    // saved before board mode was turned on
+    if (self.board) self.heapify();
 }
 
 /// Whether the chip is as it was when saved into a snapshot, not counting
@@ -619,7 +627,26 @@ pub fn attachUart(self: *Chip, uart: *Uart, number: u16) error{ NoSuchNode, NoPi
     if (pins & uart.rx_pin == 0 or pins & uart.tx_pin == 0) return error.NoPins;
     self.uart = .{ .device = uart, .index = i };
     self.nodes[i].pin_device = uart.pinDevice();
+    self.setBoard();
+}
+
+/// Turns on board mode, ordering the nodes already queued by time
+pub fn setBoard(self: *Chip) void {
+    if (self.board) return;
     self.board = true;
+    self.heapify();
+}
+
+/// Makes a heap of the queue, in board mode, from the ring round-robin
+/// keeps or a heap with nodes out of place
+fn heapify(self: *Chip) void {
+    std.mem.rotate(u16, self.queue, self.queue_head);
+    self.queue_head = 0;
+    var k = self.queue_len / 2;
+    while (k > 0) {
+        k -= 1;
+        self.siftDown(k);
+    }
 }
 
 /// feeds the next word, waking the node that takes it
@@ -630,8 +657,10 @@ fn feed(self: *Chip) bool {
     return true;
 }
 
-/// Steps each runnable node once. Returns false when every node is
-/// suspended, and stepping would do nothing.
+/// Steps each runnable node once, or in board mode takes as many steps, each
+/// of the node furthest behind in time then, which may be the same node
+/// again. Returns false when every node is suspended, and stepping would do
+/// nothing.
 pub fn step(self: *Chip) bool {
     if (self.uart != null) self.wakeOnPin();
     if (self.queue_len == 0) return false;
@@ -643,23 +672,40 @@ pub fn step(self: *Chip) bool {
         self.started = true;
         if (self.hit != null) return true;
     }
-    // nodes woken during this round run in the next one
-    for (0..self.queue_len) |_| self.stepNode(self.dequeue().?);
+    // nodes woken during this round run in the next one, unless in board
+    // mode they are the furthest behind
+    if (self.board) self.round(true) else self.round(false);
     return true;
+}
+
+fn round(self: *Chip, comptime board: bool) void {
+    for (0..self.queue_len) |_| {
+        if (board) {
+            // a node that stopped may be the earliest still, and the node
+            // waiting on the UART's line wakes when the earliest gets to
+            // the line's next change
+            if (self.hit != null) break;
+            if (self.pin_edge) |edge| if (self.nodes[self.queue[0]].time >= edge) self.wakeOnPin();
+        }
+        self.stepNodeIn(self.dequeueIn(board).?, board);
+    }
 }
 
 /// Wakes the node with the UART if it waits on its wakeup pin, and the pin
 /// is already as it waits for, such as when input arrives, or changes before
 /// any node that is running gets there, so the node wakes at its time
 fn wakeOnPin(self: *Chip) void {
+    self.pin_edge = null;
     const uart = self.uart orelse return;
     const n = &self.nodes[uart.index];
     if (self.queued[uart.index] or !n.waitsOnPin()) return;
     if (uart.device.rxHigh(n.time)) n.pin_inputs |= uart.device.rx_pin else n.pin_inputs &= ~uart.device.rx_pin;
     if (!n.pinAwake()) {
         const edge = uart.device.nextRxEdge(n.time) orelse return;
-        for (0..self.queue_len) |k| {
-            if (self.nodes[self.queue[(self.queue_head + k) % self.queue.len]].time < edge) return;
+        // the earliest node, as a UART puts the chip in board mode
+        if (self.queue_len > 0 and self.nodes[self.queue[0]].time < edge) {
+            self.pin_edge = edge;
+            return;
         }
         n.time = edge;
     }
@@ -669,7 +715,14 @@ fn wakeOnPin(self: *Chip) void {
 
 /// takes the next node to step from the queue
 fn dequeue(self: *Chip) ?u16 {
+    return if (self.board) self.dequeueIn(true) else self.dequeueIn(false);
+}
+
+/// `dequeue`, with board mode known at compile time, so that round-robin
+/// stepping pays nothing for the order board mode keeps
+inline fn dequeueIn(self: *Chip, comptime board: bool) ?u16 {
     if (self.queue_len == 0) return null;
+    if (board) return self.dequeueEarliest();
     const i = self.queue[self.queue_head];
     self.queue_head = (self.queue_head + 1) % self.queue.len;
     self.queue_len -= 1;
@@ -680,6 +733,14 @@ fn dequeue(self: *Chip) ?u16 {
 /// Steps a node and wakes the neighbours on any port it changed, since a
 /// suspended node can only continue once one of its ports changes.
 pub fn stepNode(self: *Chip, i: u16) void {
+    if (!self.board) return self.stepNodeIn(i, false);
+    const queued = self.queued[i];
+    self.stepNodeIn(i, true);
+    // stepped while queued, as by hand, so later in time than its place
+    if (queued) self.later(i, self.nodes[i].time);
+}
+
+fn stepNodeIn(self: *Chip, i: u16, comptime board: bool) void {
     const n = &self.nodes[i];
     var before: [4]Port.State = undefined;
     for (n.ports, &before) |link, *state| state.* = if (link.port) |p| p.state else .idle;
@@ -703,7 +764,7 @@ pub fn stepNode(self: *Chip, i: u16) void {
             u.used = true;
         };
     }
-    if (!n.suspended) self.wake(i);
+    if (!n.suspended) self.wakeIn(i, board);
     // unless the node is still waiting for a word to execute, or still
     // waiting on the same port
     const waited = n.suspended and !n.transfers.any() and (retrying or (fetching and n.state == .fetch));
@@ -723,13 +784,14 @@ pub fn stepNode(self: *Chip, i: u16) void {
         // a word passes between neighbours when the second of them gets to
         // the port, at the later of their times, and not when the first
         // wakes to finish, as the second may have run on by then
-        if (self.board and transfers.contains(direction) and (state == .reading or state == .writing)) {
+        if (board and transfers.contains(direction) and (state == .reading or state == .writing)) {
             const other = &self.nodes[j];
             const time = @max(n.time, other.time);
-            n.time = time;
-            other.time = time;
+            // either may be queued already, at its time before
+            if (n.time < time) self.later(i, time);
+            if (other.time < time) self.later(j, time);
         }
-        self.wake(j);
+        self.wakeIn(j, board);
     }
 }
 
@@ -770,18 +832,77 @@ fn breakpointAt(self: *const Chip, i: u16) ?Stop {
 
 /// queues a node to be stepped
 pub fn wake(self: *Chip, i: u16) void {
+    if (self.board) self.wakeIn(i, true) else self.wakeIn(i, false);
+}
+
+inline fn wakeIn(self: *Chip, i: u16, comptime board: bool) void {
     if (self.queued[i]) return;
     self.queued[i] = true;
     self.queue[(self.queue_head + self.queue_len) % self.queue.len] = i;
     self.queue_len += 1;
+    if (board) self.siftUp(self.queue_len - 1);
+}
+
+/// takes the node earliest in time from the queue, in board mode, out of
+/// line so that round-robin stepping stays as it was
+noinline fn dequeueEarliest(self: *Chip) u16 {
+    const i = self.queue[0];
+    self.queue_len -= 1;
+    self.queued[i] = false;
+    if (self.queue_len > 0) {
+        self.queue[0] = self.queue[self.queue_len];
+        self.siftDown(0);
+    }
+    return i;
+}
+
+/// Moves a node's time on, in board mode, keeping the queue in order
+noinline fn later(self: *Chip, i: u16, time: u64) void {
+    self.nodes[i].time = time;
+    if (!self.queued[i]) return;
+    const k = std.mem.indexOfScalar(u16, self.queue[0..self.queue_len], i).?;
+    self.siftDown(k);
+}
+
+/// whether node `a` steps before node `b` in board mode: the earlier in
+/// time, or the lower index at the same time, so that the order is
+/// the same each run
+fn stepsFirst(self: *const Chip, a: u16, b: u16) bool {
+    const ta = self.nodes[a].time;
+    const tb = self.nodes[b].time;
+    return ta < tb or (ta == tb and a < b);
+}
+
+noinline fn siftUp(self: *Chip, start: usize) void {
+    var k = start;
+    while (k > 0) {
+        const parent = (k - 1) / 2;
+        if (!self.stepsFirst(self.queue[k], self.queue[parent])) break;
+        std.mem.swap(u16, &self.queue[k], &self.queue[parent]);
+        k = parent;
+    }
+}
+
+fn siftDown(self: *Chip, start: usize) void {
+    var k = start;
+    while (true) {
+        var first = k;
+        for ([_]usize{ 2 * k + 1, 2 * k + 2 }) |child| {
+            if (child < self.queue_len and self.stepsFirst(self.queue[child], self.queue[first])) first = child;
+        }
+        if (first == k) break;
+        std.mem.swap(u16, &self.queue[k], &self.queue[first]);
+        k = first;
+    }
 }
 
 /// rounds without console output after which pending output is flushed
 const flush_after_rounds = 1000;
 
 /// Gives the devices anything they have for their nodes, without waiting
-/// for input, then steps each runnable node once. Returns false when nothing
-/// happened: every node is waiting, and the devices have nothing for them.
+/// for input, then steps each runnable node once (see `step`). Returns false
+/// when nothing happened: every node is waiting, and the devices have
+/// nothing for them.
 pub fn advance(self: *Chip) !bool {
     const serviced = try self.service();
     const stepped = self.step();
@@ -1031,6 +1152,109 @@ test "a word arrives at the time it was written, in board mode" {
     try expectEqual(7, chip.node(1).?.data_stack.t);
     // 000 takes the word at 001's time, not at 002's
     try expect(chip.node(0).?.time < chip.node(2).?.time / 10);
+}
+
+/// that the queue is a heap of the nodes queued, in board mode
+fn expectHeap(chip: *const Chip) !void {
+    try expectEqual(0, chip.queue_head);
+    var count: usize = 0;
+    for (chip.queued) |q| count += @intFromBool(q);
+    try expectEqual(count, chip.queue_len);
+    for (chip.queue[0..chip.queue_len], 0..) |i, k| {
+        try expect(chip.queued[i]);
+        if (k > 0) try expect(!chip.stepsFirst(i, chip.queue[(k - 1) / 2]));
+    }
+}
+
+test "in board mode a breakpoint stops the node there" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 5 });
+    defer chip.deinit(std.testing.allocator);
+    // node 000 runs short words, so it is the earliest in time again and
+    // again in a round, while the others run long ones
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [5]assembler.Program = undefined;
+    for (try assembler.assembleNodes(
+        \\ : main dup dup dup dup dup dup dup dup dup dup dup dup dup dup dup dup main ;
+        \\ node 001 : main 400 for unext main ;
+        \\ node 002 : main 400 for unext main ;
+        \\ node 003 : main 400 for unext main ;
+        \\ node 004 : main 400 for unext main ;
+    , &programs, &diagnostic)) |program| try chip.load(program);
+    chip.setBoard();
+    _ = try chip.breakpoints.toggle(.init(0, 3));
+
+    try chip.run();
+    try expectEqual(Stop{ .breakpoint = .init(0, 3) }, chip.hit.?);
+    try expectEqual(Address.fromWord(3), chip.node(0).?.p.address);
+}
+
+test "in board mode a node stepped while queued keeps the queue in order" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 4 });
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [4]assembler.Program = undefined;
+    for (try assembler.assembleNodes(
+        \\ : main 99 for unext main ;
+        \\ node 001 : main 99 for unext main ;
+        \\ node 002 : main 99 for unext main ;
+        \\ node 003 : main 99 for unext main ;
+    , &programs, &diagnostic)) |program| try chip.load(program);
+    chip.setBoard();
+
+    // the earliest, by hand, as from the TUI, while it is queued
+    for (0..8) |_| {
+        chip.stepNode(chip.queue[0]);
+        try expectHeap(&chip);
+    }
+}
+
+test "a snapshot from before board mode is restored in order" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 4 });
+    defer chip.deinit(std.testing.allocator);
+    var snapshot: Snapshot = try .init(std.testing.allocator, chip.layout);
+    defer snapshot.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [4]assembler.Program = undefined;
+    for (try assembler.assembleNodes(
+        \\ : main 9 for unext main ;
+        \\ node 001 : main 99 for unext main ;
+        \\ node 002 : main 999 for unext main ;
+        \\ node 003 : main 9999 for unext main ;
+    , &programs, &diagnostic)) |program| try chip.load(program);
+    // round-robin, its ring starting part way along the array
+    for (0..5) |_| _ = try chip.stepNext();
+    chip.save(&snapshot);
+    chip.setBoard();
+    for (0..5) |_| _ = try chip.stepNext();
+
+    chip.restore(&snapshot);
+    try expectHeap(&chip);
+}
+
+test "in board mode the node furthest behind in time steps first" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 3 });
+    defer chip.deinit(std.testing.allocator);
+
+    // 001 passes words from 000, which is slower, on to 002, which is
+    // slower still, so times jump as each waits for the other
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [3]assembler.Program = undefined;
+    for (try assembler.assembleNodes(
+        \\ right b! 9 for 50 for unext dup !b next left b! @b
+        \\ node 001 left a! right b! 9 for @ !b next left b! @b
+        \\ node 002 left b! 9 for @b drop 200 for unext next left b! @b
+    , &programs, &diagnostic)) |program| try chip.load(program);
+    // with the nodes queued already
+    chip.setBoard();
+
+    var steps: usize = 0;
+    while (chip.queue_len > 0) : (steps += 1) {
+        try expect(steps < 10_000);
+        const next = chip.queue[0];
+        for (chip.queue[0..chip.queue_len]) |i| try expect(chip.nodes[next].time <= chip.nodes[i].time);
+        try expectEqual(next, (try chip.stepNext()).?);
+    }
+    for (chip.nodes) |n| try expect(n.suspended);
 }
 
 test "times are not synced outside board mode" {
