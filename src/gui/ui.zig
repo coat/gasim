@@ -110,8 +110,10 @@ pub fn frame() !dvui.App.Result {
 
     {
         // the window lays its children over each other, so one box stacks
-        // them: the toolbar, the panels taking what is left, the status line
-        var page = dvui.box(@src(), .{}, .{ .expand = .both });
+        // them: the toolbar, the panels taking what is left, the status line.
+        // Its fill is behind what draws none, such as the node's registers,
+        // where SDL's clear would show through, black
+        var page = dvui.box(@src(), .{}, .{ .expand = .both, .background = true });
         defer page.deinit();
         toolbar();
         {
