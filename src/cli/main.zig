@@ -35,8 +35,17 @@ const usage =
     \\                             it, the ROM last assembled, or assembled
     \\                             from arrayForth 3 installed in C:\GreenArrays
     \\                             or Wine's C: drive, if it is.
+    \\  --uart <node>[:<baud>]      with run, put stdin and stdout on a UART on
+    \\                             the node's pins 17 and 1 instead of the
+    \\                             console, as USB serial ports are wired to
+    \\                             node 708 on GreenArrays' evaluation boards,
+    \\                             with both lines inverted (default 921600
+    \\                             baud). Bytes from a host such as ga-tools
+    \\                             boot node 708 from ROM.
     \\  --boot                     load programs with a boot stream through the
-    \\                             SERDES port of node 001, which needs ROM
+    \\                             SERDES port of node 001, or with --uart,
+    \\                             through the UART to the node's ROM, before
+    \\                             stdin. This needs ROM.
     \\  --break <node>:<address>   stop when the node is about to fetch the word
     \\                             at the address, in hex, such as 105:003. Can
     \\                             be given more than once.
@@ -62,8 +71,8 @@ const max_source_len = 64 * 1024;
 /// the most a .blk file may hold, which is more than arrayForth 3's disks
 const max_blocks_len = 64 * 1024 * 1024;
 
-/// the console stopped by ctrl+c
-var interruptible: ?*Console = null;
+/// what ctrl+c stops: the console, or the UART
+var interruptible: ?struct { interrupted: *std.atomic.Value(bool), waiting: *std.atomic.Value(bool) } = null;
 
 const Command = enum { run, tui, aforth, blocks };
 
@@ -85,6 +94,9 @@ pub fn main(init: std.process.Init) !void {
     var layout: Chip.Layout = .ga144;
     var console_node: u16 = 0;
     var console_port: Direction = .up;
+    var console_given = false;
+    var uart_node: ?u16 = null;
+    var uart_baud: u32 = 921600;
     var path: ?[]const u8 = null;
     var rom_path: ?[]const u8 = null;
     var boot = false;
@@ -100,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = if (named(args)) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load")) {
+        if (std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load") or std.mem.eql(u8, arg, "--uart")) {
             i += 1;
             if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
             const value = args[i];
@@ -139,9 +151,19 @@ pub fn main(init: std.process.Init) !void {
                     .write = kind == null or std.mem.eql(u8, kind.?, "write"),
                 };
                 watches_len += 1;
+            } else if (std.mem.eql(u8, arg, "--uart")) {
+                var parts = std.mem.splitScalar(u8, value, ':');
+                const node = parts.first();
+                uart_node = std.fmt.parseInt(u16, node, 10) catch fatal("invalid UART node '{s}'", .{node});
+                if (parts.next()) |baud| {
+                    uart_baud = std.fmt.parseInt(u32, baud, 10) catch fatal("invalid baud '{s}'", .{baud});
+                    if (uart_baud == 0) fatal("invalid baud '{s}'", .{baud});
+                }
+                if (parts.next() != null) fatal("invalid UART '{s}', expected for example 708 or 708:460800", .{value});
             } else if (std.mem.eql(u8, arg, "--layout")) {
                 layout = Chip.Layout.parse(value) catch fatal("invalid layout '{s}', expected for example 8x18", .{value});
             } else {
+                console_given = true;
                 const colon = std.mem.indexOfScalar(u8, value, ':') orelse
                     fatal("invalid console '{s}', expected for example 000:up", .{value});
                 console_node = std.fmt.parseInt(u16, value[0..colon], 10) catch
@@ -161,7 +183,7 @@ pub fn main(init: std.process.Init) !void {
             path = arg;
         } else fatal(usage, .{});
     }
-    if (path == null and needsProgram(command, listing)) fatal(usage, .{});
+    if (path == null and needsProgram(command, listing, uart_node != null)) fatal(usage, .{});
     if (command == .blocks) return writeBlocks(io, arena, path.?, loads[0..loads_len]);
     const source_path = path orelse "";
     // colorForth blocks, which the terminal user interface edits, and only
@@ -170,6 +192,9 @@ pub fn main(init: std.process.Init) !void {
     const compile_colorforth = colorforth and (loads_len > 0 or command != .tui);
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
+    if (!listing and uart_node != null and command != .run) fatal("--uart needs run, as stdin and stdout are the UART's", .{});
+    if (uart_node != null and console_given) fatal("--uart puts stdin and stdout on the UART, so there is no console for --console", .{});
+    if (uart_node != null and boot and path == null) fatal("--boot needs a program to send node {d:0>3}", .{uart_node.?});
 
     const blocks = std.mem.endsWith(u8, source_path, ".blk");
     if (loads_len > 0 and !blocks and !colorforth) fatal("--load needs a .blk or .cf file of blocks", .{});
@@ -204,6 +229,8 @@ pub fn main(init: std.process.Init) !void {
     const roms = readRom(io, arena, init.environ_map, rom_path);
     // which readRom checks for
     if (roms) |r| chip.loadRom(r) catch unreachable;
+    if (uart_node != null and path == null and roms == null)
+        fatal("--uart without a program needs a ROM, for node {d:0>3} to boot from its input (see --rom)", .{uart_node.?});
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     const descriptor_buffer = try arena.alloc(gasim.boot.Descriptor, layout.count());
@@ -304,8 +331,24 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    var uart: gasim.Uart = .init(uart_baud, &stdout_file_writer.interface);
     var feeder: Chip.Feeder = .{ .words = &.{} };
-    if (boot) {
+    if (boot and uart_node != null) {
+        const root = uart_node.?;
+        if (gasim.ga144.romType(root) != .async_boot)
+            fatal("--boot with --uart needs node 708, whose ROM boots from its pins, not node {d:0>3}", .{root});
+        if (roms == null) fatal("--boot needs a ROM, for node {d:0>3} to boot from (see --rom)", .{root});
+        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors) + 3 * (descriptors.len + 2));
+        const words = gasim.boot.asyncStream(init.gpa, layout, root, descriptors, programs, buffer) catch |err| switch (err) {
+            error.NoSuchNode => fatal("--uart node {d:0>3} is not in a {d}x{d} layout", .{ root, layout.rows, layout.columns }),
+            error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
+            error.RootTooLong => fatal("--boot: node {d:0>3}'s program leaves no room in its RAM for the code that sets it up", .{root}),
+            else => |e| return e,
+        };
+        uart.preload = gasim.boot.asyncBytes(words, try arena.alloc(u8, 3 * words.len));
+    } else if (boot) {
         if (console_node == 1 and console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
         if (roms == null) fatal("--boot needs a ROM, for node 001 to boot from (see --rom)", .{});
         const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors));
@@ -322,8 +365,6 @@ pub fn main(init: std.process.Init) !void {
 
     var stdin_buffer: [1024]u8 = undefined;
     var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     // the terminal user interface shows console output from here
     var screen_buffer: [tui.console_capacity]u8 = undefined;
     var screen: Io.Writer = .fixed(&screen_buffer);
@@ -339,7 +380,17 @@ pub fn main(init: std.process.Init) !void {
             .blocks => unreachable,
         },
     };
-    chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
+    if (uart_node) |node| {
+        uart.input = .{ .io = io, .queue = &input };
+        chip.attachUart(&uart, node) catch |err| switch (err) {
+            error.NoSuchNode => fatal("--uart node {d:0>3} is not in a {d}x{d} layout", .{ node, layout.rows, layout.columns }),
+            error.NoPins => fatal("--uart node {d:0>3} has no pins 17 and 1", .{node}),
+        };
+        // booting from ROM waits for pin 17 through the port facing off the
+        // chip, which a node only has on its edge
+        if ((boot or path == null) and chip.nodes[layout.index(node).?].wake_port == null)
+            fatal("node {d:0>3} is not on an edge of a {d}x{d} layout, where pin 17 could wake it to boot", .{ node, layout.rows, layout.columns });
+    } else chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
         error.NoSuchNode => fatal("console node {d:0>3} is not in a {d}x{d} layout", .{ console_node, layout.rows, layout.columns }),
         error.PortConnected => fatal("console port {t} of node {d:0>3} is connected to another node", .{ console_port, console_node }),
     };
@@ -365,7 +416,10 @@ pub fn main(init: std.process.Init) !void {
     // returning skips this, so those paths flush first.
     defer stderr_file_writer.interface.flush() catch {};
 
-    interruptible = &console;
+    interruptible = if (uart_node != null)
+        .{ .interrupted = &uart.interrupted, .waiting = &uart.waiting }
+    else
+        .{ .interrupted = &console.interrupted, .waiting = &console.waiting };
     if (have_sigint) posix.sigaction(.INT, &.{
         .handler = .{ .handler = handleInterrupt },
         .mask = posix.sigemptyset(),
@@ -401,13 +455,17 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     // the conventional status for a program stopped by SIGINT
-    if (console.interrupted.load(.monotonic)) {
+    if (interruptible.?.interrupted.load(.monotonic)) {
         stderr_file_writer.interface.flush() catch {};
         std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
     }
     if (why) logWaiting(chip);
-    // most likely the console is on a port the program does not use
-    if (!console.used) std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
+    if (uart_node) |node| {
+        if (!uart.used) std.log.warn("node {d:0>3} never sent a byte on the UART or woke on its input", .{node});
+    } else if (!console.used) {
+        // most likely the console is on a port the program does not use
+        std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
+    }
 }
 
 /// whether the arguments start with a command, run, aforth or blocks
@@ -423,9 +481,10 @@ fn commandOf(args: []const []const u8, terminal: bool) Command {
     return if (terminal) .tui else .run;
 }
 
-/// only the terminal user interface and the prompt start without a program
-fn needsProgram(command: Command, listing: bool) bool {
-    return command == .run or command == .blocks or listing;
+/// only the terminal user interface and the prompt start without a program,
+/// and a run with a UART, which input can boot
+fn needsProgram(command: Command, listing: bool, uart: bool) bool {
+    return (command == .run and !uart) or command == .blocks or listing;
 }
 
 /// the blocks an arrayForth 2 image has, which a file opened in the editor
@@ -674,12 +733,12 @@ fn dataPath(arena: Allocator, environ: *const std.process.Environ.Map, name: []c
     return std.fs.path.join(arena, &.{ dir, name }) catch null;
 }
 
-/// Stops the console so its output is flushed. While it is blocked waiting
+/// Stops the console or UART so its output is flushed. While it is blocked waiting
 /// for input there is nothing to flush, so ctrl+c terminates as usual, as it
 /// does when pressed a second time.
 fn handleInterrupt(_: posix.SIG) callconv(.c) void {
-    const console = interruptible orelse return;
-    if (console.waiting.load(.acquire) or console.interrupted.swap(true, .monotonic)) {
+    const device = interruptible orelse return;
+    if (device.waiting.load(.acquire) or device.interrupted.swap(true, .monotonic)) {
         posix.sigaction(.INT, &.{
             .handler = .{ .handler = posix.SIG.DFL },
             .mask = posix.sigemptyset(),
@@ -787,12 +846,14 @@ test {
 test "the terminal user interface and the prompt start without a program" {
     try std.testing.expectEqual(.tui, commandOf(&.{"gasim"}, true));
     try std.testing.expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, true));
-    try std.testing.expect(!needsProgram(.tui, false));
-    try std.testing.expect(!needsProgram(.aforth, false));
+    try std.testing.expect(!needsProgram(.tui, false, false));
+    try std.testing.expect(!needsProgram(.aforth, false, false));
     // but running a program, or listing one, needs one
     try std.testing.expectEqual(.run, commandOf(&.{ "gasim", "run" }, true));
-    try std.testing.expect(needsProgram(.run, false));
-    try std.testing.expect(needsProgram(.tui, true));
+    try std.testing.expect(needsProgram(.run, false, false));
+    try std.testing.expect(needsProgram(.tui, true, false));
+    // except a run with a UART, booted from its input
+    try std.testing.expect(!needsProgram(.run, false, true));
     // as does a pipe or file, which runs it
     try std.testing.expectEqual(.run, commandOf(&.{"gasim"}, false));
     try std.testing.expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, false));

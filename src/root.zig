@@ -14,6 +14,7 @@ pub const Chip = @import("Chip.zig");
 pub const Console = @import("Console.zig");
 pub const Editor = @import("Editor.zig");
 pub const Tail = @import("Tail.zig");
+pub const Uart = @import("Uart.zig");
 pub const disassembler = @import("disassembler.zig");
 pub const ga144 = @import("ga144.zig");
 pub const rom = @import("rom.zig");
@@ -37,4 +38,5 @@ test {
     _ = @import("rom.zig");
     _ = @import("stack.zig");
     _ = @import("Tail.zig");
+    _ = @import("Uart.zig");
 }

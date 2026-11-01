@@ -1754,7 +1754,7 @@ const Tui = struct {
             self.fields(win, 3, &.{.{ "I", self.print("next word from {s}", .{if (word.io) disassembler.ioName(@bitCast(word)) else "P"}) }});
         } else self.fields(win, 3, &.{.{ "I", self.print("{s}  {s}", .{ self.hex(n.i), self.disassemble(n.i, @bitCast(word)) }) }});
         self.fields(win, 4, &.{ .{ "A", self.hex(n.a) }, .{ "B", self.print("{x:0>3}", .{n.b}) }, .{ "io", self.hex(n.io) } });
-        self.fields(win, 5, &.{.{ "time", self.print("{d:.1} ns", .{n.execution_time}) }});
+        self.fields(win, 5, &.{.{ "time", self.print("{d:.1} ns", .{@as(f64, @floatFromInt(n.time)) / 1000}) }});
 
         self.fields(win, 7, &.{ .{ "T", self.hex(n.data_stack.t) }, .{ "S", self.hex(n.data_stack.s) } });
         _ = win.printSegment(.{ .text = self.stack(&n.data_stack.stack, n.data_stack.index), .style = colors.dim }, .{ .row_offset = 8, .col_offset = 2, .wrap = .none });
