@@ -24,6 +24,8 @@ const recent_capacity = 8;
 
 var gpa: Allocator = undefined;
 var dirs: ?Dirs = null;
+/// where the examples are, as `main` finds them; in tests, the repository's
+pub var examples_dir: ?[]const u8 = if (builtin.is_test) "examples" else null;
 /// what `file` and `recent` point into, owned
 var arena: std.heap.ArenaAllocator = undefined;
 pub var file: ?File = null;
@@ -113,18 +115,24 @@ pub fn openDropped() void {
 }
 
 pub fn openExample(e: examples.Example) void {
-    load(.{ .path = e.name, .example = true }, e.bytes);
+    const bytes = readExample(e.name) catch |err| return ui.say("{s}: {t}", .{ e.name, err });
+    load(.{ .path = e.name, .example = true }, bytes);
 }
 
-/// Loads the file again, from disk unless it is an example, with the
-/// blocks typed
+/// an example's file, from where the examples are, if `name` is one of them
+fn readExample(name: []const u8) ![]u8 {
+    const dir = examples_dir orelse return error.FileNotFound;
+    for (examples.all) |e| {
+        if (std.mem.eql(u8, e.name, name)) break;
+    } else return error.FileNotFound;
+    return read(try std.fs.path.join(dvui.currentWindow().arena(), &.{ dir, name }));
+}
+
+/// Loads the file again, from disk, or from the examples if it is one,
+/// with the blocks typed
 pub fn reload() void {
     const f = file orelse return;
-    if (f.example) {
-        for (examples.all) |e| if (std.mem.eql(u8, e.name, f.path)) return load(f, e.bytes);
-        return;
-    }
-    const bytes = read(f.path) catch |err| return ui.say("{s}: {t}", .{ f.path, err });
+    const bytes = (if (f.example) readExample(f.path) else read(f.path)) catch |err| return ui.say("{s}: {t}", .{ f.path, err });
     load(f, bytes);
 }
 
@@ -201,7 +209,8 @@ pub fn toolbar() void {
                 recent.clearRetainingCapacity();
             }
         };
-        if (toolbarMenu(@src(), .{ .label = "Examples", .icon = icons.book_open, .tip = "Examples to open" }, .{ .tag = "examples" })) |r| {
+        // only when they are installed
+        if (examples_dir != null) if (toolbarMenu(@src(), .{ .label = "Examples", .icon = icons.book_open, .tip = "Examples to open" }, .{ .tag = "examples" })) |r| {
             var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
             defer fw.deinit();
             for (examples.all, 0..) |e, k| {
@@ -218,7 +227,7 @@ pub fn toolbar() void {
                     openExample(e);
                 }
             }
-        }
+        };
     }
     const f = file orelse return;
     dvui.labelNoFmt(@src(), std.fs.path.basename(f.path), .{}, .{ .gravity_y = 0.5, .font = .theme(.mono), .padding = .{ .x = 6, .w = 6 } });
@@ -402,9 +411,7 @@ pub fn restoreWorkspace() void {
     // wins: the last run's file, and where it was in it, are left
     if (file != null) return;
     if (w.file) |f| {
-        if (f.example) {
-            for (examples.all) |e| if (std.mem.eql(u8, e.name, f.path)) load(f, e.bytes);
-        } else if (read(f.path)) |data| load(f, data) else |_| {}
+        if (if (f.example) readExample(f.path) else read(f.path)) |data| load(f, data) else |_| {}
     }
     const layout = ui.sim.chip.layout;
     for (w.breakpoints) |b| if (layout.index(b.node)) |i| {
@@ -456,6 +463,7 @@ fn keep(a: Allocator, path: []const u8) !void {
     try Io.Dir.cwd().writeFile(dvui.io, .{ .sub_path = path, .data = out.written() });
 }
 
+const builtin = @import("builtin");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -497,6 +505,17 @@ test "the examples menu opens an example" {
     _ = try ui.sim.run(100_000);
     try testing.settle(ui.frame);
     try expectEqualStrings("Hello, world!\n", dock.consoleText());
+}
+
+test "the examples menu is left out when they are not installed" {
+    var w = try testing.init(.{ .window_size = .{ .w = 1400, .h = 900 } });
+    defer w.deinit();
+    try ui.startWith(ui.upcase);
+    defer ui.stop();
+    examples_dir = null;
+    defer examples_dir = "examples";
+    try testing.settle(ui.frame);
+    try expectEqual(null, dvui.tagGet("examples"));
 }
 
 test "the blocks to load are numbers" {
@@ -556,7 +575,7 @@ test "a file given wins over the last run's, and Recent keeps 8, once each" {
     var paths: [recent_capacity + 1][]const u8 = undefined;
     for (&paths, 0..) |*p, k| {
         const name = try std.fmt.allocPrint(dvui.currentWindow().arena(), "f{d}.ga", .{k});
-        try tmp.dir.writeFile(dvui.io, .{ .sub_path = name, .data = examples.all[0].bytes });
+        try tmp.dir.writeFile(dvui.io, .{ .sub_path = name, .data = ui.upcase });
         p.* = try std.fs.path.join(dvui.currentWindow().arena(), &.{ dir, name });
     }
 
@@ -585,7 +604,7 @@ test "a file dropped on the window opens in the next frame, the first of several
     defer w.deinit();
     var paths: [2][]const u8 = undefined;
     for (&paths, [_][]const u8{ "first.ga", "second.ga" }) |*p, name| {
-        try tmp.dir.writeFile(dvui.io, .{ .sub_path = name, .data = examples.all[0].bytes });
+        try tmp.dir.writeFile(dvui.io, .{ .sub_path = name, .data = ui.upcase });
         // lasting past the frame, unlike the window's arena
         p.* = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
     }
