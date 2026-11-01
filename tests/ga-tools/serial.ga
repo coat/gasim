@@ -1,0 +1,21 @@
+\ serial.ga - send 18-bit words on node 708's pin 1, to be read as
+\ ga-tools' host side reads them: for each word a byte of 0, then its low,
+\ middle and high bits in three bytes, and a byte of 1 at the end.
+\ Bytes are a start bit, 8 data bits from the lowest, and a stop bit, on
+\ the evaluation board's inverted line: pin 1 high (3) for 0, low (2) for 1.
+\ B must address io.
+\
+\ ga-tools' unext_baud is a bit time at its --baud over 2.4 ns, and
+\ `unext_baud for unext` runs one more unext than that, leaving nothing for
+\ the code around the loop. At 921600 baud, waits from 6 to 54 unexts
+\ shorter decode, so this waits 30 shorter, about 72 ns, to sit in the
+\ middle; at slower bauds the code is a smaller part of a bit.
+
+: wait unext_baud -30 + for unext ;
+: level ( n ) !b wait ;
+: bits ( c ) 3 level 7 for dup - 1 and 2 + level 2/ next drop 2 level ;
+: send ( w )
+    0 bits dup bits
+    2/ 2/ 2/ 2/ 2/ 2/ 2/ 2/ dup bits
+    2/ 2/ 2/ 2/ 2/ 2/ 2/ 2/ bits ;
+: done 1 bits ;
