@@ -136,9 +136,9 @@ did.
      timed device, so that runs on the console are fast again.
    - Stepping the node furthest behind in time, benchmarked against
      round-robin, as pF/144 runs a lot of cycles.
-   - Instruction times as close to a real chip's as can be found out. If
-     ga-tools' figures (2.4 ns per `unext`, against gasim's 2.0) are
-     closer, use them.
+   - ✓ Instruction times from the G144A12's data book (DB002 §5.3),
+     including the time to fetch each word, and 2.4 ns per `unext`, as
+     ga-tools takes it, rather than DB001's approximate 2.0.
 3. **Pins and devices.**
    - ✓ Pin 17 wakeup (DB001 §3.4.1), and a bit-level UART on stdin and
      stdout (`--uart`).
@@ -255,10 +255,10 @@ blocks.
 
 ## Open questions
 
-- **Instruction timing.** gasim takes 2.0 ns per `unext`, ga-tools 2.4 ns.
-  Which is closer to a real chip? DB001 §2.4.1 says times vary with
-  temperature, voltage and process, so board files may want to set them, and
-  a board could measure them.
+- **Instruction timing on a board.** gasim takes DB002's typical times, but
+  DB001 §2.4.1 and DB002 §5.3 say they vary with temperature, voltage and
+  process. Should board files set them, such as DB002's minimum and maximum,
+  and should a real board be measured?
 - **Pins on custom layouts.** Today they come from the GA144 by node number,
   so a 9x18 layout's 708 has pins but no wakeup. Should custom layouts have
   no pins unless a chip file declares them?

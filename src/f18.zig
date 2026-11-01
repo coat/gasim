@@ -264,37 +264,73 @@ pub const Computer = struct {
 
     pub fn execute(self: *Computer, opcode: Opcode) void {
         const code = @backingInt(opcode);
+        // the address a memory opcode uses, before it moves A or P on. DB002
+        // only times @p and !p as memory opcodes, but with P in io space, as
+        // in port execution, they read and write the port as @b and !b do
+        const io = switch (opcode) {
+            .@"@p", .@"!p" => self.p.address.io,
+            .@"@b", .@"!b" => self.b & 0x100 != 0,
+            .@"@+", .@"@", .@"!+", .@"!" => self.a & 0x100 != 0,
+            else => false,
+        };
+        // DB002's empty next, `begin next`: the next is its word's whole
+        // loop, and jumps back to it
+        const empty_next = opcode == .next and self.slot == 0 and self.return_stack.t != 0;
         opcodes.opcodes[code](self);
         if (self.suspended) return;
 
-        self.time += time: switch (code) {
+        // typical times of the G144A12 (DB002 §5.3), in picoseconds. Not
+        // added in place, as advancing to the next word adds its fetch time
+        const time: u64 = time: switch (code) {
             0x00...0x03, 0x05...0x07 => {
                 // transfer of program control ends the instruction word
                 self.state = .fetch;
-                break :time 5100;
+                const empty = empty_next and @as(u9, @bitCast(self.p.address)) == @as(u9, @bitCast(self.word_address));
+                break :time if (empty) 5000 else 5200;
             },
             0x04 => {
                 if (self.state == .unext) {
                     self.state = .execution;
                     self.slot = 0;
                 } else self.advance();
-                break :time 2000;
+                break :time 2400;
+            },
+            0x08...0x0f => {
+                self.advance();
+                break :time if (io) 3500 else 5000;
             },
             else => {
                 self.advance();
-                // memory read and write (x08-x0F) are slower than ALU and register operations
-                break :time if (code <= 0x0f) 5100 else 1500;
+                break :time 1400;
             },
         };
+        self.time += time;
     }
 
     /// moves on to the next slot, or the next instruction word after slot 3
     fn advance(self: *Computer) void {
         if (self.slot == 3) {
             self.state = .fetch;
+            self.time += fetchTime(Instruction.decode(self.i));
         } else {
             self.slot += 1;
         }
+    }
+
+    /// Time to fetch the word after `instruction`, when it ends without a
+    /// jump. The next word is prefetched while the opcodes run, unless one
+    /// in slot 1, 2 or 3 uses memory, or loops in its word (DB002 §5.3).
+    fn fetchTime(instruction: Instruction) u64 {
+        const slot_3: Opcode = @enumFromInt(@as(u5, instruction.slot_3) << 2);
+        if (delaysFetch(slot_3)) return 4300;
+        if (delaysFetch(instruction.slot_2)) return 3200;
+        if (delaysFetch(instruction.slot_1)) return 2200;
+        return 1200;
+    }
+
+    fn delaysFetch(opcode: Opcode) bool {
+        const code = @backingInt(opcode);
+        return code == 0x04 or (code >= 0x08 and code <= 0x0f);
     }
 
     /// Reads from memory or I/O space. Returns null, suspending the computer,
@@ -869,19 +905,92 @@ test "execution time depends on the opcode class" {
     computer.slot = 1;
 
     computer.execute(.@".");
-    try expectEqual(1500, computer.time);
+    try expectEqual(1400, computer.time);
 
+    // B is io after reset
     computer.time = 0;
+    computer.slot = 1;
     computer.execute(.@"@b");
-    try expectEqual(5100, computer.time);
+    try expectEqual(3500, computer.time);
 
     computer.time = 0;
+    computer.slot = 1;
     computer.execute(.@"!");
-    try expectEqual(5100, computer.time);
+    try expectEqual(5000, computer.time);
 
+    // and slot 3 adds the time to fetch the next word, here prefetched
+    computer.time = 0;
+    computer.slot = 2;
+    computer.i = Instruction.encode(.{ .slot_0 = .@".", .slot_1 = .@".", .slot_2 = .@"+*", .slot_3 = 4 });
+    computer.execute(.@"+*");
+    try expectEqual(1400, computer.time);
     computer.time = 0;
     computer.execute(.@"+*");
-    try expectEqual(1500, computer.time);
+    try expectEqual(1400 + 1200, computer.time);
+    try expectEqual(.fetch, computer.state);
+}
+
+test "the time to fetch the next word depends on the last slot to use memory" {
+    var computer: Computer = .reset;
+    computer.slot = 3;
+    computer.i = Instruction.encode(.{ .slot_0 = .@".", .slot_1 = .@"@p", .slot_2 = .@"!b", .slot_3 = 7 });
+    computer.execute(.@".");
+    try expectEqual(1400 + 3200, computer.time);
+}
+
+test "only a next that is its whole word's loop is an empty next" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.return_stack.push(1);
+    // begin next
+    computer.mem[0] = Instruction.encodeJump(.{ .slot_0 = .next, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 0);
+    computer.step();
+    try expectEqual(5000, computer.time);
+
+    // begin dup next, which jumps as any other next does
+    computer.time = 0;
+    computer.data_stack.push(3);
+    computer.mem[0] = Instruction.encodeJump(.{ .slot_0 = .dup, .slot_1 = .next, .slot_2 = .@".", .slot_3 = 7 }, 1, 0);
+    computer.return_stack.push(1);
+    computer.step();
+    try expectEqual(1400 + 5200, computer.time);
+
+    // and a next in a word from a port, which does not move P, ending its
+    // loop without jumping
+    computer.time = 0;
+    computer.p.address = .{ .io = true, .rom = false, .local = 0x55 };
+    computer.word_address = computer.p.address;
+    computer.i = Instruction.encodeJump(.{ .slot_0 = .next, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 0x155);
+    computer.state = .execution;
+    computer.slot = 0;
+    computer.return_stack.push(0);
+    computer.execute(.next);
+    try expectEqual(5200, computer.time);
+}
+
+test "times a multiply as DB002's example does" {
+    // .. 17 mul, where
+    // mul nn-n a! 17 dup dup / or for / +* unext drop / a ;
+    // whose or leaves 0 for for, though the example loops 18 times, so
+    // drop, a basic opcode as or is, stands in for it
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.data_stack.push(5);
+    computer.data_stack.push(7);
+    computer.mem[0] = Instruction.encodeJump(.{ .slot_0 = .@"@p", .slot_1 = .call, .slot_2 = .@".", .slot_3 = 7 }, 1, 8);
+    computer.mem[1] = 17;
+    computer.mem[8] = Instruction.encode(.{ .slot_0 = .@"a!", .slot_1 = .@"@p", .slot_2 = .dup, .slot_3 = 6 });
+    computer.mem[9] = 17;
+    computer.mem[10] = Instruction.encode(.{ .slot_0 = .drop, .slot_1 = .@">r", .slot_2 = .@".", .slot_3 = 7 });
+    computer.mem[11] = Instruction.encode(.{ .slot_0 = .@"+*", .slot_1 = .unext, .slot_2 = .drop, .slot_3 = 7 });
+    computer.mem[12] = Instruction.encode(.{ .slot_0 = .a, .slot_1 = .@";", .slot_2 = .@".", .slot_3 = 7 });
+
+    // its words, and back to the word after the literal. DB002 sums them to
+    // 108500 pS, but its unext word's 68400, 2800 and 2200 are 73400, not
+    // the 73500 it says
+    for (0..5) |_| computer.step();
+    try expectEqual(2, computer.p.address.local);
+    try expectEqual(108_400, computer.time);
 }
 
 test "instruction encoding" {

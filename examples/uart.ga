@@ -14,8 +14,9 @@ node 708
     @+ for @+ send next    \ the first word is the length - 1
     right a! @             \ wait forever on node 709
 
-\ drives pin 1 high (3) or low (2) for a bit, 540 unexts of 2 ns each
-: bit ( level ) !b 539 for unext ;
+\ drives pin 1 high (3) or low (2) for a bit: 429 unexts of 2.4 ns each,
+\ and the code around them
+: bit ( level ) !b 428 for unext ;
 
 \ a start bit, 8 data bits from the lowest, and a stop bit, inverted
 : send ( c )

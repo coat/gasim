@@ -491,7 +491,7 @@ test "boot node 708 from ROM through a UART" {
     const source =
         \\ node 707 : main left b! 72 !b 105 !b up b! @b
         \\ node 708 : main left b! io a! @b send @b send up b! @b
-        \\ : bit ( level ) ! 539 for unext ;
+        \\ : bit ( level ) ! 428 for unext ;
         \\ : send ( c ) 3 bit 7 for dup 1 and 1 xor 2 + bit 2/ next drop 2 bit ;
     ;
     const assembled = try assembler.assembleNodes(source, &programs, &diagnostic);
