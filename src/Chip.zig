@@ -1141,6 +1141,74 @@ test "waits for input that has not arrived" {
     try std.testing.expectEqualStrings("k", writer.buffered());
 }
 
+test attachUart {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+
+    var writer: Io.Writer = .fixed(&.{});
+    var uart: Uart = .init(921600, &writer);
+    try std.testing.expectError(error.NoSuchNode, chip.attachUart(&uart, 999));
+    try std.testing.expectError(error.NoPins, chip.attachUart(&uart, 410));
+    try chip.attachUart(&uart, 708);
+}
+
+test "a node waiting on its pin wakes as the line changes" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [2]assembler.Program = undefined;
+    // node 708 waits for pin 17 to go high, then on node 709, while node
+    // 000 is busy until after the line changes, so 708 waits for it
+    for (try assembler.assembleNodes(
+        \\ 2999 for unext left b! @b
+        \\ node 708 : main up a! @ drop right b! @b
+    , &programs, &diagnostic)) |program| try chip.load(program);
+
+    // a start bit at 5 us, the line idle low until then
+    var writer: Io.Writer = .fixed(&.{});
+    var uart: Uart = .init(921600, &writer);
+    uart.preload = "\x00";
+    uart.arrived = 5_000_000;
+    try chip.attachUart(&uart, 708);
+
+    try chip.run();
+    const n = chip.node(708).?;
+    try std.testing.expect(n.suspended and !n.waitsOnPin());
+    try std.testing.expect(n.time >= 5_000_000 and n.time < 5_100_000);
+    try std.testing.expect(chip.node(0).?.time > 6_000_000);
+}
+
+test "waits for UART input that has not arrived" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble("node 708 : main up a! @ drop right b! @b", &diagnostic));
+
+    var input_buffer: [1]u8 = undefined;
+    var input: Io.Queue(u8) = .init(&input_buffer);
+    var writer: Io.Writer = .fixed(&.{});
+    var uart: Uart = .init(921600, &writer);
+    uart.input = .{ .io = std.testing.io, .queue = &input };
+    try chip.attachUart(&uart, 708);
+
+    // input arrives once the chip is waiting for it, and its start bit
+    // wakes node 708 at once
+    var typing = try std.testing.io.concurrent(struct {
+        fn typeKey(io: Io, queue: *Io.Queue(u8), u: *Uart) !void {
+            while (!u.waiting.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
+            try queue.putOne(io, 'k');
+            queue.close(io);
+        }
+    }.typeKey, .{ std.testing.io, &input, &uart });
+    defer typing.cancel(std.testing.io) catch {};
+
+    try chip.run();
+    try typing.await(std.testing.io);
+    const n = chip.node(708).?;
+    try std.testing.expect(n.suspended and !n.waitsOnPin());
+    try std.testing.expect(uart.used);
+}
+
 test advance {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
     defer chip.deinit(std.testing.allocator);
