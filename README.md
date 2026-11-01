@@ -195,7 +195,7 @@ info: 142 nodes waiting on several ports, as after reset
 
 ```
 $ gasim run --stats tools/bench/ring.ga > /dev/null
-info: 11000954 steps in 0.860 s, 12.8M steps/s, and 44.882 ms of the chip's time
+info: 7300937 steps in 0.670 s, 10.9M steps/s, and 44.882 ms of the chip's time
 ```
 
 - `--listing`: instead of running, write each node's words: the address, the
@@ -275,10 +275,10 @@ still takes its `nargs=-1` options. Neither `zig build test` nor CI runs it.
 
 `zig build bench` builds gasim ReleaseFast and times it on the workloads in
 `tools/bench`: one node computing, a token around a ring of 36 nodes, and
-1 MiB through `examples/upcase.ga`; and, with `--uart 708`, so that node
-times are synced, the ring booted through node 708's ROM (left out without
-a ROM, and with no console to print to, so its output is not compared), and
-64 KiB through the UART. `-Dbench-base=<ref>` builds another git
+1 MiB through `examples/upcase.ga`; and, with `--uart 708`, the ring
+booted through node 708's ROM (left out without a ROM, and with no console
+to print to, so its output is not compared), and 64 KiB through the UART.
+`-Dbench-base=<ref>` builds another git
 ref's gasim too, such as `main`, and compares them, checking they print the
 same; `zig build bench -- ring` runs only some. It uses
 [poop](https://github.com/andrewrk/poop) if it is on `PATH`, whose counts of

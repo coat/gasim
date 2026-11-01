@@ -385,10 +385,10 @@ export function stepNext() {
   refresh();
 }
 
-/** Steps each runnable node once. */
+/** Takes a round of steps, the node furthest behind first. */
 export function stepRound() {
   if (state.running) return;
-  state.message = state.gasim.stepRound() ? 'Stepped each node that could run' : 'Every node is waiting';
+  state.message = state.gasim.stepRound() ? 'Took a round of steps, the furthest behind first' : 'Every node is waiting';
   refresh();
 }
 

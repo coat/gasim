@@ -17,7 +17,7 @@ const Workload = struct {
     program: []const u8,
     /// bytes of generated text for stdin, if any
     input: usize = 0,
-    /// options for `gasim run`, such as board mode's `--uart`
+    /// options for `gasim run`, such as `--uart`
     options: []const []const u8 = &.{},
     /// whether it needs a ROM, and is left out without one
     rom: bool = false,
@@ -31,14 +31,14 @@ const workloads = [_]Workload{
         .name = "boot",
         // with no console, node 000's count is never output, so there is
         // nothing to compare with the base's
-        .about = "board mode: the ring booted through the UART and 708's ROM, then run (no output)",
+        .about = "the ring booted through the UART and 708's ROM, then run (no output)",
         .program = "tools/bench/ring.ga",
         .options = &.{ "--uart", "708", "--boot" },
         .rom = true,
     },
     .{
         .name = "serial",
-        .about = "board mode: 64 KiB through the UART to 708, a bit at a time",
+        .about = "64 KiB through the UART to 708, a bit at a time",
         .program = "tools/bench/serial.ga",
         .input = 1 << 16,
         .options = &.{ "--uart", "708" },
