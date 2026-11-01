@@ -124,6 +124,7 @@ pub fn build(b: *std.Build) void {
     // part of `test`
     const test_gui_step = b.step("test-gui", "Run the GUI's tests, in a hidden window (with -Dgui)");
     const gui_options = b.addOptions();
+    gui_options.addOption([:0]const u8, "version", @import("build.zig.zon").version);
     gui_options.addOption(?[]const u8, "gui_images", b.option([]const u8, "gui-images", "A directory for test-gui to save what it draws in, as PNGs"));
     if (!with_gui) {
         const fail = b.addFail("the GUI is built with -Dgui, which fetches dvui and SDL3");

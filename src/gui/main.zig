@@ -4,19 +4,25 @@
 //!     gasim-gui [--rom <path>] [<file>]
 
 pub const dvui_app: dvui.App = .{
-    .config = .{
-        .options = .{
-            .size = .{ .w = 1280, .h = 800 },
-            .min_size = .{ .w = 320, .h = 240 },
-            .title = "gasim",
-            .app = "gasim",
-            .org = "gasim",
-        },
-    },
+    .config = .{ .startFn = start },
     .initFn = init,
     .deinitFn = deinit,
     .frameFn = ui.frame,
 };
+
+/// dvui's SDL backend names the app "DVUI App Example" before it calls
+/// this, and SDL takes the last name it is given before SDL_Init.
+fn start() dvui.App.StartOptions {
+    _ = dvui.backend.c.SDL_SetAppMetadata("gasim", build_options.version, "com.sadbeast.gasim");
+    return .{
+        .size = .{ .w = 1280, .h = 800 },
+        .min_size = .{ .w = 320, .h = 240 },
+        .title = "gasim",
+        .app = "gasim",
+        .org = "gasim",
+    };
+}
+
 pub const main = dvui.App.main;
 pub const panic = dvui.App.panic;
 pub const std_options: std.Options = .{ .logFn = dvui.App.logFn };
@@ -104,6 +110,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
+const build_options = @import("build_options");
 const dvui = @import("dvui");
 const files = @import("files.zig");
 const help = @import("help.zig");
