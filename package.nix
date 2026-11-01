@@ -2,8 +2,10 @@
   lib,
   stdenv,
   elfkickers,
+  makeWrapper,
   runCommand,
   sdl3,
+  zenity,
   zig,
   # gasim-gui too, beside gasim
   gui ? false,
@@ -45,7 +47,8 @@ stdenv.mkDerivation (
       [
         zig.hook
       ]
-      ++ lib.optionals stdenv.hostPlatform.isLinux [elfkickers];
+      ++ lib.optionals stdenv.hostPlatform.isLinux [elfkickers]
+      ++ lib.optionals (gui && stdenv.hostPlatform.isLinux) [makeWrapper];
 
     buildInputs = lib.optionals gui [sdl3];
 
@@ -62,6 +65,14 @@ stdenv.mkDerivation (
         "--color off"
       ]
       ++ finalAttrs.guiFlags;
+
+    # the GUI's file dialogs are tinyfiledialogs, which runs whichever dialog
+    # program it finds on PATH, or else asks in the terminal. Zenity goes
+    # after PATH, so a desktop's own kdialog still comes first. macOS has
+    # osascript.
+    postFixup = lib.optionalString (gui && stdenv.hostPlatform.isLinux) ''
+      wrapProgram $out/bin/gasim-gui --suffix PATH : ${lib.makeBinPath [zenity]}
+    '';
 
     meta = {
       mainProgram = finalAttrs.name;
