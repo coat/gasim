@@ -230,6 +230,32 @@ pub fn build(b: *std.Build) void {
         ga_tools_step.dependOn(&check.step);
     } else ga_tools_step.dependOn(&b.addFail("the ga-tools step needs ga-tools' ga on PATH, or -Dga=<path>").step);
 
+    // gasim built ReleaseFast and timed on tools/bench's workloads, with poop
+    // if it is on PATH, or hyperfine, against another ref with -Dbench-base
+    const bench_base = b.option([]const u8, "bench-base", "git ref to compare with in the bench step, such as main") orelse "";
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bench/main.zig"),
+            .target = b.graph.host,
+            .optimize = .safe,
+        }),
+    });
+    const bench_cmd = b.addRunArtifact(bench);
+    bench_cmd.addArgs(&.{
+        b.graph.zig_exe,
+        // from the repository root, where it runs
+        ".zig-cache/bench",
+        bench_base,
+        b.findProgram(.{ .names = &.{"poop"} }) orelse "",
+        b.findProgram(.{ .names = &.{"hyperfine"} }) orelse "",
+    });
+    bench_cmd.addPassthruArgs();
+    bench_cmd.setCwd(b.path("."));
+    bench_cmd.has_side_effects = true;
+    const bench_step = b.step("bench", "Time gasim on tools/bench's workloads (-Dbench-base=<ref> to compare, -- <workload>... for some)");
+    bench_step.dependOn(&bench_cmd.step);
+
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .use_llvm = if (coverage or fuzz) true else null,

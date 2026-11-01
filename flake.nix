@@ -20,8 +20,10 @@
                 deno
                 # the GUI's window, input and drawing, linked with -fsys=sdl3
                 sdl3
+                # zig build bench, where poop is not
+                hyperfine
               ]
-              ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [elfkickers kcov]);
+              ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [elfkickers kcov poop]);
           };
 
           formatter.${system} = pkgs.alejandra;

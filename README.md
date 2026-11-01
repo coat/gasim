@@ -155,6 +155,17 @@ info: node 001 waiting to read right
 info: 142 nodes waiting on several ports, as after reset
 ```
 
+- `--stats`: with `run`, once it stops, say how many steps the nodes took
+  (a step runs an instruction word, its `unext` loops included, or tries to
+  while it waits on a port), how many a second of the run, waiting for
+  input included, and how much of the chip's time passed: the most any
+  node's clock reached.
+
+```
+$ gasim run --stats tools/bench/ring.ga > /dev/null
+info: 11000954 steps in 0.860 s, 12.8M steps/s, and 44.882 ms of the chip's time
+```
+
 - `--listing`: instead of running, write each node's words: the address, the
   raw word, its opcodes or literal value, and the source line it came from.
 
@@ -229,6 +240,19 @@ against what ga-tools compiled. It needs `ga` on `PATH`, or `-Dga=<path>`,
 and the ROM: `rom/pFDISK.blk`, the ROM gasim saved, or `-Dga-rom=<path>`.
 ga-tools' `--json` only works with Python 3.11 or older, whose `argparse`
 still takes its `nargs=-1` options. Neither `zig build test` nor CI runs it.
+
+`zig build bench` builds gasim ReleaseFast and times it on the workloads in
+`tools/bench`: one node computing, a token around a ring of 36 nodes, and
+1 MiB through `examples/upcase.ga`. `-Dbench-base=<ref>` builds another git
+ref's gasim too, such as `main`, and compares them, checking they print the
+same; `zig build bench -- ring` runs only some. It uses
+[poop](https://github.com/andrewrk/poop) if it is on `PATH`, whose counts of
+instructions hardly vary between runs, as wall time does, or else
+[hyperfine](https://github.com/sharkdp/hyperfine), both in the Nix dev
+shell, or else times five runs itself. Builds and inputs go in
+`.zig-cache/bench`, where each base commit's build is kept, a few hundred
+MB each, until it is deleted; delete it to build it again, as after
+upgrading Zig.
 
 ## Prior Art
 
