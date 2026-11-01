@@ -196,6 +196,9 @@ pub const Computer = struct {
     /// waits until the pin is in the state WD in io selects, unless a device
     /// is attached to the port.
     wake_port: ?port.Direction = null,
+    /// a device on the pins, which sees them as the node reads and writes
+    /// io, at its time then, as a word can run a long `unext` loop first
+    pin_device: ?PinDevice = null,
 
     state: State = .fetch,
     // keeps track of current slot to help address decoding
@@ -210,6 +213,17 @@ pub const Computer = struct {
 
     /// picoseconds of execution, which waiting on a port does not add to
     time: u64,
+
+    /// A device on a node's pins, told when the node reads io or a port,
+    /// to set `pin_inputs` as they are at the node's time, and when it
+    /// writes io, which can change the pins it drives. A read of a port
+    /// that catches up with the writer's time does so after the word, so
+    /// io later in the same word is at the time before.
+    pub const PinDevice = struct {
+        context: *anyopaque,
+        read: *const fn (context: *anyopaque, node: *Computer) void,
+        written: *const fn (context: *anyopaque, node: *const Computer) void,
+    };
 
     pub const Status = union(enum) {
         running,
@@ -337,6 +351,8 @@ pub const Computer = struct {
     /// while waiting on a comm port. Undefined I/O addresses hang forever.
     pub fn read(self: *Computer, address: Address) ?Word {
         if (!address.io) return self.fetch(address);
+        // the pins, read in io and on the wakeup pin's port
+        if (self.pin_device) |device| device.read(device.context, self);
 
         const raw: u9 = @bitCast(address);
         if (raw == io_address) return self.readIo();
@@ -359,6 +375,7 @@ pub const Computer = struct {
         const raw: u9 = @bitCast(address);
         if (raw == io_address) {
             self.io = value;
+            if (self.pin_device) |device| device.written(device.context, self);
             return true;
         }
         if (raw == data_address and self.data != null) {

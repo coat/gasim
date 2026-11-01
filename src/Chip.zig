@@ -618,6 +618,7 @@ pub fn attachUart(self: *Chip, uart: *Uart, number: u16) error{ NoSuchNode, NoPi
     const pins = self.nodes[i].pins;
     if (pins & uart.rx_pin == 0 or pins & uart.tx_pin == 0) return error.NoPins;
     self.uart = .{ .device = uart, .index = i };
+    self.nodes[i].pin_device = uart.pinDevice();
     self.board = true;
 }
 
@@ -686,6 +687,8 @@ pub fn stepNode(self: *Chip, i: u16) void {
     const fetching = n.state == .fetch;
     const retrying = n.suspended;
     const uart = if (self.uart) |u| if (u.index == i) u.device else null else null;
+    // the line and the frame being received at either end of the step, as
+    // well as when the node reads or writes io during it (`pin_device`)
     if (uart) |u| {
         if (u.rxHigh(n.time)) n.pin_inputs |= u.rx_pin else n.pin_inputs &= ~u.rx_pin;
     }
@@ -1208,6 +1211,60 @@ test "a node waiting on its pin wakes as the line changes" {
     try expect(n.suspended and !n.waitsOnPin());
     try expect(n.time >= 5_000_000 and n.time < 5_100_000);
     try expect(chip.node(0).?.time > 6_000_000);
+}
+
+test "pins are read at the node's time, after a unext loop in the same word" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    // `unext @b` is one word, which reads io 7.2 us in
+    try chip.load(try assembler.assemble("node 708 : main io b! 2999 for unext @b left b! @b", &diagnostic));
+
+    // the line goes high with a start bit at 5 us, and stays high for the
+    // data bits of 0
+    var writer: Io.Writer = .fixed(&.{});
+    var uart: Uart = .init(921600, &writer);
+    uart.preload = "\x00";
+    uart.arrived = 5_000_000;
+    try chip.attachUart(&uart, 708);
+
+    try chip.run();
+    const io: u18 = @bitCast(chip.node(708).?.data_stack.t);
+    try expect(io & 1 << 17 != 0);
+}
+
+test "pins are driven at the node's time, in a unext loop" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    // `dup !b unext` drives pin 1 high, a start bit, as the 7.3 us loop
+    // begins, and again on each pass
+    try chip.load(try assembler.assemble("node 708 : main io b! 3 999 for dup !b unext left b! @b", &diagnostic));
+
+    var writer: Io.Writer = .fixed(&.{});
+    var uart: Uart = .init(921600, &writer);
+    try chip.attachUart(&uart, 708);
+
+    try chip.run();
+    try expect(uart.receiving.?.start < 100_000);
+}
+
+test "a byte the node sends is received without a write after it" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    // a start bit and data bits of 0 for 0xff, then the line idle, low,
+    // with no write of a stop bit after the last data bit, while the node
+    // runs on
+    try chip.load(try assembler.assemble("node 708 : main io b! 3 !b 428 for unext 2 !b 4999 for unext left b! @b", &diagnostic));
+
+    var buffer: [4]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var uart: Uart = .init(921600, &writer);
+    try chip.attachUart(&uart, 708);
+
+    try chip.run();
+    try expectEqualStrings("\xff", writer.buffered());
 }
 
 test "a node that reads its pin once input has arrived uses the UART" {

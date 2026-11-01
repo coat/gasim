@@ -63,6 +63,21 @@ pub fn init(baud: u32, output: *Io.Writer) Uart {
     return .{ .bit_time = 1_000_000_000_000 / @as(u64, baud), .output = output };
 }
 
+/// The UART as the device on its node's pins
+pub fn pinDevice(self: *Uart) Computer.PinDevice {
+    return .{ .context = self, .read = readPins, .written = writtenPins };
+}
+
+fn readPins(context: *anyopaque, node: *Computer) void {
+    const self: *Uart = @ptrCast(@alignCast(context));
+    if (self.rxHigh(node.time)) node.pin_inputs |= self.rx_pin else node.pin_inputs &= ~self.rx_pin;
+}
+
+fn writtenPins(context: *anyopaque, node: *const Computer) void {
+    const self: *Uart = @ptrCast(@alignCast(context));
+    self.observe(node.time, node.pinHigh(self.tx_pin));
+}
+
 /// The level of the pin the device drives at `now`
 pub fn rxHigh(self: *Uart, now: u64) bool {
     self.advance(now);
@@ -87,7 +102,8 @@ pub fn nextRxEdge(self: *Uart, now: u64) ?u64 {
 }
 
 /// Notes the level of the pin the node drives at `now`, receiving any byte
-/// it completes. Call it after each step of the node.
+/// it completes. Call it after each step of the node, and when it writes
+/// io, as `pinDevice` does.
 pub fn observe(self: *Uart, now: u64, high: bool) void {
     if (self.receiving) |frame| {
         // sample the middle of each data bit, at the level held until now
@@ -266,6 +282,7 @@ test "input arriving on an idle line is sent from when it arrived" {
     try expect(!try uart.waitForInput(2000));
 }
 
+const Computer = @import("f18.zig").Computer;
 const Console = @import("Console.zig");
 
 const std = @import("std");
