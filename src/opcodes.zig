@@ -47,7 +47,7 @@ pub const Opcode = enum(u5) {
 };
 
 test {
-    try std.testing.expectEqual(32, @typeInfo(Opcode).@"enum".field_names.len);
+    try expectEqual(32, @typeInfo(Opcode).@"enum".field_names.len);
 
     try expectEqual(.@";", Opcode.fromInt(0));
     try expectEqual(.unext, Opcode.fromInt(1));

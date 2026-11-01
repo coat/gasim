@@ -292,6 +292,8 @@ fn moment(src: std.builtin.SourceLocation, k: usize, label: []const u8, steps: u
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 
 const dvui = @import("dvui");
 const gasim = @import("gasim");
@@ -317,11 +319,11 @@ test "the trace keeps each step that runs code" {
     try testing.settle(ui.frame);
     try open("tab-trace");
     try open("tracing");
-    try std.testing.expect(tracing);
+    try expect(tracing);
     for (0..3) |_| _ = try ui.sim.stepRound();
     try testing.settle(ui.frame);
-    try std.testing.expect(lines.items.len > 0);
-    try std.testing.expect(std.mem.startsWith(u8, lines.items[0], "000 ") or std.mem.startsWith(u8, lines.items[0], "001 "));
+    try expect(lines.items.len > 0);
+    try expect(std.mem.startsWith(u8, lines.items[0], "000 ") or std.mem.startsWith(u8, lines.items[0], "001 "));
     try ui.saveImage(&w, "trace.png");
 }
 
@@ -334,16 +336,16 @@ test "watches are added from the form, on the selected node or one typed" {
     try testing.settle(ui.frame);
     try open("tab-breakpoints");
     try open("watch");
-    try std.testing.expectEqual(1, ui.sim.chip.watches.len);
-    try std.testing.expectEqual(0, ui.sim.chip.watches.items()[0].index);
+    try expectEqual(1, ui.sim.chip.watches.len);
+    try expectEqual(0, ui.sim.chip.watches.items()[0].index);
 
     try testing.moveTo("watch-node");
     try testing.click(.left);
     try testing.writeText("001");
     try testing.settle(ui.frame);
     try open("watch");
-    try std.testing.expectEqual(2, ui.sim.chip.watches.len);
-    try std.testing.expectEqual(ui.sim.chip.layout.index(1).?, ui.sim.chip.watches.items()[1].index);
+    try expectEqual(2, ui.sim.chip.watches.len);
+    try expectEqual(ui.sim.chip.layout.index(1).?, ui.sim.chip.watches.items()[1].index);
     try ui.saveImage(&w, "breakpoints.png");
 }
 
@@ -357,6 +359,6 @@ test "the history goes back to before a step" {
     try open("tab-history");
     try ui.saveImage(&w, "history.png");
     try open("go-back-oldest");
-    try std.testing.expectEqual(0, ui.sim.chip.steps);
-    try std.testing.expectEqual(0, ui.sim.historyLen());
+    try expectEqual(0, ui.sim.chip.steps);
+    try expectEqual(0, ui.sim.historyLen());
 }

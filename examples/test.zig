@@ -24,7 +24,7 @@ test "uart" {
     var uart: gasim.Uart = .init(921600, &output);
     try chip.attachUart(&uart, 708);
     try chip.run();
-    try std.testing.expectEqualStrings("Hello, world!\n", output.buffered());
+    try expectEqualStrings("Hello, world!\n", output.buffered());
 }
 
 // and the same in arrayForth 3
@@ -72,6 +72,7 @@ test "multiply.cf" {
 const gasim = @import("gasim");
 const Chip = gasim.Chip;
 const std = @import("std");
+const expectEqualStrings = std.testing.expectEqualStrings;
 const expectOutput = @import("gasim").Chip.expectOutput;
 const expectArrayForthOutput = @import("gasim").Chip.expectArrayForthOutput;
 const expectColorForthOutput = @import("gasim").Chip.expectColorForthOutput;

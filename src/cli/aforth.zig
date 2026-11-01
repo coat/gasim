@@ -99,7 +99,7 @@ test interpret {
     var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
     try interpret(&session, "1 2 + .", &diagnostic, &out);
     try interpret(&session, "1 nothing", &diagnostic, &out);
-    try std.testing.expectEqualStrings("3  ok\nerror: UnknownWord at 'nothing'\n", out.buffered());
+    try expectEqualStrings("3  ok\nerror: UnknownWord at 'nothing'\n", out.buffered());
 }
 
 const build_options = @import("build_options");
@@ -112,3 +112,4 @@ const Session = gasim.arrayforth.Session;
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const expectEqualStrings = std.testing.expectEqualStrings;

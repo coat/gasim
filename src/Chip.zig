@@ -908,15 +908,15 @@ fn expectRun(chip: *Chip, input: []const u8, expected: []const u8) !void {
     try chip.attachConsole(&console, 0, .up);
 
     try chip.run();
-    try std.testing.expectEqualStrings(expected, writer.buffered());
+    try expectEqualStrings(expected, writer.buffered());
 }
 
 test Layout {
     try expectEqual(Layout{ .rows = 12, .columns = 20 }, try Layout.parse("12x20"));
-    try std.testing.expectError(error.InvalidLayout, Layout.parse("12"));
-    try std.testing.expectError(error.InvalidLayout, Layout.parse("0x4"));
-    try std.testing.expectError(error.InvalidLayout, Layout.parse("101x4"));
-    try std.testing.expectError(error.InvalidLayout, Layout.parse("4x"));
+    try expectError(error.InvalidLayout, Layout.parse("12"));
+    try expectError(error.InvalidLayout, Layout.parse("0x4"));
+    try expectError(error.InvalidLayout, Layout.parse("101x4"));
+    try expectError(error.InvalidLayout, Layout.parse("4x"));
 
     const layout: Layout = .ga144;
     try expectEqual(144, layout.count());
@@ -972,10 +972,10 @@ test "nodes without a program wait for code" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 2, .columns = 2 });
     defer chip.deinit(std.testing.allocator);
 
-    try std.testing.expect(chip.step());
+    try expect(chip.step());
     // every node suspends reading its ports
-    try std.testing.expect(!chip.step());
-    for (chip.nodes) |n| try std.testing.expect(n.suspended);
+    try expect(!chip.step());
+    for (chip.nodes) |n| try expect(n.suspended);
 }
 
 test "a node can send code to a neighbour" {
@@ -991,7 +991,7 @@ test "a node can send code to a neighbour" {
     try chip.run();
     try expectEqual(5, chip.node(1).?.data_stack.t);
     // node 001 goes back to waiting on its ports
-    try std.testing.expect(chip.node(1).?.suspended);
+    try expect(chip.node(1).?.suspended);
 }
 
 test "a word arrives at the time it was written" {
@@ -1012,7 +1012,7 @@ test "a word arrives at the time it was written" {
     try expectEqual(5, chip.node(0).?.data_stack.t);
     try expectEqual(7, chip.node(1).?.data_stack.t);
     // 000 takes the word at 001's time, not at 002's
-    try std.testing.expect(chip.node(0).?.time < chip.node(2).?.time / 10);
+    try expect(chip.node(0).?.time < chip.node(2).?.time / 10);
 }
 
 test "warm in ROM goes to the ports each node is wired to" {
@@ -1058,10 +1058,10 @@ test "the chip settles after reset with ROM" {
 
     // with no pins driven, every node ends up waiting for code from a port
     var rounds: usize = 0;
-    while (chip.step()) : (rounds += 1) try std.testing.expect(rounds < 1_000_000);
+    while (chip.step()) : (rounds += 1) try expect(rounds < 1_000_000);
     for (chip.nodes) |n| {
-        try std.testing.expect(n.suspended);
-        try std.testing.expect(n.p.address.io or n.state != .fetch);
+        try expect(n.suspended);
+        try expect(n.p.address.io or n.state != .fetch);
     }
 }
 
@@ -1092,8 +1092,8 @@ test attachConsole {
     var input: Io.Queue(u8) = .init(&.{});
     var writer: Io.Writer = .fixed(&.{});
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
-    try std.testing.expectError(error.PortConnected, chip.attachConsole(&console, 0, .right));
-    try std.testing.expectError(error.NoSuchNode, chip.attachConsole(&console, 100, .up));
+    try expectError(error.PortConnected, chip.attachConsole(&console, 0, .right));
+    try expectError(error.NoSuchNode, chip.attachConsole(&console, 100, .up));
     try chip.attachConsole(&console, 1, .left);
 }
 
@@ -1138,7 +1138,7 @@ test "waits for input that has not arrived" {
 
     try chip.run();
     try typing.await(std.testing.io);
-    try std.testing.expectEqualStrings("k", writer.buffered());
+    try expectEqualStrings("k", writer.buffered());
 }
 
 test attachUart {
@@ -1147,8 +1147,8 @@ test attachUart {
 
     var writer: Io.Writer = .fixed(&.{});
     var uart: Uart = .init(921600, &writer);
-    try std.testing.expectError(error.NoSuchNode, chip.attachUart(&uart, 999));
-    try std.testing.expectError(error.NoPins, chip.attachUart(&uart, 410));
+    try expectError(error.NoSuchNode, chip.attachUart(&uart, 999));
+    try expectError(error.NoPins, chip.attachUart(&uart, 410));
     try chip.attachUart(&uart, 708);
 }
 
@@ -1173,9 +1173,9 @@ test "a node waiting on its pin wakes as the line changes" {
 
     try chip.run();
     const n = chip.node(708).?;
-    try std.testing.expect(n.suspended and !n.waitsOnPin());
-    try std.testing.expect(n.time >= 5_000_000 and n.time < 5_100_000);
-    try std.testing.expect(chip.node(0).?.time > 6_000_000);
+    try expect(n.suspended and !n.waitsOnPin());
+    try expect(n.time >= 5_000_000 and n.time < 5_100_000);
+    try expect(chip.node(0).?.time > 6_000_000);
 }
 
 test "waits for UART input that has not arrived" {
@@ -1205,8 +1205,8 @@ test "waits for UART input that has not arrived" {
     try chip.run();
     try typing.await(std.testing.io);
     const n = chip.node(708).?;
-    try std.testing.expect(n.suspended and !n.waitsOnPin());
-    try std.testing.expect(uart.used);
+    try expect(n.suspended and !n.waitsOnPin());
+    try expect(uart.used);
 }
 
 test advance {
@@ -1224,12 +1224,12 @@ test advance {
 
     // the node settles waiting for input, without advance waiting for it
     while (try chip.advance()) {}
-    try std.testing.expect(chip.nodes[0].suspended);
+    try expect(chip.nodes[0].suspended);
 
     // input that arrives later is given to the node
     try input.putOne(std.testing.io, 'x');
     while (try chip.advance()) {}
-    try std.testing.expectEqualStrings("x", writer.buffered());
+    try expectEqualStrings("x", writer.buffered());
 }
 
 test stepNext {
@@ -1258,14 +1258,14 @@ test "stops at breakpoints" {
     // running again goes past it, and around the loop to it again
     const steps = chip.steps;
     try chip.run();
-    try std.testing.expect(chip.hit != null and chip.steps > steps);
+    try expect(chip.hit != null and chip.steps > steps);
 
     // clearing it, and filling them up
     try expectEqual(false, try chip.breakpoints.toggle(.init(0, 0)));
-    try std.testing.expect(!chip.breakpoints.contains(.init(0, 0)));
+    try expect(!chip.breakpoints.contains(.init(0, 0)));
     for (0..max_breakpoints) |i| _ = try chip.breakpoints.toggle(.init(0, @intCast(0x80 + i)));
-    try std.testing.expectError(error.Full, chip.breakpoints.toggle(.init(0, 0)));
-    try std.testing.expectError(error.Full, chip.breakpoints.insert(.init(0, 0)));
+    try expectError(error.Full, chip.breakpoints.toggle(.init(0, 0)));
+    try expectError(error.Full, chip.breakpoints.insert(.init(0, 0)));
     // adding one that is there already
     try chip.breakpoints.insert(.init(0, 0x80));
     try expectEqual(max_breakpoints, chip.breakpoints.len);
@@ -1296,8 +1296,8 @@ test "stops at watched transfers" {
     try expectEqual(0, chip.hit.?.index());
 
     var buffer: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("node 000 wrote 00003 to right", try std.fmt.bufPrint(&buffer, "{f}", .{chip.hit.?.describe(chip.layout)}));
-    try std.testing.expectEqualStrings("node 000 reached 03f", try std.fmt.bufPrint(&buffer, "{f}", .{(Stop{ .breakpoint = .init(0, 0x3f) }).describe(chip.layout)}));
+    try expectEqualStrings("node 000 wrote 00003 to right", try std.fmt.bufPrint(&buffer, "{f}", .{chip.hit.?.describe(chip.layout)}));
+    try expectEqualStrings("node 000 reached 03f", try std.fmt.bufPrint(&buffer, "{f}", .{(Stop{ .breakpoint = .init(0, 0x3f) }).describe(chip.layout)}));
 }
 
 test "goes back to a snapshot" {
@@ -1320,10 +1320,10 @@ test "goes back to a snapshot" {
     try chip.run();
     try expectEqual(3, chip.hit.?.watch.value);
 
-    try std.testing.expect(!chip.matches(&snapshot));
+    try expect(!chip.matches(&snapshot));
     // the same transfers happen again
     chip.restore(&snapshot);
-    try std.testing.expect(chip.matches(&snapshot));
+    try expect(chip.matches(&snapshot));
     try expectEqual(steps, chip.steps);
     try expectEqual(1, chip.nodes[1].data_stack.t);
     try chip.run();
@@ -1343,7 +1343,7 @@ test "traces each step" {
 
     // literals are skipped, and the node waits on a port nothing writes to
     while (chip.step()) {}
-    try std.testing.expectEqualStrings(
+    try expectEqualStrings(
         \\000 000 04def @p dup drop @p  T 00175 S 00005 R 00000
         \\000 003 29fb2 b! @b . .  T 00005 S 00000 R 00000  waiting
         \\
@@ -1368,7 +1368,7 @@ test "traces a node waiting on a port once" {
     chip.trace = &writer;
 
     while (chip.step()) {}
-    try std.testing.expectEqualStrings(
+    try expectEqualStrings(
         \\000 000 04b02 @p b! @b .  T 00000 S 00000 R 00000  waiting
         \\001 000 04b12 @p b! @p .  T 00005 S 00000 R 00000
         \\002 000 04b02 @p b! @b .  T 00000 S 00000 R 00000  waiting
@@ -1391,29 +1391,29 @@ test "executes words from a port, as the IDE does" {
     try chip.setUp(descriptor, &.{program});
     // about to fetch from the port, which is as good as waiting on it
     const i = chip.layout.index(0).?;
-    try std.testing.expectEqual(.running, chip.nodes[i].status());
-    try std.testing.expect(try chip.runUntilWaiting(i, 0));
+    try expectEqual(.running, chip.nodes[i].status());
+    try expect(try chip.runUntilWaiting(i, 0));
 
     // code jumped to returns to the port, where the node waits for code
     // again, with its return stack as it was
     chip.nodes[i].data_stack.push(5);
     chip.nodes[i].return_stack.push(9);
     try chip.execute(i, Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }, 0, 0));
-    try std.testing.expect(try chip.runUntilWaiting(i, 100));
-    try std.testing.expectEqual(6, chip.nodes[i].data_stack.t);
-    try std.testing.expectEqual(9, chip.nodes[i].return_stack.t);
-    try std.testing.expectEqual(0x175, @as(u9, @bitCast(chip.nodes[i].p.address)));
+    try expect(try chip.runUntilWaiting(i, 100));
+    try expectEqual(6, chip.nodes[i].data_stack.t);
+    try expectEqual(9, chip.nodes[i].return_stack.t);
+    try expectEqual(0x175, @as(u9, @bitCast(chip.nodes[i].p.address)));
 
     // as does an opcode followed by returns
     try chip.execute(i, Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }));
-    try std.testing.expect(try chip.runUntilWaiting(i, 100));
-    try std.testing.expectEqual(6, chip.nodes[i].data_stack.s);
-    try std.testing.expectEqual(9, chip.nodes[i].return_stack.t);
+    try expect(try chip.runUntilWaiting(i, 100));
+    try expectEqual(6, chip.nodes[i].data_stack.s);
+    try expectEqual(9, chip.nodes[i].return_stack.t);
 
     // code that does not come back leaves the node running
     try chip.execute(i, Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 }, 0, 2));
-    try std.testing.expect(!try chip.runUntilWaiting(i, 100));
-    try std.testing.expectError(error.NotWaitingForCode, chip.execute(i, 0));
+    try expect(!try chip.runUntilWaiting(i, 100));
+    try expectError(error.NotWaitingForCode, chip.execute(i, 0));
 }
 
 test "words are only refused for code delivered to the node" {
@@ -1422,7 +1422,7 @@ test "words are only refused for code delivered to the node" {
     // node 101 waits for code on all four of its ports
     try chip.setUp(.{ .node = 101, .p = 0x1a5 }, &.{});
     const i = chip.layout.index(101).?;
-    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    try expect(try chip.runUntilWaiting(i, 10));
     // so it has tried to fetch, and is reading its ports
     chip.stepNode(i);
     const n = &chip.nodes[i];
@@ -1432,16 +1432,16 @@ test "words are only refused for code delivered to the node" {
     // a word delivered to the node's neighbour is not code for it
     right.port.?.state = .{ .delivered = .{ .side = right.side.other(), .value = 1 } };
     try chip.execute(i, 0x15555);
-    try std.testing.expectEqual(right.side.other(), right.port.?.state.delivered.side);
+    try expectEqual(right.side.other(), right.port.?.state.delivered.side);
 
     // but one delivered to it is, and its other reads are left as they were
-    try std.testing.expect(try chip.runUntilWaiting(i, 10));
+    try expect(try chip.runUntilWaiting(i, 10));
     chip.stepNode(i);
     right.port.?.state = .{ .delivered = .{ .side = right.side, .value = 1 } };
     const before = left.port.?.state;
-    try std.testing.expect(before == .reading);
-    try std.testing.expectError(error.NotWaitingForCode, chip.execute(i, 0x15555));
-    try std.testing.expectEqual(before, left.port.?.state);
+    try expect(before == .reading);
+    try expectError(error.NotWaitingForCode, chip.execute(i, 0x15555));
+    try expectEqual(before, left.port.?.state);
 }
 
 test "stops when interrupted" {
@@ -1464,7 +1464,7 @@ test "stops when interrupted" {
     }
     console.interrupted.store(true, .monotonic);
     try chip.run();
-    try std.testing.expectEqualStrings("\x01", writer.buffered());
+    try expectEqualStrings("\x01", writer.buffered());
 }
 
 const arrayforth = @import("arrayforth.zig");
@@ -1488,4 +1488,7 @@ const Port = port.Port;
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;

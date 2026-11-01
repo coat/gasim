@@ -403,20 +403,20 @@ test "boot stream loads programs through the array" {
     var feeder: Chip.Feeder = .{ .words = words };
     try chip.attachFeeder(&feeder, 1, .up);
     try chip.run();
-    try std.testing.expectEqual(words.len, feeder.next);
+    try expectEqual(words.len, feeder.next);
 
     for (assembled) |program| {
         const n = chip.node(program.node).?;
-        try std.testing.expectEqualSlices(Word, program.ram[0..program.len], n.mem[0..program.len]);
+        try expectEqualSlices(Word, program.ram[0..program.len], n.mem[0..program.len]);
     }
     // node 000 started at main, after its first word
-    try std.testing.expectEqual(Address.fromWord(5), chip.node(0).?.p.address);
-    try std.testing.expectEqual(7, chip.node(0).?.data_stack.t);
-    try std.testing.expectEqual(Address.fromWord(2), chip.node(102).?.p.address);
+    try expectEqual(Address.fromWord(5), chip.node(0).?.p.address);
+    try expectEqual(7, chip.node(0).?.data_stack.t);
+    try expectEqual(Address.fromWord(2), chip.node(102).?.p.address);
 
     // nodes on the way without programs went back to waiting on their ports
-    try std.testing.expectEqual(Address.fromWord(0x1b5), chip.node(1).?.p.address);
-    try std.testing.expectEqual(Address.fromWord(0x1a5), chip.node(101).?.p.address);
+    try expectEqual(Address.fromWord(0x1b5), chip.node(1).?.p.address);
+    try expectEqual(Address.fromWord(0x1a5), chip.node(101).?.p.address);
 }
 
 test "nodes that start early cannot write into a booting node's stream" {
@@ -437,10 +437,10 @@ test "nodes that start early cannot write into a booting node's stream" {
     try chip.attachFeeder(&feeder, 1, .up);
     try chip.run();
 
-    try std.testing.expectEqual(feeder.words.len, feeder.next);
+    try expectEqual(feeder.words.len, feeder.next);
     // node 001 received the value with its program, not as boot code
-    try std.testing.expectEqual(5, chip.node(1).?.data_stack.t);
-    try std.testing.expectEqualSlices(Word, assembled[1].ram[0..assembled[1].len], chip.node(1).?.mem[0..assembled[1].len]);
+    try expectEqual(5, chip.node(1).?.data_stack.t);
+    try expectEqualSlices(Word, assembled[1].ram[0..assembled[1].len], chip.node(1).?.mem[0..assembled[1].len]);
 }
 
 test "boot node 001 from ROM" {
@@ -473,7 +473,7 @@ test "boot node 001 from ROM" {
     try chip.attachConsole(&console, 0, .up);
 
     try chip.run();
-    try std.testing.expectEqualStrings("BOOT ME", output.buffered());
+    try expectEqualStrings("BOOT ME", output.buffered());
 }
 
 test "boot node 708 from ROM through a UART" {
@@ -507,13 +507,13 @@ test "boot node 708 from ROM through a UART" {
     try chip.attachUart(&uart, 708);
     try chip.run();
 
-    try std.testing.expectEqualStrings("Hi", output.buffered());
+    try expectEqualStrings("Hi", output.buffered());
     for (assembled) |program| {
         const n = chip.node(program.node).?;
-        try std.testing.expectEqualSlices(Word, program.ram[0..program.len], n.mem[0..program.len]);
+        try expectEqualSlices(Word, program.ram[0..program.len], n.mem[0..program.len]);
     }
     // waiting for its pin on its up port, which the idle line never wakes
-    try std.testing.expect(chip.node(708).?.waitsOnPin());
+    try expect(chip.node(708).?.waitsOnPin());
 }
 
 test "boot node 708 from input that arrives while it waits on its pin" {
@@ -541,14 +541,14 @@ test "boot node 708 from input that arrives while it waits on its pin" {
     try chip.attachUart(&uart, 708);
     // with no input, node 708 waits on its pin
     try chip.run();
-    try std.testing.expect(chip.node(708).?.waitsOnPin());
+    try expect(chip.node(708).?.waitsOnPin());
 
     // and its start bit begins as it arrives, at the node's time
     var input_buffer: [bytes.len]u8 = undefined;
     var input = try Console.testInput(&input_buffer, asyncBytes(frames, &bytes));
     uart.input = .{ .io = std.testing.io, .queue = &input };
     try chip.run();
-    try std.testing.expectEqual(5, chip.node(708).?.data_stack.t);
+    try expectEqual(5, chip.node(708).?.data_stack.t);
 }
 
 test "node 708 takes another stream once it has booted only its neighbours" {
@@ -583,8 +583,8 @@ test "node 708 takes another stream once it has booted only its neighbours" {
     uart.input = .{ .io = std.testing.io, .queue = &input };
     try chip.attachUart(&uart, 708);
     try chip.run();
-    try std.testing.expectEqual(6, chip.node(608).?.data_stack.t);
-    try std.testing.expectEqual(5, chip.node(708).?.data_stack.t);
+    try expectEqual(6, chip.node(608).?.data_stack.t);
+    try expectEqual(5, chip.node(708).?.data_stack.t);
 }
 
 test asyncStream {
@@ -600,29 +600,29 @@ test asyncStream {
     // a root without a descriptor goes to cold
     var descriptors: [2]Descriptor = .{ .ofProgram(assembled[1]), .ofProgram(assembled[0]) };
     const without = try asyncStream(std.testing.allocator, .ga144, 708, descriptors[0..1], assembled, &buffer);
-    try std.testing.expectEqualSlices(Word, &.{ 0xaa, 0, 0 }, without[without.len - 3 ..]);
+    try expectEqualSlices(Word, &.{ 0xaa, 0, 0 }, without[without.len - 3 ..]);
 
     // node 608 is loaded and started through the port facing it, down
     const with = try asyncStream(std.testing.allocator, .ga144, 708, &descriptors, assembled, &buffer);
-    try std.testing.expectEqualSlices(Word, &.{ read_frame, port.multiport(.initOne(.down)) }, with[0..2]);
+    try expectEqualSlices(Word, &.{ read_frame, port.multiport(.initOne(.down)) }, with[0..2]);
     // then node 708's RAM, and a frame that jumps to main
-    try std.testing.expectEqualSlices(Word, &.{ assembled[0].entry.toWord(), 0, 0 }, with[with.len - 3 ..]);
+    try expectEqualSlices(Word, &.{ assembled[0].entry.toWord(), 0, 0 }, with[with.len - 3 ..]);
     const load = with.len - 3 - assembled[0].len - 3;
-    try std.testing.expectEqualSlices(Word, &.{ read_frame, 0, assembled[0].len }, with[load..][0..3]);
+    try expectEqualSlices(Word, &.{ read_frame, 0, assembled[0].len }, with[load..][0..3]);
 
     // code to set up registers goes in RAM after the program
     descriptors[1].a = 0x15d;
     const set_up = try asyncStream(std.testing.allocator, .ga144, 708, &descriptors, assembled, &buffer);
-    try std.testing.expectEqualSlices(Word, &.{ assembled[0].len, assembled[0].len, 3 }, set_up[set_up.len - 6 ..][0..3]);
+    try expectEqualSlices(Word, &.{ assembled[0].len, assembled[0].len, 3 }, set_up[set_up.len - 6 ..][0..3]);
     descriptors[1].loads[0].len = 64;
     descriptors[1].loads[0].bin = 708;
-    try std.testing.expectError(error.RootTooLong, asyncStream(std.testing.allocator, .ga144, 708, &descriptors, assembled, &buffer));
+    try expectError(error.RootTooLong, asyncStream(std.testing.allocator, .ga144, 708, &descriptors, assembled, &buffer));
 }
 
 test asyncBytes {
     var buffer: [6]u8 = undefined;
     // as ga-tools sends words to node 708
-    try std.testing.expectEqualSlices(u8, &.{ 0xd2, 0xff, 0xff, 0x92, 0xe0, 0x00 }, asyncBytes(&.{ 0, @bitCast(@as(u18, 0x3fc7d)) }, &buffer));
+    try expectEqualSlices(u8, &.{ 0xd2, 0xff, 0xff, 0x92, 0xe0, 0x00 }, asyncBytes(&.{ 0, @bitCast(@as(u18, 0x3fc7d)) }, &buffer));
 }
 
 test "descriptors load parts of RAM, set registers and push onto stacks" {
@@ -655,7 +655,7 @@ test "descriptors load parts of RAM, set registers and push onto stacks" {
     defer booted.deinit(std.testing.allocator);
     try booted.attachFeeder(&feeder, 1, .up);
     try booted.run();
-    try std.testing.expectEqual(feeder.words.len, feeder.next);
+    try expectEqual(feeder.words.len, feeder.next);
 
     // and the same as setting them up without a stream
     var set_up: Chip = try .init(std.testing.allocator, .ga144);
@@ -665,19 +665,19 @@ test "descriptors load parts of RAM, set registers and push onto stacks" {
     for (descriptors) |descriptor| {
         const n = booted.node(descriptor.node).?;
         const expected = set_up.node(descriptor.node).?;
-        try std.testing.expectEqualSlices(Word, expected.mem[0..64], n.mem[0..64]);
-        try std.testing.expectEqual(expected.p, n.p);
+        try expectEqualSlices(Word, expected.mem[0..64], n.mem[0..64]);
+        try expectEqual(expected.p, n.p);
         // a stream uses A and B to load nodes, unless they are set
-        if (descriptor.a != null) try std.testing.expectEqual(expected.a, n.a);
-        if (descriptor.b != null) try std.testing.expectEqual(expected.b, n.b);
-        try std.testing.expectEqual(expected.io, n.io);
-        for (0..descriptor.stack_len) |_| try std.testing.expectEqual(expected.data_stack.pop(), n.data_stack.pop());
-        for (0..descriptor.return_stack_len) |_| try std.testing.expectEqual(expected.return_stack.pop(), n.return_stack.pop());
+        if (descriptor.a != null) try expectEqual(expected.a, n.a);
+        if (descriptor.b != null) try expectEqual(expected.b, n.b);
+        try expectEqual(expected.io, n.io);
+        for (0..descriptor.stack_len) |_| try expectEqual(expected.data_stack.pop(), n.data_stack.pop());
+        for (0..descriptor.return_stack_len) |_| try expectEqual(expected.return_stack.pop(), n.return_stack.pop());
     }
     const n = set_up.node(0).?;
-    try std.testing.expectEqualSlices(Word, assembled[0].ram[1..4], n.mem[10..13]);
-    try std.testing.expectEqual(assembled[1].ram[0], n.mem[20]);
-    try std.testing.expectEqual(0x123, n.a);
+    try expectEqualSlices(Word, assembled[0].ram[1..4], n.mem[10..13]);
+    try expectEqual(assembled[1].ram[0], n.mem[20]);
+    try expectEqual(0x123, n.a);
 }
 
 test "Descriptor.format" {
@@ -689,7 +689,7 @@ test "Descriptor.format" {
     var buffer: [256]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     try writer.print("{f}", .{descriptor});
-    try std.testing.expectEqualStrings(
+    try expectEqualStrings(
         \\boot node 007
         \\  load bin 1614
         \\  load 3 words from 01 of bin 1600 to 02
@@ -713,12 +713,12 @@ test maxLen {
 
 test "nothing to boot" {
     var buffer: [8]Word = undefined;
-    try std.testing.expectEqual(0, (try stream(std.testing.allocator, .ga144, 1, .up, &.{}, &.{}, &buffer)).len);
-    try std.testing.expectError(error.NoSuchNode, stream(std.testing.allocator, .ga144, 18, .up, &.{}, &.{}, &buffer));
+    try expectEqual(0, (try stream(std.testing.allocator, .ga144, 1, .up, &.{}, &.{}, &buffer)).len);
+    try expectError(error.NoSuchNode, stream(std.testing.allocator, .ga144, 18, .up, &.{}, &.{}, &buffer));
     const program: Program = .{ .node = 717, .ram = @splat(0), .len = 64, .entry = .{ .io = false, .rom = false, .local = 0 } };
-    try std.testing.expectError(error.StreamTooLong, stream(std.testing.allocator, .ga144, 1, .up, &.{.ofProgram(program)}, &.{program}, &buffer));
+    try expectError(error.StreamTooLong, stream(std.testing.allocator, .ga144, 1, .up, &.{.ofProgram(program)}, &.{program}, &buffer));
     // a load from a bin that was not saved
-    try std.testing.expectError(error.NoSuchBin, stream(std.testing.allocator, .ga144, 1, .up, &.{.ofProgram(program)}, &.{}, &buffer));
+    try expectError(error.NoSuchBin, stream(std.testing.allocator, .ga144, 1, .up, &.{.ofProgram(program)}, &.{}, &buffer));
 }
 
 fn ofPrograms(programs: []const Program, buffer: []Descriptor) []Descriptor {
@@ -746,3 +746,8 @@ const Port = port.Port;
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;

@@ -973,6 +973,12 @@ pub fn editing(self: *Sim, a: Allocator) error{OutOfMemory}!EditorView {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
+const expectStringStartsWith = std.testing.expectStringStartsWith;
 
 const gasim = @import("gasim");
 const arrayforth = gasim.arrayforth;
@@ -1018,83 +1024,83 @@ test "running a program to the end of its output" {
     const sim = try testSim();
     defer freeSim(sim);
     try sim.load(.ga, hello, &.{});
-    try std.testing.expectEqual(.budget, try sim.run(1));
-    try std.testing.expectEqual(.settled, try sim.run(10_000));
-    try std.testing.expectEqualStrings("Hello", sim.takeConsoleOutput());
-    try std.testing.expectEqualStrings("", sim.takeConsoleOutput());
+    try expectEqual(.budget, try sim.run(1));
+    try expectEqual(.settled, try sim.run(10_000));
+    try expectEqualStrings("Hello", sim.takeConsoleOutput());
+    try expectEqualStrings("", sim.takeConsoleOutput());
 
     // and again from the start
     sim.reset();
-    try std.testing.expectEqual(.settled, try sim.run(10_000));
-    try std.testing.expectEqualStrings("Hello", sim.takeConsoleOutput());
+    try expectEqual(.settled, try sim.run(10_000));
+    try expectEqualStrings("Hello", sim.takeConsoleOutput());
 }
 
 test "input given to the console" {
     const sim = try testSim();
     defer freeSim(sim);
     try sim.load(.ga, ": main up b! begin @b !b again", &.{});
-    try std.testing.expectEqual(.input, try sim.run(10_000));
-    try std.testing.expectEqual(2, sim.give("hi"));
-    try std.testing.expectEqual(.input, try sim.run(10_000));
-    try std.testing.expectEqualStrings("hi", sim.takeConsoleOutput());
+    try expectEqual(.input, try sim.run(10_000));
+    try expectEqual(2, sim.give("hi"));
+    try expectEqual(.input, try sim.run(10_000));
+    try expectEqualStrings("hi", sim.takeConsoleOutput());
 
     // at the end of input the node waits on, with nothing to come
     sim.console.end();
-    try std.testing.expectEqual(.input, try sim.run(10_000));
-    try std.testing.expectEqual(0, sim.give("x"));
+    try expectEqual(.input, try sim.run(10_000));
+    try expectEqual(0, sim.give("x"));
 
     // until it starts again, forgetting input not read
     sim.reset();
-    try std.testing.expectEqual(1, sim.give("y"));
+    try expectEqual(1, sim.give("y"));
     sim.reset();
-    try std.testing.expectEqual(.input, try sim.run(10_000));
-    try std.testing.expectEqualStrings("", sim.takeConsoleOutput());
+    try expectEqual(.input, try sim.run(10_000));
+    try expectEqualStrings("", sim.takeConsoleOutput());
 }
 
 test "errors say where they are" {
     const sim = try testSim();
     defer freeSim(sim);
-    try std.testing.expectError(error.LoadFailed, sim.load(.ga, ": main\n  frob", &.{}));
-    try std.testing.expectEqualStrings("line 2: UndefinedLabel at 'frob'", sim.out.written());
-    try std.testing.expectError(error.LoadFailed, sim.load(.blk, "", &.{3}));
-    try std.testing.expectEqualStrings("the file has fewer blocks than are loaded", sim.out.written());
+    try expectError(error.LoadFailed, sim.load(.ga, ": main\n  frob", &.{}));
+    try expectEqualStrings("line 2: UndefinedLabel at 'frob'", sim.out.written());
+    try expectError(error.LoadFailed, sim.load(.blk, "", &.{3}));
+    try expectEqualStrings("the file has fewer blocks than are loaded", sim.out.written());
 }
 
 test "a file that fails to load leaves nothing of the last to reset to" {
     const sim = try testSim();
     defer freeSim(sim);
     try sim.load(.ga, hello, &.{});
-    try std.testing.expectError(error.LoadFailed, sim.load(.ga, ": main\n  frob", &.{}));
+    try expectError(error.LoadFailed, sim.load(.ga, ": main\n  frob", &.{}));
     sim.reset();
-    try std.testing.expectEqual(.settled, try sim.run(10_000));
-    try std.testing.expectEqualStrings("", sim.takeConsoleOutput());
+    try expectEqual(.settled, try sim.run(10_000));
+    try expectEqualStrings("", sim.takeConsoleOutput());
 }
 
 test "stepping, breakpoints, and going back" {
     const sim = try testSim();
     defer freeSim(sim);
     try sim.load(.ga, hello, &.{});
-    try std.testing.expect(!sim.back());
+    try expect(!sim.back());
 
-    try std.testing.expectEqual(0, try sim.stepNext());
-    try std.testing.expect(try sim.stepRound());
+    try expectEqual(0, try sim.stepNext());
+    try expect(try sim.stepRound());
     _ = try sim.stepNode(0);
-    try std.testing.expectEqual(3, sim.historyLen());
+    try expectEqual(3, sim.historyLen());
     const steps = sim.chip.steps;
-    try std.testing.expect(sim.back());
-    try std.testing.expect(sim.chip.steps < steps);
+    try expect(sim.back());
+    try expect(sim.chip.steps < steps);
 
     // a breakpoint at the loop, reached by running
     sim.reset();
-    try std.testing.expect(try sim.toggleBreakpoint(0, 4));
-    try std.testing.expectEqual(.hit, try sim.run(10_000));
-    try std.testing.expectEqualStrings("node 000 reached 004", sim.out.written());
-    try std.testing.expect(!try sim.toggleBreakpoint(0, 4));
+    try expect(try sim.toggleBreakpoint(0, 4));
+    try expectEqual(.hit, try sim.run(10_000));
+    try expectEqualStrings("node 000 reached 004", sim.out.written());
+    try expect(!try sim.toggleBreakpoint(0, 4));
 
     // and a watch on the console's port
-    try std.testing.expect(try sim.toggleWatch(0, .up, true));
-    try std.testing.expectEqual(.hit, try sim.run(10_000));
-    try std.testing.expectEqualStrings("node 000 wrote 00048 to up", sim.out.written());
+    try expect(try sim.toggleWatch(0, .up, true));
+    try expectEqual(.hit, try sim.run(10_000));
+    try expectEqualStrings("node 000 wrote 00048 to up", sim.out.written());
 }
 
 test "views as JSON" {
@@ -1106,29 +1112,29 @@ test "views as JSON" {
     var statuses_: [layout.count()]u8 = undefined;
     var transfers: [layout.count()]u8 = undefined;
     sim.statuses(&statuses_, &transfers);
-    try std.testing.expectEqual(@backingInt(Status.reading), statuses_[0]);
-    try std.testing.expectEqual(@backingInt(Status.code), statuses_[1]);
+    try expectEqual(@backingInt(Status.reading), statuses_[0]);
+    try expectEqual(@backingInt(Status.code), statuses_[1]);
 
     const node_ = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.nodeView(0), .{});
     defer node_.deinit();
-    try std.testing.expectEqualStrings("reading", node_.value.object.get("status").?.string);
-    try std.testing.expectEqualStrings("left", node_.value.object.get("waiting_on").?.string);
-    try std.testing.expectEqual(128, node_.value.object.get("memory").?.array.items.len);
+    try expectEqualStrings("reading", node_.value.object.get("status").?.string);
+    try expectEqualStrings("left", node_.value.object.get("waiting_on").?.string);
+    try expectEqual(128, node_.value.object.get("memory").?.array.items.len);
 
     // node 000 waits to read left, off the chip to its west, and node 001
     // for code
     const tiles = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.tilesView(), .{});
     defer tiles.deinit();
-    try std.testing.expectEqual(layout.count(), tiles.value.array.items.len);
+    try expectEqual(layout.count(), tiles.value.array.items.len);
     const first = tiles.value.array.items[0].object;
-    try std.testing.expectEqualStrings("rd", first.get("doing").?.string);
-    try std.testing.expectEqualStrings("west", first.get("ports").?.array.items[0].string);
-    try std.testing.expectEqualStrings("code", tiles.value.array.items[1].object.get("doing").?.string);
+    try expectEqualStrings("rd", first.get("doing").?.string);
+    try expectEqualStrings("west", first.get("ports").?.array.items[0].string);
+    try expectEqualStrings("code", tiles.value.array.items[1].object.get("doing").?.string);
 
     const chip = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.chipView(), .{});
     defer chip.deinit();
-    try std.testing.expectEqual(18, chip.value.object.get("columns").?.integer);
-    try std.testing.expectEqual(false, chip.value.object.get("rom").?.bool);
+    try expectEqual(18, chip.value.object.get("columns").?.integer);
+    try expectEqual(false, chip.value.object.get("rom").?.bool);
 }
 
 test "the prompt" {
@@ -1136,17 +1142,17 @@ test "the prompt" {
     defer freeSim(sim);
     const answer_ = try std.json.parseFromSlice(Answer, std.testing.allocator, try sim.interpret("1 2 + 5", 0), .{});
     defer answer_.deinit();
-    try std.testing.expect(answer_.value.ok);
-    try std.testing.expectEqualSlices(i32, &.{ 3, 5 }, answer_.value.stack);
+    try expect(answer_.value.ok);
+    try expectEqualSlices(i32, &.{ 3, 5 }, answer_.value.stack);
 
     const failed = try std.json.parseFromSlice(Answer, std.testing.allocator, try sim.interpret("frob", 0), .{});
     defer failed.deinit();
-    try std.testing.expect(!failed.value.ok);
-    try std.testing.expectEqualStrings("frob", failed.value.token.?);
+    try expect(!failed.value.ok);
+    try expectEqualStrings("frob", failed.value.token.?);
 
     const words = try std.json.parseFromSlice([]const []const u8, std.testing.allocator, try sim.complete("unex"), .{});
     defer words.deinit();
-    try std.testing.expectEqualStrings("unext", words.value[0]);
+    try expectEqualStrings("unext", words.value[0]);
 }
 
 test "editing colorForth, and loading what was typed" {
@@ -1167,24 +1173,24 @@ test "editing colorForth, and loading what was typed" {
     const view = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, try sim.editorView(), .{});
     defer view.deinit();
     const tokens = view.value.object.get("tokens").?.array.items;
-    try std.testing.expectEqualStrings("node", tokens[1].object.get("text").?.string);
-    try std.testing.expectEqualStrings("yellow", tokens[1].object.get("color").?.string);
-    try std.testing.expectEqualStrings("red", tokens[5].object.get("color").?.string);
-    try std.testing.expectEqual(1, tokens[5].object.get("line").?.integer);
-    try std.testing.expect(view.value.object.get("unsaved").?.bool);
+    try expectEqualStrings("node", tokens[1].object.get("text").?.string);
+    try expectEqualStrings("yellow", tokens[1].object.get("color").?.string);
+    try expectEqualStrings("red", tokens[5].object.get("color").?.string);
+    try expectEqual(1, tokens[5].object.get("line").?.integer);
+    try expect(view.value.object.get("unsaved").?.bool);
 
     const file = try std.testing.allocator.dupe(u8, sim.editor.contents());
     defer std.testing.allocator.free(file);
     try sim.load(.cf, file, &.{0});
-    try std.testing.expectEqual(.settled, try sim.run(10_000));
-    try std.testing.expectEqualStrings("H", sim.takeConsoleOutput());
+    try expectEqual(.settled, try sim.run(10_000));
+    try expectEqualStrings("H", sim.takeConsoleOutput());
 }
 
 test "a file that is no ROM is refused" {
     const sim = try testSim();
     defer freeSim(sim);
-    try std.testing.expectError(error.InvalidRom, sim.setRom("not a rom\n"));
-    try std.testing.expectEqual(null, sim.roms);
+    try expectError(error.InvalidRom, sim.setRom("not a rom\n"));
+    try expectEqual(null, sim.roms);
 }
 
 test "compiling the block being edited starts the chip again with its code" {
@@ -1192,7 +1198,7 @@ test "compiling the block being edited starts the chip again with its code" {
     defer freeSim(sim);
     try sim.load(.ga, hello, &.{});
     _ = try sim.run(10_000);
-    try std.testing.expectEqualStrings("Hello", sim.takeConsoleOutput());
+    try expectEqualStrings("Hello", sim.takeConsoleOutput());
 
     const ctrl_y: Editor.Key = .{ .code = .{ .char = 'y' }, .ctrl = true };
     _ = try sim.editorKey(.char('i'));
@@ -1202,19 +1208,19 @@ test "compiling the block being edited starts the chip again with its code" {
     for ("main up b! 72 !b left b! @b") |c| _ = try sim.editorKey(.char(c));
     _ = try sim.editorKey(.{ .code = .escape });
     try sim.compile();
-    try std.testing.expectEqualStrings("compiled, and started the chip again with 1 nodes' code", sim.out.written());
+    try expectEqualStrings("compiled, and started the chip again with 1 nodes' code", sim.out.written());
 
     // node 000 is as it started, and node 001 has the block's code
-    try std.testing.expect(sim.chip.nodes[1].mem[0] != 0);
-    try std.testing.expectEqual(.settled, try sim.run(10_000));
-    try std.testing.expectEqualStrings("Hello", sim.takeConsoleOutput());
+    try expect(sim.chip.nodes[1].mem[0] != 0);
+    try expectEqual(.settled, try sim.run(10_000));
+    try expectEqualStrings("Hello", sim.takeConsoleOutput());
 
     // an error moves the cursor to the word
     _ = try sim.editorKey(.char('a'));
     for (" frob") |c| _ = try sim.editorKey(.char(c));
     _ = try sim.editorKey(.{ .code = .escape });
-    try std.testing.expectError(error.CompileFailed, sim.compile());
-    try std.testing.expectEqualStrings("frob", sim.editor.current().?.text());
+    try expectError(error.CompileFailed, sim.compile());
+    try expectEqualStrings("frob", sim.editor.current().?.text());
 }
 
 test "blocks as text" {
@@ -1227,9 +1233,9 @@ test "blocks as text" {
 
     const views = try std.json.parseFromSlice([]const BlockView, std.testing.allocator, try sim.blocksView(), .{});
     defer views.deinit();
-    try std.testing.expectEqual(1, views.value.len);
-    try std.testing.expectEqualStrings(":one ]two\n", views.value[0].text);
-    try std.testing.expect(!views.value[0].read_only);
+    try expectEqual(1, views.value.len);
+    try expectEqualStrings(":one ]two\n", views.value[0].text);
+    try expect(!views.value[0].read_only);
 }
 
 test "tracing" {
@@ -1238,15 +1244,15 @@ test "tracing" {
     try sim.setTracing(true);
     try sim.load(.ga, hello, &.{});
     _ = try sim.stepNext();
-    try std.testing.expect(!sim.takeTrace());
-    try std.testing.expectStringStartsWith(sim.out.written(), "000 000 ");
+    try expect(!sim.takeTrace());
+    try expectStringStartsWith(sim.out.written(), "000 000 ");
     _ = sim.takeTrace();
-    try std.testing.expectEqualStrings("", sim.out.written());
+    try expectEqualStrings("", sim.out.written());
 
     try sim.setTracing(false);
     _ = try sim.stepNext();
-    try std.testing.expect(!sim.takeTrace());
-    try std.testing.expectEqualStrings("", sim.out.written());
+    try expect(!sim.takeTrace());
+    try expectEqualStrings("", sim.out.written());
 }
 
 test "the history, and going back to a step in it" {
@@ -1258,15 +1264,15 @@ test "the history, and going back to a step in it" {
     _ = try sim.stepNode(0);
     const moments_ = try std.json.parseFromSlice([]const Moment, std.testing.allocator, try sim.historyView(), .{});
     defer moments_.deinit();
-    try std.testing.expectEqual(3, moments_.value.len);
-    try std.testing.expectEqual(.step, moments_.value[0].cause);
-    try std.testing.expectEqual(0, moments_.value[0].steps);
-    try std.testing.expectEqual(.node, moments_.value[2].cause);
+    try expectEqual(3, moments_.value.len);
+    try expectEqual(.step, moments_.value[0].cause);
+    try expectEqual(0, moments_.value[0].steps);
+    try expectEqual(.node, moments_.value[2].cause);
 
-    try std.testing.expect(sim.backTo(1));
-    try std.testing.expectEqual(1, sim.historyLen());
-    try std.testing.expectEqual(moments_.value[1].steps, sim.chip.steps);
-    try std.testing.expect(!sim.backTo(1));
+    try expect(sim.backTo(1));
+    try expectEqual(1, sim.historyLen());
+    try expectEqual(moments_.value[1].steps, sim.chip.steps);
+    try expect(!sim.backTo(1));
 }
 
 test "breakpoints stay as a file is loaded again" {
@@ -1275,7 +1281,7 @@ test "breakpoints stay as a file is loaded again" {
     try sim.load(.ga, hello, &.{});
     _ = try sim.toggleBreakpoint(0, 4);
     try sim.load(.ga, hello, &.{});
-    try std.testing.expectEqual(.hit, try sim.run(10_000));
+    try expectEqual(.hit, try sim.run(10_000));
     sim.clearBreakpoints();
-    try std.testing.expectEqual(.settled, try sim.run(10_000));
+    try expectEqual(.settled, try sim.run(10_000));
 }

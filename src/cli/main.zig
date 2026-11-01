@@ -826,6 +826,8 @@ const std = @import("std");
 const Io = std.Io;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 
 const gasim = @import("gasim");
 const assembler = gasim.assembler;
@@ -844,17 +846,17 @@ test {
 }
 
 test "the terminal user interface and the prompt start without a program" {
-    try std.testing.expectEqual(.tui, commandOf(&.{"gasim"}, true));
-    try std.testing.expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, true));
-    try std.testing.expect(!needsProgram(.tui, false, false));
-    try std.testing.expect(!needsProgram(.aforth, false, false));
+    try expectEqual(.tui, commandOf(&.{"gasim"}, true));
+    try expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, true));
+    try expect(!needsProgram(.tui, false, false));
+    try expect(!needsProgram(.aforth, false, false));
     // but running a program, or listing one, needs one
-    try std.testing.expectEqual(.run, commandOf(&.{ "gasim", "run" }, true));
-    try std.testing.expect(needsProgram(.run, false, false));
-    try std.testing.expect(needsProgram(.tui, true, false));
+    try expectEqual(.run, commandOf(&.{ "gasim", "run" }, true));
+    try expect(needsProgram(.run, false, false));
+    try expect(needsProgram(.tui, true, false));
     // except a run with a UART, booted from its input
-    try std.testing.expect(!needsProgram(.run, false, true));
+    try expect(!needsProgram(.run, false, true));
     // as does a pipe or file, which runs it
-    try std.testing.expectEqual(.run, commandOf(&.{"gasim"}, false));
-    try std.testing.expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, false));
+    try expectEqual(.run, commandOf(&.{"gasim"}, false));
+    try expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, false));
 }

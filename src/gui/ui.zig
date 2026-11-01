@@ -951,6 +951,8 @@ fn listing(n: Sim.NodeView) void {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 
 const dvui = @import("dvui");
 const gasim = @import("gasim");
@@ -1009,7 +1011,7 @@ test "the map shows registers and arrows when it has room" {
     for (0..4) |_| _ = try sim.stepRound();
     try dvui.testing.settle(frame);
     try saveImage(&t, "map-large.png");
-    try std.testing.expect(tiles.registers());
+    try expect(tiles.registers());
 }
 
 test "the map scrolls through tiles of registers when asked for them" {
@@ -1020,7 +1022,7 @@ test "the map scrolls through tiles of registers when asked for them" {
     mode = .registers;
     try dvui.testing.settle(frame);
     try saveImage(&t, "map-scrolling.png");
-    try std.testing.expectEqual(Tiles.comfortable, tiles);
+    try expectEqual(Tiles.comfortable, tiles);
 }
 
 test "the map shows numbers when it is small" {
@@ -1031,7 +1033,7 @@ test "the map shows numbers when it is small" {
     for (0..4) |_| _ = try sim.stepRound();
     try dvui.testing.settle(frame);
     try saveImage(&t, "map-small.png");
-    try std.testing.expect(!tiles.registers());
+    try expect(!tiles.registers());
 }
 
 test "the toolbar leaves out its labels, then takes two rows, where it does not fit" {
@@ -1041,7 +1043,7 @@ test "the toolbar leaves out its labels, then takes two rows, where it does not 
         try startWith(upcase);
         defer stop();
         try dvui.testing.settle(frame);
-        try std.testing.expectEqual(Fit{ .labels = w > 900, .rows = w < 900 }, fit);
+        try expectEqual(Fit{ .labels = w > 900, .rows = w < 900 }, fit);
         try saveImage(&t, try std.fmt.bufPrint(&image_name, "toolbar-{d}.png", .{w}));
     }
 }
@@ -1059,12 +1061,12 @@ test "the toolbar's labels come back once it shrinks to fit them" {
     fit = .{ .labels = false };
     labels_add = .{ 1500, 0 };
     try dvui.testing.settle(frame);
-    try std.testing.expect(!fit.labels);
+    try expect(!fit.labels);
     // the file name and blocks gone, the toolbar is narrower, and what the
     // labels add, without them, fits
     labels_add = .{ 150, 150 };
     try dvui.testing.settle(frame);
-    try std.testing.expectEqual(Fit{}, fit);
+    try expectEqual(Fit{}, fit);
 }
 
 test "the keys step and go back" {
@@ -1075,13 +1077,13 @@ test "the keys step and go back" {
     try dvui.testing.settle(frame);
     try dvui.testing.pressKey(.s, .lshift);
     try dvui.testing.settle(frame);
-    try std.testing.expectEqual(1, sim.historyLen());
+    try expectEqual(1, sim.historyLen());
     try dvui.testing.pressKey(.z, .none);
     try dvui.testing.settle(frame);
-    try std.testing.expectEqual(0, sim.chip.steps);
+    try expectEqual(0, sim.chip.steps);
     try dvui.testing.pressKey(.right, .none);
     try dvui.testing.settle(frame);
-    try std.testing.expectEqual(1, selected);
+    try expectEqual(1, selected);
 }
 
 test "the node panel sets breakpoints in its gutter" {
@@ -1095,7 +1097,7 @@ test "the node panel sets breakpoints in its gutter" {
     try dvui.testing.moveTo("gutter-000");
     try dvui.testing.click(.left);
     try dvui.testing.settle(frame);
-    try std.testing.expect(sim.chip.breakpoints.contains(.init(0, 0)));
+    try expect(sim.chip.breakpoints.contains(.init(0, 0)));
     try saveImage(&t, "node.png");
 }
 

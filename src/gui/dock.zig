@@ -522,6 +522,8 @@ pub fn follow(si: *dvui.ScrollInfo, f: *Follow) void {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const expect = std.testing.expect;
+const expectEqualStrings = std.testing.expectEqualStrings;
 
 const dvui = @import("dvui");
 const Sim = @import("Sim");
@@ -549,16 +551,16 @@ test "the prompt interprets lines on the selected node" {
 
     // a space typed is for the prompt, not to run the chip
     try typeInto("forth-input", "1 2 +");
-    try std.testing.expect(!ui.running);
+    try expect(!ui.running);
     try testing.pressKey(.enter, .none);
     try testing.settle(ui.frame);
-    try std.testing.expectEqualStrings("ok 3", entries.items[entries.items.len - 1].result);
-    try std.testing.expectEqualStrings("", line.items);
+    try expectEqualStrings("ok 3", entries.items[entries.items.len - 1].result);
+    try expectEqualStrings("", line.items);
 
     try typeInto("forth-input", "nonsense");
     try testing.pressKey(.enter, .none);
     try testing.settle(ui.frame);
-    try std.testing.expect(!entries.items[entries.items.len - 1].ok);
+    try expect(!entries.items[entries.items.len - 1].ok);
     try ui.saveImage(&w, "forth.png");
 
     // up goes back through the lines entered
@@ -566,7 +568,7 @@ test "the prompt interprets lines on the selected node" {
     try testing.settle(ui.frame);
     try testing.pressKey(.up, .none);
     try testing.settle(ui.frame);
-    try std.testing.expectEqualStrings("1 2 +", line.items);
+    try expectEqualStrings("1 2 +", line.items);
 }
 
 test "Tab completes a word at the prompt" {
@@ -578,8 +580,8 @@ test "Tab completes a word at the prompt" {
     try typeInto("forth-input", "1 dro");
     try testing.pressKey(.tab, .none);
     try testing.settle(ui.frame);
-    try std.testing.expect(std.mem.startsWith(u8, line.items, "1 dro"));
-    try std.testing.expect(line.items.len > "1 dro".len or choices != null);
+    try expect(std.mem.startsWith(u8, line.items, "1 dro"));
+    try expect(line.items.len > "1 dro".len or choices != null);
 }
 
 test "the console gives a line to the node, and shows what it writes" {
@@ -596,6 +598,6 @@ test "the console gives a line to the node, and shows what it writes" {
     try testing.settle(ui.frame);
     _ = try ui.sim.run(100_000);
     try testing.settle(ui.frame);
-    try std.testing.expectEqualStrings("HI THERE\n", console.items);
+    try expectEqualStrings("HI THERE\n", console.items);
     try ui.saveImage(&w, "console.png");
 }

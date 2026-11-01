@@ -149,24 +149,24 @@ test service {
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
 
     // nothing to do
-    try std.testing.expect(!try console.service(true));
-    try std.testing.expect(!console.used);
+    try expect(!try console.service(true));
+    try expect(!console.used);
 
     // output
-    try std.testing.expect(!console.port.write(.a, 'x'));
-    try std.testing.expect(try console.service(false));
-    try std.testing.expect(console.port.write(.a, 'x'));
-    try std.testing.expectEqualStrings("x", writer.buffered());
-    try std.testing.expect(console.used);
+    try expect(!console.port.write(.a, 'x'));
+    try expect(try console.service(false));
+    try expect(console.port.write(.a, 'x'));
+    try expectEqualStrings("x", writer.buffered());
+    try expect(console.used);
 
     // input
-    try std.testing.expectEqual(null, console.port.read(.a));
-    try std.testing.expect(try console.service(false));
-    try std.testing.expectEqual('a', console.port.read(.a));
+    try expectEqual(null, console.port.read(.a));
+    try expect(try console.service(false));
+    try expectEqual('a', console.port.read(.a));
 
     // end of input
-    try std.testing.expectEqual(null, console.port.read(.a));
-    try std.testing.expect(!try console.service(true));
+    try expectEqual(null, console.port.read(.a));
+    try expect(!try console.service(true));
 }
 
 test "service does not wait for input unless asked" {
@@ -176,10 +176,10 @@ test "service does not wait for input unless asked" {
     var writer: Io.Writer = .fixed(&buffer);
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
 
-    try std.testing.expectEqual(null, console.port.read(.a));
-    try std.testing.expect(!try console.service(false));
+    try expectEqual(null, console.port.read(.a));
+    try expect(!try console.service(false));
     // the node is still waiting
-    try std.testing.expect(console.port.otherReading(.b));
+    try expect(console.port.otherReading(.b));
 }
 
 test give {
@@ -188,26 +188,26 @@ test give {
     var console: Console = .{ .output = &writer };
 
     // the node waits for input that has not been given
-    try std.testing.expectEqual(null, console.port.read(.a));
-    try std.testing.expect(console.wantsInput());
-    try std.testing.expect(!try console.service(true));
+    try expectEqual(null, console.port.read(.a));
+    try expect(console.wantsInput());
+    try expect(!try console.service(true));
 
-    try std.testing.expectEqual(2, console.give("ab"));
-    try std.testing.expect(!console.wantsInput());
-    try std.testing.expect(try console.service(false));
-    try std.testing.expectEqual('a', console.port.read(.a));
+    try expectEqual(2, console.give("ab"));
+    try expect(!console.wantsInput());
+    try expect(try console.service(false));
+    try expectEqual('a', console.port.read(.a));
 
     // what is left is kept as more is given, until there is no room
     var lots: [600]u8 = @splat('c');
-    try std.testing.expectEqual(console.taken.len - 1, console.give(&lots));
-    try std.testing.expectEqual(0, console.give("d"));
-    try std.testing.expectEqual(null, console.port.read(.a));
-    try std.testing.expect(try console.service(false));
-    try std.testing.expectEqual('b', console.port.read(.a));
+    try expectEqual(console.taken.len - 1, console.give(&lots));
+    try expectEqual(0, console.give("d"));
+    try expectEqual(null, console.port.read(.a));
+    try expect(try console.service(false));
+    try expectEqual('b', console.port.read(.a));
 
     // nothing is taken after the end
     console.end();
-    try std.testing.expectEqual(0, console.give("e"));
+    try expectEqual(0, console.give("e"));
 }
 
 test readInput {
@@ -217,8 +217,8 @@ test readInput {
     try readInput(std.testing.io, &reader, &input);
 
     var got: [8]u8 = undefined;
-    try std.testing.expectEqualStrings("abc", got[0..try input.get(std.testing.io, &got, 0)]);
-    try std.testing.expectError(error.Closed, input.get(std.testing.io, &got, 0));
+    try expectEqualStrings("abc", got[0..try input.get(std.testing.io, &got, 0)]);
+    try expectError(error.Closed, input.get(std.testing.io, &got, 0));
 }
 
 const Computer = @import("f18.zig").Computer;
@@ -229,3 +229,7 @@ const Side = ports.Side;
 
 const std = @import("std");
 const Io = std.Io;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;

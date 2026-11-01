@@ -713,7 +713,7 @@ test "current" {
     computer.mem[5] = Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@"!", .slot_2 = .@".", .slot_3 = 7 });
     computer.a = 0x1d5;
     computer.step();
-    try std.testing.expect(computer.suspended);
+    try expect(computer.suspended);
     try expectEqual(Address.fromWord(7), computer.p.address);
     try expectEqual(Address.fromWord(5), computer.current());
 }
@@ -1145,19 +1145,19 @@ const expectEqual = std.testing.expectEqual;
 
 test "status" {
     var n: Computer = .reset;
-    try std.testing.expectEqual(Computer.Status.running, n.status());
+    try expectEqual(Computer.Status.running, n.status());
 
     // fetching from a multiport
     n.p.address = Address.fromWord(0x1a5);
     n.suspended = true;
-    try std.testing.expectEqual(Computer.Status{ .code = 0x1a5 }, n.status());
+    try expectEqual(Computer.Status{ .code = 0x1a5 }, n.status());
 
     // reading through B, and writing through A
     n.state = .execution;
     n.i = Instruction.encode(.{ .slot_0 = .@"@b", .slot_1 = .@"!", .slot_2 = .@".", .slot_3 = 7 });
     n.b = 0x1d5;
-    try std.testing.expectEqual(Computer.Status{ .reading = 0x1d5 }, n.status());
+    try expectEqual(Computer.Status{ .reading = 0x1d5 }, n.status());
     n.slot = 1;
     n.a = 0x145;
-    try std.testing.expectEqual(Computer.Status{ .writing = 0x145 }, n.status());
+    try expectEqual(Computer.Status{ .writing = 0x145 }, n.status());
 }
