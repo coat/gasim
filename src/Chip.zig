@@ -775,24 +775,35 @@ fn stepNodeIn(self: *Chip, i: u16, comptime board: bool) void {
     };
     if (self.hit == null and self.breakpoints.len + self.watches.len > 0) self.hit = self.stopAt(i);
 
-    const transfers = n.transfers.read.unionWith(n.transfers.written);
     for (n.ports, before, 0..) |link, state, d| {
         const p = link.port orelse continue;
         if (std.meta.eql(state, p.state)) continue;
-        const direction: Direction = @fromBackingInt(@intCast(d));
-        const j = self.layout.neighbour(i, direction) orelse continue;
-        // a word passes between neighbours when the second of them gets to
-        // the port, at the later of their times, and not when the first
-        // wakes to finish, as the second may have run on by then
-        if (board and transfers.contains(direction) and (state == .reading or state == .writing)) {
-            const other = &self.nodes[j];
-            const time = @max(n.time, other.time);
-            // either may be queued already, at its time before
-            if (n.time < time) self.later(i, time);
-            if (other.time < time) self.later(j, time);
-        }
-        self.wakeIn(j, board);
+        self.portChanged(i, @fromBackingInt(@intCast(d)), state, board);
     }
+}
+
+/// Wakes the neighbour on a port of node `i` that changed from `state`. In
+/// board mode, not if the neighbour is still waiting after the change, such
+/// as when it reads the port too: a later change that lets it go on wakes
+/// it then. Stepped at once, as it is behind, it would only wait again,
+/// where round-robin tries it once a round however many ports changed. Out
+/// of line, as most steps change no port.
+noinline fn portChanged(self: *Chip, i: u16, direction: Direction, state: Port.State, comptime board: bool) void {
+    const j = self.layout.neighbour(i, direction) orelse return;
+    const n = &self.nodes[i];
+    const other = &self.nodes[j];
+    // a word passes between neighbours when the second of them gets to the
+    // port, at the later of their times, and not when the first wakes to
+    // finish, as the second may have run on by then
+    const transfers = n.transfers.read.unionWith(n.transfers.written);
+    if (board and transfers.contains(direction) and (state == .reading or state == .writing)) {
+        const time = @max(n.time, other.time);
+        // either may be queued already, at its time before
+        if (n.time < time) self.later(i, time);
+        if (other.time < time) self.later(j, time);
+    }
+    if (board and other.suspended and other.retryWaits()) return;
+    self.wakeIn(j, board);
 }
 
 /// Writes the node, the word it executed, where from, and its stacks after,
