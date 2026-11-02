@@ -365,7 +365,7 @@ pub const Computer = struct {
     /// jump. The next word is prefetched while the opcodes run, unless one
     /// in slot 1, 2 or 3 uses memory, or loops in its word (DB002 §5.3).
     fn fetchTime(instruction: Instruction) u64 {
-        const slot_3: Opcode = @enumFromInt(@as(u5, instruction.slot_3) << 2);
+        const slot_3: Opcode = @fromBackingInt(@intCast(@as(u5, instruction.slot_3) << 2));
         if (delaysFetch(slot_3)) return 4300;
         if (delaysFetch(instruction.slot_2)) return 3200;
         if (delaysFetch(instruction.slot_1)) return 2200;
