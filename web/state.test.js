@@ -90,7 +90,7 @@ Deno.test('steps say what they stepped', async () => {
   app.stepNext();
   assertEquals(state.message, `Stepped node ${app.pad(app.nodeNumber(state.selected))}`);
   app.stepRound();
-  assertEquals(state.message, 'Stepped each node that could run');
+  assertEquals(state.message, 'Took a round of steps, the furthest behind first');
   app.select(app.nodeIndex(717));
   app.stepNode();
   assertEquals(state.message, 'Node 717 is still waiting');

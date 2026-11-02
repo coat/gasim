@@ -6,7 +6,7 @@ pub var open = false;
 const chip_keys = [_][2][]const u8{
     .{ "space", "Run or pause" },
     .{ "s", "Step the next node to run" },
-    .{ "shift+s", "Step each node that can run once" },
+    .{ "shift+s", "Take a step for each node that can run, the furthest behind first" },
     .{ "n", "Step the selected node" },
     .{ "z", "Go back before the last step or run" },
     .{ "arrows or h j k l", "Select a node" },

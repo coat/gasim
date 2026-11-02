@@ -184,7 +184,7 @@ fn stepNext() void {
 
 fn stepRound() void {
     const advanced = sim.stepRound() catch return say("Out of memory", .{});
-    say("{s}", .{if (advanced) "Stepped each node that could run" else "Every node is waiting"});
+    say("{s}", .{if (advanced) "Took a round of steps, the furthest behind first" else "Every node is waiting"});
 }
 
 fn stepNode() void {
@@ -307,7 +307,7 @@ fn toolbar() void {
     const run_w = if (fit.labels) font.textHeight() + 4 + font.textSize("Pause").w else 0;
     if (tool(@src(), .{ .label = if (running) "Pause" else "Run", .icon = if (running) icons.pause else icons.play, .tip = "Run or pause (space)" }, .{ .style = .highlight, .min_size_content = .{ .w = run_w } })) toggleRun();
     if (tool(@src(), .{ .label = "Step", .icon = icons.step, .tip = "Step the next node to run (s)", .enabled = stopped }, .{})) stepNext();
-    if (tool(@src(), .{ .label = "Round", .icon = icons.round, .tip = "Step each node that can run once (shift+s)", .enabled = stopped }, .{})) stepRound();
+    if (tool(@src(), .{ .label = "Round", .icon = icons.round, .tip = "Take a step for each node that can run, the furthest behind first (shift+s)", .enabled = stopped }, .{})) stepRound();
     if (tool(@src(), .{ .label = "Node", .icon = icons.step_node, .tip = "Step the selected node (n)", .enabled = stopped }, .{})) stepNode();
     if (tool(@src(), .{ .label = "Back", .icon = icons.step_back, .tip = "Go back before the last step or run (z)", .enabled = stopped and sim.historyLen() > 0 }, .{})) back();
     if (tool(@src(), .{ .label = "Reset", .icon = icons.arrow_path, .tip = "Start the chip again as it was loaded" }, .{})) reset();
