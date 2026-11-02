@@ -179,7 +179,10 @@ fn toggleRun() void {
 
 fn stepNext() void {
     const i = sim.stepNext() catch return say("Out of memory", .{});
-    if (i) |n| say("Stepped node {d:0>3}", .{sim.chip.layout.nodeNumber(n)}) else say("Every node is waiting", .{});
+    // the next node to run, which the view follows
+    const n = i orelse return say("Every node is waiting", .{});
+    selected = n;
+    say("Stepped node {d:0>3}", .{sim.chip.layout.nodeNumber(n)});
 }
 
 fn stepRound() void {
@@ -1098,6 +1101,20 @@ test "the keys step and go back" {
     try dvui.testing.pressKey(.right, .none);
     try dvui.testing.settle(frame);
     try expectEqual(1, selected);
+}
+
+test "a step selects the node it stepped" {
+    var t = try dvui.testing.init(.{});
+    defer t.deinit();
+    try startWith(upcase);
+    defer stop();
+    try dvui.testing.settle(frame);
+    selected = sim.chip.layout.index(717).?;
+    try dvui.testing.pressKey(.s, .none);
+    try dvui.testing.settle(frame);
+    var buffer: [32]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "Stepped node {d:0>3}", .{sim.chip.layout.nodeNumber(selected)}), message);
+    try std.testing.expect(selected != sim.chip.layout.index(717).?);
 }
 
 test "the node panel sets breakpoints in its gutter" {
