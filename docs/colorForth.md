@@ -6,7 +6,8 @@ green, `\` cyan, `(` white, `@` magenta, `^` gray and `~` blue, with hex
 numbers after a `$`.
 
 `gasim source.cf` opens the blocks in an editor. Hit alt+1 to get back to the
-chip view and alt+6 to get back to the colorForth editor. It's inspired by
+chip view and alt+6 to get back to the colorForth editor, which without a .cf
+file starts a new file of blocks. It's inspired by
 AshleyF's [Color](https://github.com/AshleyF/Color) editor. The cursor is on a
 word, and as in vim. Keys move between words and blocks - hit `i`, `a` or `o`
 to start typing. Typing a space starts the next word in green after a red name
@@ -14,7 +15,7 @@ and otherwise in the same color, and a color key changes the color of the word
 being typed or the one under the cursor. Words typed in yellow, green or white
 that read as numbers, such as `-5` or `$1f`, become numbers. `s` saves the
 file, which a compressed arrayForth 2 image is saved as uncompressed, and a
-file that does not exist is created. Blocks that are not colorForth source,
+file that does not exist is created; a new file is named first. Blocks that are not colorForth source,
 such as the kernel of an arrayForth 2 image, cannot be edited. `L` compiles the
 block, and the blocks it loads, and starts the chip again with the code
 compiled so far - the block's code replacing what it compiled before, or moves
@@ -36,6 +37,18 @@ the cursor to the word that failed. Phew.
 | `f` | show or hide blue words, which lay out the block |
 | `L` | compile the block and start the chip again with its code |
 | `s`, ctrl+s | save |
+| `:` | type a command, as in vim |
+
+Commands open and save files, after vim's. `:w` saves, and `:w file` saves
+as the file, which the blocks are then saved to, as vim's `:saveas` does;
+`:w! file` saves over a file that is there. `:e file` opens a file of
+blocks, or starts one there that saving creates, and `:new` starts a new
+file, which `:w` names. Either asks for `!`, as `:e! file`, to let blocks go
+that are not saved, and forgets the code compiled from the file before.
+`:q` quits, `:q!` though the blocks are not saved, `:wq` after saving them,
+and `:x` after saving them if they changed. Tab completes the name of a .cf
+file or a directory, and esc lets the command go. A name that is not absolute
+is relative to the directory gasim was started in.
 
 F18 code in colorForth is compiled like arrayForth 2 - into the
 same object code as arrayForth 3 source. Each example has a colorForth
