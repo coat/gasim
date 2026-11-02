@@ -108,9 +108,11 @@ For more info, check out the [TUI docs](docs/tui.md).
 ![The colorForth block editor](docs/screenshot-colorforth.png)
 
 There's a built-in colorForth editor inspired by AshleyF's
-[Color](https://github.com/AshleyF/Color) editor. Just open an existing .cf
-file to view the editor (`gasim examples/hello.cf`). To output colorForth .cf
-binary files as text, try `gasim blocks examples/hello.cf`. 
+[Color](https://github.com/AshleyF/Color) editor. Open a .cf file to start in
+the editor (`gasim examples/hello.cf`), or hit alt+6 in the TUI to edit a new
+file of blocks, and `:w`, `:e` and `:new` to save, open and start files. To
+output colorForth .cf binary files as text, try `gasim blocks
+examples/hello.cf`. 
 
 More info - like key bindings - in the [colorForth
 documentation](docs/colorForth.md).

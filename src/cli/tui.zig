@@ -2,7 +2,8 @@
 //! its nodes, the registers, stacks and memory of the selected node, the
 //! console, and arrayForth 3 typed at the chip with the words of its IDE.
 //! Panels can be hidden, zoomed to fill the screen, resized and scrolled.
-//! A screen of its own edits colorForth blocks, with vim-like keys.
+//! A screen of its own edits colorForth blocks, with vim-like keys, and
+//! opens and saves files of them from a command line as vim's.
 //! Help lists the keys over either screen.
 
 /// bytes of console output kept for display
@@ -17,14 +18,15 @@ pub const Options = struct {
     console_port: Direction,
     /// arrayForth 3 typed into the aaforth panel, if it is shown
     forth: ?Forth = null,
-    /// colorForth blocks to edit, if a file was opened
+    /// colorForth blocks to edit, of the file opened or a new one
     colorforth: ?ColorForth = null,
 };
 
 pub const ColorForth = struct {
     editor: *Editor,
-    /// where the blocks are saved
-    path: []const u8,
+    /// where the blocks are saved, or null for a new file, which saving
+    /// names
+    path: ?[]const u8,
     /// the file was a compressed arrayForth 2 image, which is saved
     /// uncompressed
     compressed: bool,
@@ -135,7 +137,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "F1, ?", "show or hide this help, with ? where it is not typed" },
         .{ "alt+1-5", "the map, console, node, aforth or debug panel, showing it" },
         .{ "ctrl+1-5", "the same, in terminals that report it" },
-        .{ "alt+6", "the colorForth editor, with a .cf file open" },
+        .{ "alt+6", "the colorForth editor" },
         .{ "alt+h j k l", "the panel to the left, below, above or right" },
         .{ "ctrl+c", "quit" },
     } },
@@ -210,8 +212,17 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "R Y G W C M B", "red, yellow, green, white, cyan, magenta or blue" },
         .{ "f", "show or hide blue words, which lay out the block" },
         .{ "L", "compile the block and start the chip again with its code" },
-        .{ "s, ctrl+s", "save" },
+        .{ "s, ctrl+s", "save, naming a new file first" },
+        .{ ":", "type a command: save, open or quit" },
         .{ "q", "quit" },
+    } },
+    .{ "the editor's commands", &.{
+        .{ ":w, :w file", "save, or save as the file, with :w! over another" },
+        .{ ":e file, :e! file", "open a file of blocks, with ! though not saved" },
+        .{ ":new, :new!", "start a new file of blocks, with ! though not saved" },
+        .{ ":q, :q!, :wq", "quit, though not saved, or after saving" },
+        .{ "tab", "complete the name of a .cf file or a directory" },
+        .{ "esc", "done" },
     } },
     .{ "typing in the editor", &.{
         .{ "space", "the next word" },
@@ -332,6 +343,11 @@ const Tui = struct {
     quit_confirmed: bool = false,
     /// the first row of the editor's block in view
     editor_scroll: u16 = 0,
+    /// a command typed in the editor after `:`, while there is one
+    command: [256]u8 = undefined,
+    command_len: ?u16 = null,
+    /// the editor's file, once a command names it
+    path_buffer: [Io.Dir.max_path_bytes]u8 = undefined,
     /// whether the editor shows blue words, which lay out the block
     show_format: bool = true,
     /// the chip as it started, which compiling colorForth starts it from
@@ -480,9 +496,7 @@ const Tui = struct {
                     }
                 };
                 if (k.matches('6', .{ .alt = true }) or k.matches('6', .{ .ctrl = true })) {
-                    if (self.options.colorforth == null) {
-                        self.message = "open a .cf file to edit colorForth";
-                    } else self.screen = .editor;
+                    if (self.options.colorforth != null) self.screen = .editor;
                     return true;
                 }
                 if (self.screen == .editor) return self.editorKey(k);
@@ -806,6 +820,7 @@ const Tui = struct {
         var chars: []const u8 = &.{};
         var named: ?Editor.Key = null;
         if (k.mods.alt or k.mods.super or k.mods.hyper or k.mods.meta) return true;
+        if (self.command_len != null) return self.commandKey(k);
         if (k.mods.ctrl) {
             if (k.codepoint < 0x80) named = .{ .code = .{ .char = @intCast(k.codepoint) }, .ctrl = true };
         } else if (editorKeyCode(k)) |code| {
@@ -816,6 +831,11 @@ const Tui = struct {
         }
 
         if (editor.mode == .normal and named == null and std.mem.eql(u8, chars, "?")) return self.openHelp();
+        if (editor.mode == .normal and named == null and std.mem.eql(u8, chars, ":")) {
+            editor.prefix = null;
+            self.startCommand("");
+            return true;
+        }
         if (named) |one| return self.editorAction(editor, one);
         for (chars) |c| if (!self.editorAction(editor, .char(c))) return false;
         return true;
@@ -848,7 +868,12 @@ const Tui = struct {
         };
         switch (action) {
             .none => {},
-            .save => self.save(),
+            .save => if (self.options.colorforth.?.path) |path| {
+                _ = self.save(path);
+            } else {
+                self.startCommand("w ");
+                self.message = "name the new file";
+            },
             .compile => self.compile(),
             .toggle_format => self.show_format = !self.show_format,
             .quit => return self.keepOnQuit(),
@@ -882,16 +907,272 @@ const Tui = struct {
         self.message = if (assembled.first_difference) |first| self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ nodes, assembled.feedback_differs, first.noted, first.found }) else self.printLasting("compiled, and started the chip again with {d} nodes' code", .{nodes});
     }
 
-    /// writes the editor's blocks to their file
-    fn save(self: *Tui) void {
-        const cf = self.options.colorforth.?;
+    /// Writes the editor's blocks to a file, which becomes theirs, returning
+    /// whether they were saved
+    fn save(self: *Tui, path: []const u8) bool {
+        const cf = &self.options.colorforth.?;
         const contents = cf.editor.contents();
-        Io.Dir.cwd().writeFile(self.io, .{ .sub_path = cf.path, .data = contents }) catch |err| {
-            self.message = self.printLasting("cannot save {s}: {t}", .{ cf.path, err });
-            return;
+        Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = contents }) catch |err| {
+            self.message = self.printLasting("cannot save {s}: {t}", .{ std.fs.path.basename(path), err });
+            return false;
         };
         cf.editor.saved();
+        if (cf.path == null or !std.mem.eql(u8, cf.path.?, path)) self.name(path);
+        cf.compressed = false;
         self.message = self.printLasting("saved {d} blocks", .{contents.len / gasim.colorforth.block_size});
+        return true;
+    }
+
+    /// makes `path` the editor's file
+    fn name(self: *Tui, path: []const u8) void {
+        @memmove(self.path_buffer[0..path.len], path);
+        self.options.colorforth.?.path = self.path_buffer[0..path.len];
+    }
+
+    /// Opens a file of colorForth blocks, or an arrayForth 2 image, in the
+    /// editor, in place of its blocks. A file that does not exist is new, and
+    /// saving creates it.
+    fn open(self: *Tui, path: []const u8) void {
+        const colorforth = gasim.colorforth;
+        const cf = &self.options.colorforth.?;
+        const editor = cf.editor;
+        if (path.len > self.path_buffer.len) {
+            self.message = "the file's name is too long";
+            return;
+        }
+        // a compressed image takes less than the blocks it holds, and a
+        // file that fills them reaches a limit of their size
+        var found = true;
+        const read = Io.Dir.cwd().readFileAlloc(self.io, path, self.gpa, .limited(editor.blocks.len + 1)) catch |err| switch (err) {
+            error.FileNotFound => read: {
+                found = false;
+                break :read &.{};
+            },
+            error.StreamTooLong => {
+                self.message = self.printLasting("{s} has more than {d} blocks", .{ std.fs.path.basename(path), editor.capacity() });
+                return;
+            },
+            else => {
+                self.message = self.printLasting("cannot open {s}: {t}", .{ std.fs.path.basename(path), err });
+                return;
+            },
+        };
+        defer self.gpa.free(read);
+        const compressed = colorforth.compressedBlocks(read);
+        const count = compressed orelse colorforth.blockCount(read);
+        if (count > editor.capacity()) {
+            self.message = self.printLasting("{s} has more than {d} blocks", .{ std.fs.path.basename(path), editor.capacity() });
+            return;
+        }
+        // decompressed apart, to leave the blocks as they are if it fails
+        const bytes = self.gpa.alloc(u8, count * colorforth.block_size) catch {
+            self.message = "out of memory";
+            return;
+        };
+        defer self.gpa.free(bytes);
+        if (compressed != null) {
+            colorforth.decompress(read, bytes) catch |err| {
+                self.message = self.printLasting("cannot decompress {s}: {t}", .{ std.fs.path.basename(path), err });
+                return;
+            };
+        } else {
+            @memcpy(bytes[0..read.len], read);
+            @memset(bytes[read.len..], 0);
+        }
+        @memset(editor.blocks, 0);
+        @memcpy(editor.blocks[0..bytes.len], bytes);
+        editor.open(editor.blocks, count);
+        self.name(path);
+        cf.compressed = compressed != null;
+        self.forgetCompiled();
+        self.editor_scroll = 0;
+        self.message = if (compressed != null)
+            "decompressed, and saved uncompressed"
+        else if (!found)
+            self.printLasting("{s} is new", .{std.fs.path.basename(path)})
+        else
+            self.printLasting("opened {d} blocks", .{count});
+    }
+
+    /// Starts a new file of blocks, which saving names
+    fn newFile(self: *Tui) void {
+        const cf = &self.options.colorforth.?;
+        @memset(cf.editor.blocks, 0);
+        cf.editor.open(cf.editor.blocks, 0);
+        cf.path = null;
+        cf.compressed = false;
+        self.forgetCompiled();
+        self.editor_scroll = 0;
+        self.message = "a new file of blocks";
+    }
+
+    /// forgets the code compiled from the blocks of the file before, so
+    /// compiling another file's starts the chip with its code alone
+    fn forgetCompiled(self: *Tui) void {
+        if (self.options.forth) |forth| forth.session.forgetColorForth();
+    }
+
+    /// starts typing a command in the editor, with `text` typed
+    fn startCommand(self: *Tui, text: []const u8) void {
+        @memcpy(self.command[0..text.len], text);
+        self.command_len = @intCast(text.len);
+    }
+
+    /// Handles keys typed into the editor's command line, returning false to
+    /// quit
+    fn commandKey(self: *Tui, k: vaxis.Key) bool {
+        const len = &self.command_len.?;
+        if (k.matches(vaxis.Key.escape, .{})) {
+            self.command_len = null;
+        } else if (k.matches(vaxis.Key.backspace, .{})) {
+            // as in vim, deleting the last character stops
+            if (len.* == 0) self.command_len = null else len.* -= 1;
+        } else if (k.matches(vaxis.Key.enter, .{})) {
+            const command = self.command[0..len.*];
+            self.command_len = null;
+            return self.runCommand(command);
+        } else if (k.codepoint == vaxis.Key.tab) {
+            if (!k.mods.shift) self.completePath();
+        } else if (k.text) |text| {
+            for (text) |byte| if (len.* < self.command.len and byte >= ' ' and byte < 0x7f) {
+                self.command[len.*] = byte;
+                len.* += 1;
+            };
+        }
+        return true;
+    }
+
+    /// Runs a command typed in the editor, as vim's: `w` saves, as a file if
+    /// one is named, `e` opens a file, `new` starts a new one, and `q` quits,
+    /// with `!` letting unsaved blocks go or saving over another file, and
+    /// `wq` saves and quits, as `x` does when there is anything to save
+    fn runCommand(self: *Tui, line: []const u8) bool {
+        const trimmed = std.mem.trim(u8, line, " ");
+        const end = for (trimmed, 0..) |c, i| {
+            if (!std.ascii.isAlphabetic(c)) break i;
+        } else trimmed.len;
+        const command = trimmed[0..end];
+        const forced = end < trimmed.len and trimmed[end] == '!';
+        const argument = std.mem.trim(u8, trimmed[end + @intFromBool(forced) ..], " ");
+        const cf = self.options.colorforth.?;
+        const is = struct {
+            fn is(a: []const u8, b: []const u8) bool {
+                return std.mem.eql(u8, a, b);
+            }
+        }.is;
+
+        if (command.len == 0) return true;
+        if (is(command, "w") or is(command, "write") or is(command, "wq") or is(command, "x")) {
+            const quitting = !is(command, "w") and !is(command, "write");
+            if (is(command, "x") and argument.len == 0 and !cf.editor.unsaved()) return false;
+            const path = if (argument.len > 0) argument else cf.path orelse {
+                // and quits once it is named
+                self.startCommand(if (quitting) "wq " else "w ");
+                self.message = "name the new file";
+                return true;
+            };
+            const another = cf.path == null or !std.mem.eql(u8, cf.path.?, path);
+            if (another and !forced) if (Io.Dir.cwd().access(self.io, path, .{})) |_| {
+                self.message = self.printLasting("{s} exists: :{s}! saves over it", .{ std.fs.path.basename(path), command });
+                return true;
+            } else |_| {};
+            if (!self.save(path)) return true;
+            return !quitting;
+        }
+        if (is(command, "q") or is(command, "quit")) {
+            // as in vim, rather than asking twice
+            if (forced or !cf.editor.unsaved()) return false;
+            self.message = "blocks are not saved: :w saves them, and :q! quits";
+            return true;
+        }
+        if (is(command, "e") or is(command, "edit") or is(command, "new") or is(command, "enew")) {
+            const opening = is(command, "e") or is(command, "edit");
+            if (opening and argument.len == 0) {
+                self.message = "name the file to open, as :e blocks.cf";
+                return true;
+            }
+            if (!forced and cf.editor.unsaved()) {
+                self.message = self.printLasting("blocks are not saved: :w saves them, and :{s}! lets them go", .{command});
+                return true;
+            }
+            if (opening) self.open(argument) else self.newFile();
+            return true;
+        }
+        self.message = self.printLasting("no command {s}: :w, :e, :new or :q", .{command});
+        return true;
+    }
+
+    /// Completes the name of the file being typed in a command, as far as the
+    /// .cf files and directories it could be agree, or lists them when that
+    /// adds nothing
+    fn completePath(self: *Tui) void {
+        const line = self.command[0..self.command_len.?];
+        const start = if (std.mem.findScalarLast(u8, line, ' ')) |space| space + 1 else {
+            self.message = "complete a file's name after :e or :w";
+            return;
+        };
+        const typed = line[start..];
+        const slash = if (std.mem.findScalarLast(u8, typed, '/')) |i| i + 1 else 0;
+        const partial = typed[slash..];
+        const dir_path = if (slash == 0) "." else typed[0..slash];
+        var dir = Io.Dir.cwd().openDir(self.io, dir_path, .{ .iterate = true }) catch {
+            self.message = "no such directory";
+            return;
+        };
+        defer dir.close(self.io);
+
+        // the names it could be, with a slash after a directory, as many as
+        // fit in a message
+        var listed_buffer: [256]u8 = undefined;
+        var listed: Io.Writer = .fixed(&listed_buffer);
+        var common: [256]u8 = undefined;
+        var common_len: usize = 0;
+        var found: usize = 0;
+        var entries = dir.iterate();
+        while (entries.next(self.io) catch null) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, partial)) continue;
+            // hidden files only when asked for
+            if (partial.len == 0 and entry.name[0] == '.') continue;
+            // a link, or an entry the file system does not say the kind of,
+            // is what it leads to
+            const kind = switch (entry.kind) {
+                .sym_link, .unknown => if (dir.statFile(self.io, entry.name, .{})) |stat| stat.kind else |_| entry.kind,
+                else => entry.kind,
+            };
+            const directory = kind == .directory;
+            if (!directory and !std.mem.endsWith(u8, entry.name, ".cf")) continue;
+            if (entry.name.len + 1 > common.len) continue;
+            if (found == 0) {
+                @memcpy(common[0..entry.name.len], entry.name);
+                common_len = entry.name.len;
+                if (directory) {
+                    common[common_len] = '/';
+                    common_len += 1;
+                }
+            } else common_len = std.mem.indexOfDiff(u8, common[0..common_len], entry.name) orelse common_len;
+            found += 1;
+            listed.print("{s}{s} ", .{ entry.name, if (directory) "/" else "" }) catch {};
+        }
+        if (found == 0) {
+            self.message = "no .cf file or directory starts with that";
+            return;
+        }
+        if (common_len > partial.len and start + slash + common_len <= self.command.len) {
+            @memcpy(self.command[start + slash ..][0..common_len], common[0..common_len]);
+            self.command_len = @intCast(start + slash + common_len);
+            return;
+        }
+        const names = std.mem.trimEnd(u8, listed.buffered(), " ");
+        const ellipsis = "…";
+        if (names.len <= self.message_buffer.len) {
+            @memcpy(self.message_buffer[0..names.len], names);
+            self.message = self.message_buffer[0..names.len];
+        } else {
+            const cut = self.message_buffer.len - ellipsis.len;
+            @memcpy(self.message_buffer[0..cut], names[0..cut]);
+            @memcpy(self.message_buffer[cut..], ellipsis);
+            self.message = &self.message_buffer;
+        }
     }
 
     /// Handles keys typed into the console, returning false for keys it
@@ -1954,7 +2235,8 @@ const Tui = struct {
         const editor = cf.editor;
         const body_height = win.height - 1;
         const inside = win.child(.{ .height = body_height, .border = .{ .where = .all, .style = colors.focused } });
-        const title = self.print("6 colorforth  block {d}{s}  {s}", .{ editor.block, if (editor.unsaved()) " +" else "", std.fs.path.basename(cf.path) });
+        const file = if (cf.path) |path| std.fs.path.basename(path) else "new file";
+        const title = self.print("6 colorforth  block {d}{s}  {s}", .{ editor.block, if (editor.unsaved()) " +" else "", file });
         _ = win.child(.{ .x_off = 2, .width = win.width -| 3, .height = 1 }).printSegment(.{ .text = title, .style = .{ .bold = true } }, .{ .wrap = .none });
 
         if (editor.read_only) {
@@ -2021,10 +2303,22 @@ const Tui = struct {
 
     fn drawEditorStatus(self: *Tui, win: vaxis.Window) void {
         const editor = self.options.colorforth.?.editor;
+        if (self.command_len) |len| {
+            const typed = self.command[0..len];
+            // the end of a long command, to keep the cursor in view
+            const shown = typed[typed.len -| (win.width -| 2)..];
+            _ = win.print(&.{
+                .{ .text = ":" },
+                .{ .text = shown },
+            }, .{ .wrap = .none });
+            if (self.message) |message| _ = win.printSegment(.{ .text = message, .style = colors.literal }, .{ .col_offset = @intCast(@min(shown.len + 3, win.width)), .wrap = .none });
+            win.showCursor(@intCast(@min(shown.len + 1, win.width -| 1)), 0);
+            return;
+        }
         const hints: []const Hint = if (editor.mode == .insert)
             &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "ctrl+r y g w t v b", "color" }, .{ "esc", "done" } }
         else
-            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "?", "help" }, .{ "q", "quit" } };
+            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ ":", "w e new" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "?", "help" }, .{ "q", "quit" } };
         var segments: [4 + 2 * 12]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = if (editor.mode == .insert)
@@ -3306,4 +3600,109 @@ test "compiling colorForth in the editor starts the chip again with its code" {
     try t.press('L');
     try expect(try t.shows(29, "UnknownWord at nothing in block 0"));
     try expectEqualStrings("nothing", editor.current().?.text());
+}
+
+test "the editor's commands save, open and start files" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buffer: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&dir_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [4 * gasim.colorforth.block_size]u8 = @splat(0);
+    editor.open(&blocks, 0);
+    t.tui.options.colorforth = .{ .editor = editor, .path = null, .compressed = false };
+    try t.pressWith('6', .{ .alt = true });
+    try expect(try t.shows(0, "block 0  new file"));
+
+    const typeLine = struct {
+        fn typeLine(tt: *TestTui, line: []const u8) !void {
+            for (line) |c| try tt.press(c);
+            try tt.press(vaxis.Key.enter);
+        }
+    }.typeLine;
+
+    // saving a new file asks for its name
+    for ("iinc") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    try t.press('s');
+    try expectEqualStrings("w ", t.tui.command[0..t.tui.command_len.?]);
+    try expect(try t.shows(29, "name the new file"));
+    var path_buffer: [96]u8 = undefined;
+    const one = try std.fmt.bufPrint(&path_buffer, "{s}/one.cf", .{dir});
+    try typeLine(&t, one);
+    try expect(try t.shows(29, "saved 1 blocks"));
+    try expect(try t.shows(0, "block 0  one.cf"));
+    try expect(!editor.unsaved());
+    const saved = try tmp.dir.readFileAlloc(std.testing.io, "one.cf", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(saved);
+    try expectEqual(gasim.colorforth.block_size, saved.len);
+
+    // a new file, and opening one, let unsaved blocks go only with !
+    try t.press('a');
+    for (" dec") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    try typeLine(&t, ":new");
+    try expect(try t.shows(29, ":new! lets them go"));
+    try typeLine(&t, ":new!");
+    try expect(try t.shows(0, "block 0  new file"));
+    try expectEqual(0, editor.len);
+    try typeLine(&t, ":e");
+    try expect(try t.shows(29, "name the file to open"));
+    // tab completes the name of a .cf file
+    try t.press(':');
+    for ("e ") |c| try t.press(c);
+    for (dir) |c| try t.press(c);
+    for ("/o") |c| try t.press(c);
+    try t.press(vaxis.Key.tab);
+    var expected: [96]u8 = undefined;
+    try expectEqualStrings(try std.fmt.bufPrint(&expected, "e {s}", .{one}), t.tui.command[0..t.tui.command_len.?]);
+    try t.press(vaxis.Key.enter);
+    try expect(try t.shows(0, "block 0  one.cf"));
+    try expect(try t.shows(1, "inc"));
+
+    // saving as another file, which becomes the editor's
+    const two = try std.fmt.bufPrint(&path_buffer, ":w {s}/two.cf", .{dir});
+    try typeLine(&t, two);
+    try expect(try t.shows(0, "block 0  two.cf"));
+    try tmp.dir.access(std.testing.io, "two.cf", .{});
+    // a file that is not there is new, and esc and an unknown command do nothing
+    const three = try std.fmt.bufPrint(&path_buffer, ":e {s}/three.cf", .{dir});
+    try typeLine(&t, three);
+    try expect(try t.shows(29, "three.cf is new"));
+    try t.press(':');
+    try t.press('x');
+    try t.press(vaxis.Key.escape);
+    try expectEqual(null, t.tui.command_len);
+    try typeLine(&t, ":nonsense");
+    try expect(try t.shows(29, "no command nonsense"));
+    // saving as a file that is there takes !
+    const over = try std.fmt.bufPrint(&path_buffer, ":w {s}/one.cf", .{dir});
+    try typeLine(&t, over);
+    try expect(try t.shows(29, "one.cf exists: :w! saves over it"));
+    try expect(try t.shows(0, "block 0  three.cf"));
+    // a long command stops at the end of the line
+    try t.press(':');
+    for (0..300) |_| try t.press('a');
+    try expectEqual(t.tui.command.len, t.tui.command_len.?);
+    try t.press(vaxis.Key.escape);
+    // a file as big as the blocks the editor has opens
+    var full: [4 * gasim.colorforth.block_size]u8 = @splat(0);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "full.cf", .data = &full });
+    const full_path = try std.fmt.bufPrint(&path_buffer, ":e {s}/full.cf", .{dir});
+    try typeLine(&t, full_path);
+    try expect(try t.shows(29, "opened 4 blocks"));
+    // :q with blocks not saved asks for :q!, however often it is typed
+    try t.press('i');
+    try t.press('x');
+    try t.press(vaxis.Key.escape);
+    try typeLine(&t, ":q");
+    try expect(try t.shows(29, ":q! quits"));
+    try typeLine(&t, ":q");
+    try expect(try t.shows(29, ":q! quits"));
+    for (":q!") |c| try t.press(c);
+    try expect(!try t.tui.handle(.{ .key_press = .{ .codepoint = vaxis.Key.enter } }));
 }

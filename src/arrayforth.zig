@@ -243,6 +243,12 @@ pub const Session = struct {
         };
     }
 
+    /// Forgets the bins and host words compiled from colorForth blocks, as
+    /// when the blocks are of another file, keeping those of arrayForth 3
+    pub fn forgetColorForth(self: *Session) void {
+        self.interpreter.forgetColorLoad(null);
+    }
+
     /// Fails, as the end of a program does, if a definition was left
     /// without its ;
     pub fn finish(self: *Session) Error!void {
@@ -1148,11 +1154,17 @@ const Interpreter = struct {
     }
 
     /// Forgets the bins and host words that a session compiled from
-    /// `block`, keeping those of other blocks and those saved since
-    fn forgetColorLoad(self: *Interpreter, block: u32) void {
+    /// `block`, or with null from any block, keeping those of other blocks
+    /// and those saved since
+    fn forgetColorLoad(self: *Interpreter, block: ?u32) void {
+        const from = struct {
+            fn from(at: ?u32, wanted: ?u32) bool {
+                return if (wanted) |b| at == b else at != null;
+            }
+        }.from;
         var kept: u16 = 0;
         for (0..self.saved_count) |i| {
-            if (self.saved[i].block == block) continue;
+            if (from(self.saved[i].block, block)) continue;
             self.programs[kept] = self.programs[i];
             self.saved[kept] = self.saved[i];
             kept += 1;
@@ -1167,7 +1179,7 @@ const Interpreter = struct {
         var mark: u8 = 0;
         for (self.host_words[0..self.host_word_count], 0..) |word, i| {
             if (i == self.host_mark) mark = words;
-            if (word.block == block) continue;
+            if (from(word.block, block)) continue;
             std.mem.copyForwards(HostWord.Part, self.host_body[body..][0..word.len], self.host_body[word.start..][0..word.len]);
             self.host_words[words] = word;
             self.host_words[words].start = body;
@@ -3758,6 +3770,15 @@ test "a session compiles colorForth blocks again, replacing what they compiled" 
     try expectError(error.NoSuchBlock, session.loadColorForth(&one, 5));
     try expectEqual(colorforth.line(5, 1), diagnostic.line);
     try expectEqualStrings("", diagnostic.token);
+
+    // the blocks of another file forget all that colorForth compiled,
+    // keeping the bin from the forth panel
+    try session.loadColorForth(&two, 0);
+    session.forgetColorForth();
+    const kept = session.assembled().programs;
+    try expectEqual(1, kept.len);
+    try expectEqual(5, kept[0].node);
+    try expectEqual(0, session.interpreter.host_word_count);
 }
 
 /// Any source assembles or fails to, without crashing
