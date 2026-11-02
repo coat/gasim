@@ -1,0 +1,45 @@
+// GreenArrays' EVB002 evaluation board, its host chip, from its data book
+// (DB014) and the jumper settings it ships with (AN021 1.2). The target
+// chip, the SERDES link from host 701 to target 001, and jumpers J34 and
+// J35 between the chips' nodes 300, wait for boards of more than one chip.
+//
+// jumpers: on as shipped
+// serial: the FT232R USB serial chips, sending to the chip on rx and
+//   listening on tx, at 921600 baud, through J23 (DB014 5.2)
+// pulls: resistors to high or low
+.{
+    .name = "EVB002",
+    .chip = "ga144",
+    .jumpers = .{
+        // J23: USB serial lines to the host chip
+        .{ .name = "J23.1-2", .on = true }, // port A to 708.17
+        .{ .name = "J23.3-4", .on = true }, // port A from 708.1
+        .{ .name = "J23.5-6", .on = true }, // port B to 200.17
+        .{ .name = "J23.7-8", .on = true }, // port B from 100.17
+        // NO BOOT: holds 705.17 high, so that 705 does not boot from the
+        // SPI flash at reset (DB014 5.3.1, 5.6.3)
+        .{ .name = "J26", .on = true },
+    },
+    .serial = .{
+        // for the arrayForth 3 IDE, and async boot through 708's ROM
+        .{
+            .name = "A",
+            .rx = .{ .node = 708, .pin = 17, .jumper = "J23.1-2" },
+            .tx = .{ .node = 708, .pin = 1, .jumper = "J23.3-4" },
+        },
+        // for polyFORTH's or eForth's serial console
+        .{
+            .name = "B",
+            .rx = .{ .node = 200, .pin = 17, .jumper = "J23.5-6" },
+            .tx = .{ .node = 100, .pin = 17, .jumper = "J23.7-8" },
+        },
+    },
+    .pulls = .{
+        .{ .node = 705, .pin = 17, .high = true, .jumper = "J26" },
+        // the SPI flash's chip enable, CE- (DB014 1.1)
+        .{ .node = 705, .pin = 3, .high = true },
+        // the SRAM's CE- and WE-, inactive at reset (DB014 8.2.1)
+        .{ .node = 8, .pin = 1, .high = true },
+        .{ .node = 8, .pin = 3, .high = true },
+    },
+}
