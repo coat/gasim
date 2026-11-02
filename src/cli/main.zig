@@ -501,6 +501,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
     }
     if (why) logWaiting(chip);
+    if (chip.wiring.contention) |c| logContention(chip, c);
     if (uart_node) |node| {
         if (!uart.used) std.log.warn("node {d:0>3} never sent a byte on the UART or woke on its input", .{node});
     } else if (!console.used) {
@@ -656,6 +657,15 @@ fn logStats(chip: Chip, elapsed: Io.Duration) void {
         if (seconds > 0) steps / seconds / 1e6 else 0,
         @as(f64, @floatFromInt(time)) / 1e9,
     });
+}
+
+/// Warns of pins driven both ways on the same net, naming the nodes on it
+fn logContention(chip: Chip, contention: gasim.pins.Contention) void {
+    var buffer: [256]u8 = undefined;
+    var nodes: Io.Writer = .fixed(&buffer);
+    var it = chip.wiring.members(contention.net);
+    while (it.next()) |p| nodes.print(" {d:0>3}", .{chip.layout.nodeNumber(p.node)}) catch break;
+    std.log.warn("pins were driven both ways on the same net, of nodes{s}, first at {d}.{d:0>3} us", .{ nodes.buffered(), contention.time / 1_000_000, contention.time / 1000 % 1000 });
 }
 
 /// Logs what each node is waiting on, such as `node 001 waiting to read

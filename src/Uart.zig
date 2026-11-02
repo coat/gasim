@@ -63,19 +63,24 @@ pub fn init(baud: u32, output: *Io.Writer) Uart {
     return .{ .bit_time = 1_000_000_000_000 / @as(u64, baud), .output = output };
 }
 
-/// The UART as the device on its node's pins
-pub fn pinDevice(self: *Uart) Computer.PinDevice {
-    return .{ .context = self, .read = readPins, .written = writtenPins };
+/// The UART as the device driving the net of the pin it sends on
+pub fn rxDevice(self: *Uart) pins.Device {
+    return .{ .context = self, .drive = rxDrive };
 }
 
-fn readPins(context: *anyopaque, node: *Computer) void {
-    const self: *Uart = @ptrCast(@alignCast(context));
-    if (self.rxHigh(node.time)) node.pin_inputs |= self.rx_pin else node.pin_inputs &= ~self.rx_pin;
+/// The UART as the device listening on the net of the pin it receives on
+pub fn txDevice(self: *Uart) pins.Device {
+    return .{ .context = self, .changed = txChanged };
 }
 
-fn writtenPins(context: *anyopaque, node: *const Computer) void {
+fn rxDrive(context: *anyopaque, time: u64) pins.Drive {
     const self: *Uart = @ptrCast(@alignCast(context));
-    self.observe(node.time, node.pinHigh(self.tx_pin));
+    return .{ .strength = .strong, .high = self.rxHigh(time) };
+}
+
+fn txChanged(context: *anyopaque, time: u64, high: bool) void {
+    const self: *Uart = @ptrCast(@alignCast(context));
+    self.observe(time, high);
 }
 
 /// The level of the pin the device drives at `now`
@@ -103,7 +108,7 @@ pub fn nextRxEdge(self: *Uart, now: u64) ?u64 {
 
 /// Notes the level of the pin the node drives at `now`, receiving any byte
 /// it completes. Call it after each step of the node, and when it writes
-/// io, as `pinDevice` does.
+/// io, as `txDevice` is.
 pub fn observe(self: *Uart, now: u64, high: bool) void {
     if (self.receiving) |frame| {
         // sample the middle of each data bit, at the level held until now
@@ -282,7 +287,7 @@ test "input arriving on an idle line is sent from when it arrived" {
     try expect(!try uart.waitForInput(2000));
 }
 
-const Computer = @import("f18.zig").Computer;
+const pins = @import("pins.zig");
 const Console = @import("Console.zig");
 
 const std = @import("std");
