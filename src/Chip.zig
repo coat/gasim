@@ -12,6 +12,8 @@
 //!
 //! Nodes are configured as the chip's `Spec` says, with their ROM types,
 //! GPIO pins and data registers, the GA144's by default (`Spec.ga144`).
+//! Each pin is on a net, alone until wired to other pins or devices (see
+//! `wire`, `pull` and `pins`).
 //!
 //! Each node keeps its own time, as it executes. A node that waits on a port
 //! catches up with the node it transfers a word with, and the node furthest
@@ -52,10 +54,14 @@ console: ?struct { device: *Console, index: u16 } = null,
 /// words fed into a node, such as a boot stream
 feeder: ?struct { device: *Feeder, index: u16 } = null,
 /// the UART on a node's pins, and the index of that node
-uart: ?struct { device: *Uart, index: u16 } = null,
+/// and the pin it drives, an index into `wiring.pins`
+uart: ?struct { device: *Uart, index: u16, rx_pin: u16 } = null,
 /// when the UART's line next changes, for its node waiting on the pin while
 /// a node earlier in time runs (see `wakeOnPin`)
 pin_edge: ?u64 = null,
+/// the nodes' GPIO pins and the nets that join them to each other and to
+/// devices
+wiring: *gpio.Wiring,
 
 const Chip = @This();
 
@@ -381,8 +387,9 @@ pub fn init(gpa: Allocator, spec: Spec) Allocator.Error!Chip {
     const queue = try gpa.alloc(u16, count);
     errdefer gpa.free(queue);
     const queued = try gpa.alloc(bool, count);
+    errdefer gpa.free(queued);
 
-    var chip: Chip = .{ .layout = layout, .spec = spec, .nodes = nodes, .ports = ports, .queue = queue, .queued = queued };
+    var chip: Chip = .{ .layout = layout, .spec = spec, .nodes = nodes, .ports = ports, .queue = queue, .queued = queued, .wiring = undefined };
     @memset(ports, .{});
     @memset(queued, false);
     for (nodes, 0..) |*n, i| {
@@ -411,6 +418,7 @@ pub fn init(gpa: Allocator, spec: Spec) Allocator.Error!Chip {
         }
     }
     std.debug.assert(next_port == ports.len);
+    chip.wiring = try .create(gpa, nodes);
     return chip;
 }
 
@@ -419,6 +427,7 @@ pub fn deinit(self: *Chip, gpa: Allocator) void {
     gpa.free(self.ports);
     gpa.free(self.queue);
     gpa.free(self.queued);
+    self.wiring.destroy(gpa);
     self.* = undefined;
 }
 
@@ -449,6 +458,8 @@ pub fn restore(self: *Chip, snapshot: *const Snapshot) void {
     self.started = snapshot.started;
     self.hit = null;
     self.pin_edge = null;
+    // the pins' histories are of the future the chip went back from
+    self.wiring.reset();
     if (self.console) |console| console.device.port = snapshot.console_port;
     if (self.feeder) |feeder| {
         feeder.device.port = snapshot.feeder_port;
@@ -541,7 +552,10 @@ pub fn setUp(self: *Chip, descriptor: boot.Descriptor, programs: []const assembl
         const program = boot.findBin(programs, part.bin) orelse return error.NoSuchBin;
         @memcpy(n.mem[part.destination..][0..part.len], program.ram[part.source..][0..part.len]);
     }
-    if (descriptor.io) |io| n.io = io;
+    if (descriptor.io) |io| {
+        n.io = io;
+        if (n.pin_device) |device| device.written(device.context, n);
+    }
     if (descriptor.a) |a| n.a = a;
     if (descriptor.b) |b| n.b = @truncate(@as(u18, @bitCast(b)));
     for (descriptor.return_stack[0..descriptor.return_stack_len]) |value| n.return_stack.push(value);
@@ -628,8 +642,42 @@ pub fn attachUart(self: *Chip, uart: *Uart, number: u16) error{ NoSuchNode, NoPi
     const i = self.layout.index(number) orelse return error.NoSuchNode;
     const pins = self.nodes[i].pins;
     if (pins & uart.rx_pin == 0 or pins & uart.tx_pin == 0) return error.NoPins;
-    self.uart = .{ .device = uart, .index = i };
-    self.nodes[i].pin_device = uart.pinDevice();
+    const rx = self.wiring.pin(i, uart.rx_pin).?;
+    self.uart = .{ .device = uart, .index = i, .rx_pin = @intCast(rx - self.wiring.pins.ptr) };
+    self.wiring.nets[rx.net].device = uart.rxDevice();
+    self.wiring.nets[self.wiring.pin(i, uart.tx_pin).?.net].device = uart.txDevice();
+    self.wiring.hook(i);
+}
+
+/// a GPIO pin of a node, by its number, out of 17, 5, 3 and 1
+pub const PinRef = struct { node: u16, pin: u5 };
+
+/// Joins the nets of two pins, as a wire between them. Connect pins before
+/// stepping the chip.
+pub fn wire(self: *Chip, a: PinRef, b: PinRef) error{ NoSuchPin, TwoDevices, ConflictingPulls }!void {
+    const pa = try self.pinOf(a);
+    const pb = try self.pinOf(b);
+    try self.wiring.connect(pa, pb);
+    var it = self.wiring.members(pa.net);
+    while (it.next()) |p| self.wiring.hook(p.node);
+}
+
+/// Puts a resistor from a pin's net to high or low, which outweighs a
+/// node's weak pulldown but not a pin driven either way
+pub fn pull(self: *Chip, p: PinRef, high: bool) error{NoSuchPin}!void {
+    const pin = try self.pinOf(p);
+    self.wiring.nets[pin.net].pull = high;
+    var it = self.wiring.members(pin.net);
+    while (it.next()) |other| self.wiring.hook(other.node);
+}
+
+fn pinOf(self: *Chip, p: PinRef) error{NoSuchPin}!*gpio.Pin {
+    const i = self.layout.index(p.node) orelse return error.NoSuchPin;
+    switch (p.pin) {
+        17, 5, 3, 1 => {},
+        else => return error.NoSuchPin,
+    }
+    return self.wiring.pin(i, @as(u18, 1) << p.pin) orelse error.NoSuchPin;
 }
 
 /// feeds the next word, waking the node that takes it
@@ -685,7 +733,8 @@ fn wakeOnPin(self: *Chip) void {
     const uart = self.uart orelse return;
     const n = &self.nodes[uart.index];
     if (self.queued[uart.index] or !n.waitsOnPin()) return;
-    if (uart.device.rxHigh(n.time)) n.pin_inputs |= uart.device.rx_pin else n.pin_inputs &= ~uart.device.rx_pin;
+    const rx = uart.device.rx_pin;
+    if (self.wiring.level(self.wiring.pins[uart.rx_pin].net, n.time)) n.pin_inputs |= rx else n.pin_inputs &= ~rx;
     if (!n.pinAwake()) {
         const edge = uart.device.nextRxEdge(n.time) orelse return;
         if (self.queue_len > 0 and self.nodes[self.queue[0]].time < edge) {
@@ -696,6 +745,44 @@ fn wakeOnPin(self: *Chip) void {
     }
     uart.device.used = true;
     self.wake(uart.index);
+}
+
+/// Wakes the nodes waiting on pin 17 whose nets node `i` changed in its
+/// step, if the change is what they wait for, at the time of the change if
+/// they were behind it
+noinline fn wakeOnNets(self: *Chip, i: u16) void {
+    const wiring = self.wiring;
+    for (wiring.pinsOf(i)) |*p| {
+        const net = &wiring.nets[p.net];
+        if (net.changed == null) continue;
+        net.changed = null;
+        var it = wiring.members(p.net);
+        while (it.next()) |q| if (q.node != i and q.bit == 1 << 17) self.wakeOnNet(q.node);
+    }
+}
+
+/// Wakes node `j` if it waits on pin 17, on a shared net, and the net is
+/// as it waits for at its time, or at the first change the other pins on
+/// the net have made since that is: each change is looked at, so a pulse
+/// shorter than a step is not missed
+fn wakeOnNet(self: *Chip, j: u16) void {
+    const n = &self.nodes[j];
+    if (self.queued[j] or n.shared_pins & 1 << 17 == 0 or !n.waitsOnPin()) return;
+    const wiring = self.wiring;
+    const own = wiring.pin(j, 1 << 17).?;
+    var time = n.time;
+    while (true) {
+        if (wiring.level(own.net, time)) n.pin_inputs |= own.bit else n.pin_inputs &= ~own.bit;
+        if (n.pinAwake()) break;
+        var next: ?u64 = null;
+        var it = wiring.members(own.net);
+        while (it.next()) |q| if (q != own) if (q.history.nextChange(time)) |t| {
+            next = @min(next orelse t, t);
+        };
+        time = next orelse return;
+    }
+    n.time = time;
+    self.wake(j);
 }
 
 /// takes the node earliest in time from the queue
@@ -729,22 +816,24 @@ fn stepQueued(self: *Chip, i: u16) void {
     const fetching = n.state == .fetch;
     const retrying = n.suspended;
     const uart = if (self.uart) |u| if (u.index == i) u.device else null else null;
-    // the line and the frame being received at either end of the step, as
-    // well as when the node reads or writes io during it (`pin_device`)
-    if (uart) |u| {
-        if (u.rxHigh(n.time)) n.pin_inputs |= u.rx_pin else n.pin_inputs &= ~u.rx_pin;
-    }
+    // the devices on the pins' nets, told the nets' levels as the node
+    // writes io during the step (`pin_device`), and at its end, as time has
+    // passed for them
+    const wired = n.pin_device != null;
     n.step();
     self.steps += 1;
     self.started = true;
-    if (uart) |u| {
-        u.observe(n.time, n.pinHigh(u.tx_pin));
-        // a read of the wakeup pin, not a device on its port, that did not
-        // have to wait for it
-        if (n.wake_port) |w| if (n.transfers.read.contains(w) and n.ports[@backingInt(w)].port == null) {
-            u.used = true;
-        };
+    if (wired) {
+        self.wiring.tell(i);
+        self.wakeOnNets(i);
+        // a change that a node ahead of it made after the time it waits from
+        if (n.waitsOnPin()) self.wakeOnNet(i);
     }
+    // a read of the wakeup pin, not a device on its port, that did not have
+    // to wait for it
+    if (uart) |u| if (n.wake_port) |w| if (n.transfers.read.contains(w) and n.ports[@backingInt(w)].port == null) {
+        u.used = true;
+    };
     if (!n.suspended) self.wake(i);
     // unless the node is still waiting for a word to execute, or still
     // waiting on the same port
@@ -1371,6 +1460,119 @@ test "waits for input that has not arrived" {
     try expectEqualStrings("k", writer.buffered());
 }
 
+/// a chip of two nodes, each with pin 17, wired together, running `source`
+fn wiredPair(source: []const u8) !Chip {
+    var chip: Chip = try .init(std.testing.allocator, .{
+        .rows = 1,
+        .columns = 2,
+        .nodes = &.{ .{ .node = 0, .pins = &.{17} }, .{ .node = 1, .pins = &.{17} } },
+    });
+    errdefer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [2]assembler.Program = undefined;
+    for (try assembler.assembleNodesFor(&chip.spec, source, &programs, &diagnostic)) |program| try chip.load(program);
+    try chip.wire(.{ .node = 0, .pin = 17 }, .{ .node = 1, .pin = 17 });
+    return chip;
+}
+
+test "a node reads a pin another node drives as it was at its time" {
+    // 000 drives the net high at the end of a 2.4 us loop, in one step,
+    // while 001 reads it at about 30 ns and again at about 4.8 us
+    var chip = try wiredPair(
+        \\ io b! 0x30000 999 for unext !b left b! @b
+        \\ node 001 9 for unext io b! @b 1999 for unext @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    const n = chip.node(1).?;
+    try expectEqual(0, @as(u18, @bitCast(n.data_stack.s)) & 1 << 17);
+    try expectEqual(1 << 17, @as(u18, @bitCast(n.data_stack.t)) & 1 << 17);
+    try expectEqual(null, chip.wiring.contention);
+}
+
+test "a node waiting on pin 17 wakes as another node drives it" {
+    var chip = try wiredPair(
+        \\ io b! 0x30000 999 for unext !b left b! @b
+        \\ node 001 up a! @ drop io b! @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    const n = chip.node(1).?;
+    try expectEqual(1 << 17, @as(u18, @bitCast(n.data_stack.t)) & 1 << 17);
+    // at the time 000 drove it, not before
+    try expect(n.time >= 2_400_000 and n.time < 2_500_000);
+}
+
+test "a pull-up outweighs a pin's weak pulldown and a pin no one drives, not one driven low" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1, .nodes = &.{.{ .node = 0, .pins = &.{17} }} });
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    // as after reset, weakly pulled down; then not driven; then low
+    try chip.load(try assembler.assemble("io b! @b 0 !b @b 0x20000 !b @b left b! @b", &diagnostic));
+    try chip.pull(.{ .node = 0, .pin = 17 }, true);
+    try chip.run();
+    const n = chip.node(0).?;
+    try expectEqual(1 << 17, @as(u18, @bitCast(n.data_stack.stack[n.data_stack.index])) & 1 << 17);
+    try expectEqual(1 << 17, @as(u18, @bitCast(n.data_stack.s)) & 1 << 17);
+    try expectEqual(0, @as(u18, @bitCast(n.data_stack.t)) & 1 << 17);
+}
+
+test "a node waiting on pin 17 wakes at a change a node ahead of it made" {
+    // 000 drives the net high at about 2.4 us in one long step, before 001,
+    // behind it, gets to wait on its pin
+    var chip = try wiredPair(
+        \\ io b! 0x30000 999 for unext !b left b! @b
+        \\ node 001 19 for unext up a! @ drop io b! @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    const n = chip.node(1).?;
+    try expectEqual(1 << 17, @as(u18, @bitCast(n.data_stack.t)) & 1 << 17);
+    try expect(n.time >= 2_400_000 and n.time < 2_500_000);
+}
+
+test "a node waiting on pin 17 wakes at a pulse shorter than a step" {
+    // 000 drives the net high, then low, in one word
+    var chip = try wiredPair(
+        \\ io b! 0x20000 0x30000 999 for unext !b !b left b! @b
+        \\ node 001 up a! @ drop left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    const n = chip.node(1).?;
+    try expect(!n.waitsOnPin());
+    try expect(n.time >= 2_400_000 and n.time < 2_500_000);
+}
+
+test "going back to a snapshot forgets the pins' future" {
+    var chip = try wiredPair(
+        \\ io b! 0x30000 999 for unext !b left b! @b
+        \\ node 001 up a! @ drop io b! @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    var snapshot: Snapshot = try .init(std.testing.allocator, chip.layout);
+    defer snapshot.deinit(std.testing.allocator);
+    chip.save(&snapshot);
+    try chip.run();
+    const woken = chip.node(1).?.time;
+    chip.restore(&snapshot);
+    try chip.run();
+    try expectEqual(woken, chip.node(1).?.time);
+    try expectEqual(1 << 17, @as(u18, @bitCast(chip.node(1).?.data_stack.t)) & 1 << 17);
+}
+
+test "two nodes driving a net both ways is contention" {
+    var chip = try wiredPair(
+        \\ io b! 0x30000 !b left b! @b
+        \\ node 001 io b! 0x20000 !b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    try expect(chip.wiring.contention != null);
+    try expectError(error.NoSuchPin, chip.wire(.{ .node = 0, .pin = 17 }, .{ .node = 1, .pin = 5 }));
+    try expectError(error.NoSuchPin, chip.pull(.{ .node = 0, .pin = 20 }, true));
+}
+
 test attachUart {
     var chip: Chip = try .init(std.testing.allocator, .ga144);
     defer chip.deinit(std.testing.allocator);
@@ -1791,6 +1993,7 @@ const Computer = f18.Computer;
 const Instruction = f18.Instruction;
 const Word = f18.Word;
 const Opcode = @import("opcodes.zig").Opcode;
+const gpio = @import("pins.zig");
 const port = @import("port.zig");
 const Direction = port.Direction;
 const Port = port.Port;

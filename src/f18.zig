@@ -186,8 +186,9 @@ pub const Computer = struct {
     ports: [4]port.Link,
     /// io bits of the GPIO pins this node has, out of 17, 5, 3 and 1
     pins: u18,
-    /// levels of the pins when the node is not driving them, such as from a
-    /// device. Pins are pulled low after reset.
+    /// levels of the pins when the node is not driving them, and always of
+    /// the pins on nets with something else on them (`shared_pins`), as the
+    /// nets are. Pins are pulled low after reset.
     pin_inputs: u18,
     /// the data register, for nodes that have one
     data: ?Word,
@@ -199,6 +200,10 @@ pub const Computer = struct {
     /// a device on the pins, which sees them as the node reads and writes
     /// io, at its time then, as a word can run a long `unext` loop first
     pin_device: ?PinDevice = null,
+    /// io bits of the pins on a net with something else on it, whose levels
+    /// are in `pin_inputs` even while the node drives them, as the net may
+    /// be driven otherwise
+    shared_pins: u18 = 0,
 
     state: State = .fetch,
     // keeps track of current slot to help address decoding
@@ -214,11 +219,12 @@ pub const Computer = struct {
     /// picoseconds of execution, which waiting on a port does not add to
     time: u64,
 
-    /// A device on a node's pins, told when the node reads io or a port,
-    /// to set `pin_inputs` as they are at the node's time, and when it
-    /// writes io, which can change the pins it drives. A read of a port
-    /// that catches up with the writer's time does so after the word, so
-    /// io later in the same word is at the time before.
+    /// The nets of a node's pins (see `pins.Wiring`), told when the node
+    /// reads io or a port, to set `pin_inputs` as they are at the node's
+    /// time, and when it writes io, which can change how it drives its
+    /// pins. A read of a port that catches up with the writer's time does
+    /// so after the word, so io later in the same word is at the time
+    /// before.
     pub const PinDevice = struct {
         context: *anyopaque,
         read: *const fn (context: *anyopaque, node: *Computer) void,
@@ -464,8 +470,9 @@ pub const Computer = struct {
     }
 
     /// The level of a GPIO pin, given by its io bit: driven by the node, or
-    /// following its input when not
+    /// following its input when not, or as its net is (`shared_pins`)
     pub fn pinHigh(self: *const Computer, bit: u18) bool {
+        if (self.shared_pins & bit != 0) return self.pin_inputs & bit != 0;
         const written: u18 = @bitCast(self.io);
         // a pin's two control bits start at its io bit: 10 drives it low, 11
         // high, and otherwise it follows its input
