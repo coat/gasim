@@ -36,6 +36,7 @@ fn init(win: *dvui.Window) !void {
     else
         null else null;
     try ui.start(win.gpa, dirs);
+    files.examples_dir = examplesDir(arena, environ, if (dirs) |d| d.data else null);
     if (configDir(arena, environ)) |config| style.load(win, try std.fs.path.join(arena, &.{ config, "gui.json" }));
 
     const args = try process.minimal.args.toSlice(arena);
@@ -81,6 +82,28 @@ fn dataDir(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u
         std.fs.path.join(arena, &.{ environ.get("LOCALAPPDATA") orelse return null, "gasim" }) catch null
     else
         std.fs.path.join(arena, &.{ environ.get("HOME") orelse return null, ".local", "share", "gasim" }) catch null;
+}
+
+/// where the examples are: beside gasim-gui, as in a release; in
+/// share/gasim beside its bin, as installed; or in gasim under XDG_DATA_HOME,
+/// beside the ROM, or under one of XDG_DATA_DIRS
+fn examplesDir(arena: Allocator, environ: *const std.process.Environ.Map, data: ?[]const u8) ?[]const u8 {
+    var candidates: std.ArrayList([]const u8) = .empty;
+    if (std.process.executableDirPathAlloc(dvui.io, arena)) |bin| {
+        candidates.append(arena, std.fs.path.join(arena, &.{ bin, "examples" }) catch return null) catch return null;
+        candidates.append(arena, std.fs.path.join(arena, &.{ bin, "..", "share", "gasim", "examples" }) catch return null) catch return null;
+    } else |_| {}
+    if (data) |d| candidates.append(arena, std.fs.path.join(arena, &.{ d, "examples" }) catch return null) catch return null;
+    if (builtin.os.tag != .windows) {
+        var shared = std.mem.tokenizeScalar(u8, environ.get("XDG_DATA_DIRS") orelse "/usr/local/share:/usr/share", ':');
+        while (shared.next()) |dir| candidates.append(arena, std.fs.path.join(arena, &.{ dir, "gasim", "examples" }) catch return null) catch return null;
+    }
+    for (candidates.items) |dir| {
+        var opened = Io.Dir.cwd().openDir(dvui.io, dir, .{}) catch continue;
+        opened.close(dvui.io);
+        return dir;
+    }
+    return null;
 }
 
 /// where gasim keeps its state, as the history of gasim aforth: in gasim under

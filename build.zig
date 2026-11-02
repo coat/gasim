@@ -49,6 +49,15 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // the examples, to try gasim on, in share/gasim beside bin, where the
+    // GUI looks for them for its Examples menu
+    b.installDirectory(.{
+        .source_dir = b.path("examples"),
+        .install_dir = .prefix,
+        .install_subdir = "share/gasim/examples",
+        .include_extensions = example_extensions,
+    });
+
     const run_cmd = b.addRunArtifact(exe);
 
     run_cmd.step.dependOn(b.getInstallStep());
@@ -96,7 +105,7 @@ pub fn build(b: *std.Build) void {
         .source_dir = b.path("examples"),
         .install_dir = .prefix,
         .install_subdir = "web/examples",
-        .include_extensions = &.{ ".ga", ".af", ".cf" },
+        .include_extensions = example_extensions,
     }).step);
     // the ROM is GreenArrays', and not in the repository: the page looks for
     // ga144.txt beside it, and otherwise asks for one
@@ -152,7 +161,8 @@ pub fn build(b: *std.Build) void {
             }) },
             .{ .name = "dvui", .module = dvui.module("dvui_sdl3") },
             .{ .name = "build_options", .module = gui_options.createModule() },
-            // embedded, for its Examples menu
+            // the examples' names, for its Examples menu, which reads
+            // them from where they are installed
             .{ .name = "examples", .module = b.createModule(.{ .root_source_file = b.path("examples/examples.zig") }) },
             .{ .name = "icons", .module = b.createModule(.{ .root_source_file = icons.add("icons.zig", icons_zig) }) },
         };
@@ -166,8 +176,11 @@ pub fn build(b: *std.Build) void {
         const gui = b.addExecutable(.{ .name = "gasim-gui", .root_module = gui_mod });
         const install_gui = b.addInstallArtifact(gui, .{});
         b.getInstallStep().dependOn(&install_gui.step);
-        const run_gui = b.addRunArtifact(gui);
-        run_gui.step.dependOn(&install_gui.step);
+        // the installed one, not the one in the cache, as it finds the
+        // examples in share/gasim beside its bin
+        const run_gui = std.Build.Step.Run.create(b, "run gasim-gui");
+        run_gui.addFileArg(.{ .relative = .{ .base = .install_prefix, .sub_path = b.fmt("bin/{s}", .{gui.out_filename}) } });
+        run_gui.step.dependOn(b.getInstallStep());
         run_gui.addPassthruArgs();
         run_gui_step.dependOn(&run_gui.step);
 
@@ -177,7 +190,10 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = gui_imports,
         }) });
-        test_gui_step.dependOn(&b.addRunArtifact(gui_tests).step);
+        const run_gui_tests = b.addRunArtifact(gui_tests);
+        // where they read the examples from
+        run_gui_tests.setCwd(b.path("."));
+        test_gui_step.dependOn(&run_gui_tests.step);
         addMacSdk(b, &.{ gui_mod, gui_tests.root_module }, target.result);
     }
 
@@ -336,6 +352,9 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&install_coverage.step);
     }
 }
+
+/// the examples' files, as they are installed: not examples.zig or test.zig
+const example_extensions: []const []const u8 = &.{ ".ga", ".af", ".cf" };
 
 /// the icons in web/icons the GUI draws too
 const gui_icons = [_][]const u8{

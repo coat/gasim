@@ -20,6 +20,12 @@ github:coat/gasim#gui` for the GUI.
 `gasim-gui` is a desktop GUI, like the web version, in each release beside
 `gasim`. On Linux it needs glibc, and X11 or Wayland.
 
+The examples come in `examples` beside the binaries in a release, and in
+`share/gasim/examples` in the Nix package and `zig build`'s `zig-out`. The
+GUI's Examples menu reads them from there, or from `gasim/examples` under
+`XDG_DATA_HOME` (`~/.local/share`, or `LOCALAPPDATA` on Windows) or
+`XDG_DATA_DIRS`, and is left out if they are nowhere.
+
 ### Fonts and colors
 
 `gasim-gui` reads its fonts and colors from `gasim/gui.json` under
