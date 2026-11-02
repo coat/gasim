@@ -1,17 +1,21 @@
-//! What a board puts around its chip: serial ports wired to the chip's pins,
-//! pull resistors, wires between pins, and the jumpers that connect some of
-//! them. The EVB002's is `boards/evb002.zon`; other boards are described the
-//! same way, in a board file read on the host side (see `parse`). A board
-//! has one chip for now.
+//! What a board puts around its chips: serial ports wired to the chips'
+//! pins, pull resistors, wires between pins, SERDES links between chips,
+//! and the jumpers that connect some of them. The EVB002's is
+//! `boards/evb002.zon`; other boards are described the same way, in a board
+//! file read on the host side (see `parse`). A board's chips are alike, and
+//! chip k's nodes are numbered k.yxx, as in `Chip.Layout`.
 
 /// for messages, such as EVB002
 name: []const u8 = "",
-/// the chip's file, relative to the board's, or ga144 for the GA144
+/// the chips' file, relative to the board's, or ga144 for the GA144
 chip: []const u8 = "ga144",
+/// how many chips there are of it
+chips: u8 = 1,
 jumpers: []const Jumper = &.{},
 serial: []const Serial = &.{},
 pulls: []const Pull = &.{},
 wires: []const Wire = &.{},
+serdes: []const Link = &.{},
 
 const Board = @This();
 
@@ -22,17 +26,33 @@ pub const Jumper = struct {
     on: bool,
 };
 
-/// A GPIO pin of the chip, connected only while `jumper` is on, if it names
-/// one
+/// A GPIO pin of a chip, the first unless `chip` says, connected only while
+/// `jumper` is on, if it names one
 pub const Terminal = struct {
+    chip: u8 = 0,
     node: u16,
     pin: u5,
     jumper: ?[]const u8 = null,
 
-    fn ref(self: Terminal) Chip.PinRef {
-        return .{ .node = self.node, .pin = self.pin };
+    pub fn ref(self: Terminal) Chip.PinRef {
+        return .{ .node = number(self.chip, self.node), .pin = self.pin };
     }
 };
+
+/// A node of a chip, the first unless `chip` says
+pub const Node = struct {
+    chip: u8 = 0,
+    node: u16,
+
+    pub fn number(self: Node) u16 {
+        return Board.number(self.chip, self.node);
+    }
+};
+
+/// the node number of node `node` of chip `chip`, such as 10708 for 1.708
+fn number(chip: u8, node: u16) u16 {
+    return @as(u16, chip) *| Chip.Layout.chip_numbers +| node;
+}
 
 /// A serial port, such as a USB serial chip's, which sends on `rx`, the
 /// chip's pin that receives, and listens on `tx`, the one that sends
@@ -45,10 +65,15 @@ pub const Serial = struct {
 
 /// A resistor from a pin to high or low
 pub const Pull = struct {
+    chip: u8 = 0,
     node: u16,
     pin: u5,
     high: bool,
     jumper: ?[]const u8 = null,
+
+    fn terminal(self: Pull) Terminal {
+        return .{ .chip = self.chip, .node = self.node, .pin = self.pin, .jumper = self.jumper };
+    }
 };
 
 /// A wire between two pins, through a jumper if `jumper` names one
@@ -56,6 +81,12 @@ pub const Wire = struct {
     a: Terminal,
     b: Terminal,
     jumper: ?[]const u8 = null,
+};
+
+/// A SERDES link between two SERDES nodes, usually of different chips
+pub const Link = struct {
+    a: Node,
+    b: Node,
 };
 
 pub const evb002: Board = @import("boards/evb002.zon");
@@ -86,6 +117,8 @@ pub fn serialPort(self: Board, name: []const u8) ?Serial {
 }
 
 pub const Error = error{
+    /// no chips, or more than node numbers can tell apart
+    InvalidChips,
     NoSuchJumper,
     JumperListedTwice,
     SerialListedTwice,
@@ -98,6 +131,13 @@ pub const Error = error{
     /// a wire to a serial port's pin, which the port's input would not
     /// wake the other pin's node through yet
     SerialPinWired,
+    NoSuchNode,
+    /// a SERDES link's node that has no SERDES: no data register, as a
+    /// SERDES ROM's node has, pins, or a neighbour on its up port
+    NotSerdes,
+    /// a node on two SERDES links, or a link to itself
+    SerdesListedTwice,
+    TooManySerdes,
 };
 
 /// what `check` found at fault, for messages
@@ -105,12 +145,16 @@ pub const Fault = union(enum) {
     none,
     name: []const u8,
     pin: Chip.PinRef,
+    node: u16,
+    /// a SERDES link, by its nodes
+    link: [2]u16,
 };
 
 /// Checks what a board file cannot say by its types alone, against the
 /// chip it is for, reporting what is at fault in `fault`
 pub fn check(self: Board, spec: Spec, fault: *Fault) Error!void {
     fault.* = .none;
+    if (self.chips == 0 or self.chips > Chip.Layout.max_chips) return error.InvalidChips;
     for (self.jumpers, 0..) |j, k| {
         fault.* = .{ .name = j.name };
         for (self.jumpers[0..k]) |other| if (std.mem.eql(u8, other.name, j.name)) return error.JumperListedTwice;
@@ -121,28 +165,45 @@ pub fn check(self: Board, spec: Spec, fault: *Fault) Error!void {
         if (s.baud == 0) return error.NoBaud;
         try self.checkTerminal(spec, s.rx, fault);
         try self.checkTerminal(spec, s.tx, fault);
-        if (s.rx.node == s.tx.node and s.rx.pin == s.tx.pin) return error.SerialPinsTheSame;
+        if (std.meta.eql(s.rx.ref(), s.tx.ref())) return error.SerialPinsTheSame;
     }
     for (self.pulls, 0..) |p, k| {
-        try self.checkTerminal(spec, .{ .node = p.node, .pin = p.pin, .jumper = p.jumper }, fault);
-        for (self.pulls[0..k]) |other| if (other.node == p.node and other.pin == p.pin) return error.PullListedTwice;
+        try self.checkTerminal(spec, p.terminal(), fault);
+        for (self.pulls[0..k]) |other| if (std.meta.eql(other.terminal().ref(), p.terminal().ref())) return error.PullListedTwice;
     }
     for (self.wires) |w| {
         try self.checkTerminal(spec, w.a, fault);
         try self.checkTerminal(spec, w.b, fault);
         try self.checkJumper(w.jumper, fault);
-        if (w.a.node == w.b.node and w.a.pin == w.b.pin) return error.WireToItself;
+        if (std.meta.eql(w.a.ref(), w.b.ref())) return error.WireToItself;
         for ([_]Terminal{ w.a, w.b }) |t| for (self.serial) |s| {
             fault.* = .{ .pin = t.ref() };
-            if (t.node == s.rx.node and t.pin == s.rx.pin or t.node == s.tx.node and t.pin == s.tx.pin) return error.SerialPinWired;
+            if (std.meta.eql(t.ref(), s.rx.ref()) or std.meta.eql(t.ref(), s.tx.ref())) return error.SerialPinWired;
         };
     }
+    if (self.serdes.len > Chip.max_serdes) return error.TooManySerdes;
+    for (self.serdes, 0..) |link, k| for ([_]Node{ link.a, link.b }) |n| {
+        fault.* = .{ .node = n.number() };
+        if (n.chip >= self.chips or n.node >= Chip.Layout.chip_numbers) return error.NoSuchNode;
+        const i = self.layout(spec).index(n.number()) orelse return error.NoSuchNode;
+        if (!spec.hasData(n.node) or spec.pins(n.node) != 0 or self.layout(spec).neighbour(i, .up) != null) return error.NotSerdes;
+        if (link.a.number() == link.b.number()) return error.SerdesListedTwice;
+        for (self.serdes[0..k]) |other| if (other.a.number() == n.number() or other.b.number() == n.number()) return error.SerdesListedTwice;
+    };
     fault.* = .none;
+}
+
+/// the layout of the board's chips, of `spec`
+pub fn layout(self: Board, spec: Spec) Chip.Layout {
+    var l = spec.layout();
+    l.chips = self.chips;
+    return l;
 }
 
 fn checkTerminal(self: Board, spec: Spec, t: Terminal, fault: *Fault) Error!void {
     fault.* = .{ .pin = t.ref() };
-    if (spec.layout().index(t.node) == null or t.pin > 17 or spec.pins(t.node) & @as(u18, 1) << t.pin == 0) return error.NoSuchPin;
+    if (t.chip >= self.chips or t.node >= Chip.Layout.chip_numbers) return error.NoSuchPin;
+    if (self.layout(spec).index(t.ref().node) == null or t.pin > 17 or spec.pins(t.node) & @as(u18, 1) << t.pin == 0) return error.NoSuchPin;
     try self.checkJumper(t.jumper, fault);
 }
 
@@ -153,16 +214,20 @@ fn checkJumper(self: Board, name: ?[]const u8, fault: *Fault) Error!void {
     return error.NoSuchJumper;
 }
 
-/// Puts the board around `chip`, whose spec it was checked against: its
-/// pulls and wires, and `uart` on serial port `port`, each through jumpers
-/// as `settings` set them. The other serial ports are left unconnected, as
-/// their lines idle: low on a line inverted as a USB serial chip's is,
-/// which a pin's pulldown reads as.
-/// What fails is reported in `fault`.
-pub fn apply(self: Board, chip: *Chip, uart: ?*Uart, port: ?Serial, settings: []const Setting, fault: *Fault) error{ NoSuchPin, TwoDevices, ConflictingPulls }!void {
+/// Puts the board around `chip`, made with its chips of the spec it was
+/// checked against (`Chip.initChips`): its SERDES links, pulls and wires,
+/// and `uart` on serial port `port`, each through jumpers as `settings` set
+/// them. The other serial ports are left unconnected, as their lines idle:
+/// low on a line inverted as a USB serial chip's is, which a pin's pulldown
+/// reads as. What fails is reported in `fault`.
+pub fn apply(self: Board, chip: *Chip, uart: ?*Uart, port: ?Serial, settings: []const Setting, fault: *Fault) error{ NoSuchPin, TwoDevices, ConflictingPulls, NoSuchNode, NotSerdes, PortConnected, Full }!void {
+    for (self.serdes) |link| {
+        fault.* = .{ .link = .{ link.a.number(), link.b.number() } };
+        try chip.attachSerdes(link.a.number(), link.b.number());
+    }
     for (self.pulls) |p| if (self.jumperOn(p.jumper, settings)) {
-        fault.* = .{ .pin = .{ .node = p.node, .pin = p.pin } };
-        try chip.pull(.{ .node = p.node, .pin = p.pin }, p.high);
+        fault.* = .{ .pin = p.terminal().ref() };
+        try chip.pull(p.terminal().ref(), p.high);
     };
     for (self.wires) |w| if (self.jumperOn(w.jumper, settings) and self.jumperOn(w.a.jumper, settings) and self.jumperOn(w.b.jumper, settings)) {
         fault.* = .{ .pin = w.b.ref() };
@@ -192,6 +257,7 @@ test evb002 {
     try std.testing.expect(!evb002.jumperOn("J26", &.{.{ .name = "J26", .on = false }}));
     try std.testing.expectEqual(708, evb002.serialPort("A").?.rx.node);
     try std.testing.expectEqual(100, evb002.serialPort("B").?.tx.node);
+    try std.testing.expectEqual(10708, evb002.serialPort("C").?.rx.ref().node);
 }
 
 test "the EVB002's board file parses at run time as at compile time" {
@@ -222,10 +288,26 @@ test check {
         .wires = &.{.{ .a = .{ .node = 100, .pin = 17 }, .b = .{ .node = 708, .pin = 17 } }},
     };
     try std.testing.expectError(error.SerialPinWired, wired.check(.ga144, &fault));
+    try std.testing.expectError(error.InvalidChips, (Board{ .chips = 0 }).check(.ga144, &fault));
+    const other_chip: Board = .{ .pulls = &.{.{ .chip = 1, .node = 705, .pin = 17, .high = true }} };
+    try std.testing.expectError(error.NoSuchPin, other_chip.check(.ga144, &fault));
+    try std.testing.expectEqual(Fault{ .pin = .{ .node = 10705, .pin = 17 } }, fault);
+    try (Board{ .chips = 2, .pulls = other_chip.pulls }).check(.ga144, &fault);
+    const not_serdes: Board = .{ .chips = 2, .serdes = &.{.{ .a = .{ .node = 701 }, .b = .{ .chip = 1, .node = 708 } }} };
+    try std.testing.expectError(error.NotSerdes, not_serdes.check(.ga144, &fault));
+    try std.testing.expectEqual(Fault{ .node = 10708 }, fault);
+    const no_chip: Board = .{ .chips = 2, .serdes = &.{.{ .a = .{ .node = 701 }, .b = .{ .chip = 2, .node = 1 } }} };
+    try std.testing.expectError(error.NoSuchNode, no_chip.check(.ga144, &fault));
+    // a node number past a chip's, which would be another chip's
+    const past: Board = .{ .chips = 2, .pulls = &.{.{ .node = 10705, .pin = 17, .high = true }} };
+    try std.testing.expectError(error.NoSuchPin, past.check(.ga144, &fault));
+    const twice: Board = .{ .chips = 3, .serdes = &.{ .{ .a = .{ .node = 701 }, .b = .{ .chip = 1, .node = 1 } }, .{ .a = .{ .chip = 2, .node = 1 }, .b = .{ .node = 701 } } } };
+    try std.testing.expectError(error.SerdesListedTwice, twice.check(.ga144, &fault));
+    try std.testing.expectEqual(Fault{ .node = 701 }, fault);
 }
 
 test "the EVB002 sends what node 708 sends on USB port A" {
-    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
     defer chip.deinit(std.testing.allocator);
     var programs: [1]assembler.Program = undefined;
     var diagnostic: assembler.Diagnostic = .{};
@@ -246,7 +328,7 @@ test "the EVB002 sends what node 708 sends on USB port A" {
 }
 
 test "the EVB002's USB port B sends to node 200's pin 17" {
-    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
     defer chip.deinit(std.testing.allocator);
     var diagnostic: assembler.Diagnostic = .{};
     // node 200, on the west edge, waits on pin 17 through left
@@ -265,7 +347,7 @@ test "the EVB002's USB port B sends to node 200's pin 17" {
 }
 
 test "a jumper off leaves its line unconnected" {
-    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
     defer chip.deinit(std.testing.allocator);
     var programs: [1]assembler.Program = undefined;
     var diagnostic: assembler.Diagnostic = .{};
@@ -279,6 +361,47 @@ test "a jumper off leaves its line unconnected" {
     try chip.run();
     try std.testing.expectEqualStrings("", output.buffered());
     try std.testing.expect(!chip.node(705).?.pinHigh(1 << 17));
+}
+
+test "the EVB002's USB port C sends what target node 708 sends" {
+    var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
+    defer chip.deinit(std.testing.allocator);
+    var programs: [1]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    for (try assembler.assembleNodes("node 1.708" ++ test_uart["node 708".len..], &programs, &diagnostic)) |program| try chip.load(program);
+
+    var buffer: [32]u8 = undefined;
+    var output: std.Io.Writer = .fixed(&buffer);
+    var uart: Uart = .init(921600, &output);
+    var fault: Fault = .none;
+    try evb002.apply(&chip, &uart, evb002.serialPort("C"), &.{}, &fault);
+    try chip.run();
+    try std.testing.expectEqualStrings("Hi\n", output.buffered());
+    // the target's 705.17 is pulled up, J26 or not
+    try std.testing.expect(chip.node(10705).?.pinHigh(1 << 17));
+}
+
+test "the EVB002's J35 joins the chips' 300.17, and SERDES their 701 and 001" {
+    for ([_]bool{ true, false }) |on| {
+        var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
+        defer chip.deinit(std.testing.allocator);
+        var programs: [4]assembler.Program = undefined;
+        var diagnostic: assembler.Diagnostic = .{};
+        // the host's 300 drives its pin 17 high, and the target's waits for
+        // it through left; the host's 701 sends 5 to the target's 001
+        for (try assembler.assembleNodes(
+            \\node 300 io b! 0x30000 !b right b! @b
+            \\node 1.300 left b! @b right b! @b
+            \\node 701 0x141 a! 5 ! io b! 0x20000 !b left b! @b
+            \\node 1.001 up b! @b left b! @b
+        , &programs, &diagnostic)) |program| try chip.load(program);
+        var fault: Fault = .none;
+        try evb002.apply(&chip, null, null, &.{.{ .name = "J35", .on = on }}, &fault);
+        try chip.run();
+        // past the wait on its pin, waiting on right, or still on left
+        try std.testing.expectEqual(@as(u9, if (on) 0x1d5 else 0x175), chip.node(10300).?.b);
+        try std.testing.expectEqual(5, chip.node(10001).?.data_stack.t);
+    }
 }
 
 /// prints Hi on node 708's pins 17 and 1, as examples/uart.ga does

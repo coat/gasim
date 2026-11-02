@@ -33,10 +33,13 @@ pub fn layout(self: Spec) Chip.Layout {
     return .{ .rows = self.rows, .columns = self.columns };
 }
 
-/// what node `number` has, a basic node with no pins if it is not listed
+/// what node `number` has, a basic node with no pins if it is not listed.
+/// A node of a chip after the first on a board, such as 1.708, has what the
+/// node with its number on its own chip has.
 pub fn node(self: Spec, number: u16) Node {
-    for (self.nodes) |n| if (n.node == number) return n;
-    return .{ .node = number };
+    const own = number % Chip.Layout.chip_numbers;
+    for (self.nodes) |n| if (n.node == own) return n;
+    return .{ .node = own };
 }
 
 /// io bits of the GPIO pins of node `number`
@@ -110,6 +113,7 @@ test ga144 {
     try std.testing.expectEqual(null, ga144.resetAddress(404));
     try std.testing.expect(ga144.hasData(1) and ga144.hasData(701) and !ga144.hasData(708));
     try std.testing.expectEqual(Node{ .node = 404 }, ga144.node(404));
+    try std.testing.expectEqual(.async_boot, ga144.node(10708).rom);
     try std.testing.expectEqual(0xaa, ga144.romWord(708, "cold"));
     try std.testing.expectEqual(null, ga144.romWord(404, "cold"));
 }

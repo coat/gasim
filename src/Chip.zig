@@ -10,6 +10,10 @@
 //! and up faces south, and odd rows are the reverse. Ports facing off the edge
 //! of the array are unconnected unless a device is attached.
 //!
+//! A board of several chips alike is one `Chip` of their arrays, numbered
+//! k.yxx on chip k (see `Layout`), whose nodes run as one, joined by SERDES
+//! links (`attachSerdes`) and wires between their pins.
+//!
 //! Nodes are configured as the chip's `Spec` says, with their ROM types,
 //! GPIO pins and data registers, the GA144's by default (`Spec.ga144`).
 //! Each pin is on a net, alone until wired to other pins or devices (see
@@ -58,17 +62,56 @@ feeder: ?struct { device: *Feeder, index: u16 } = null,
 /// if rx is unconnected; `rx_pin` is the rx pin's index in `wiring.pins`,
 /// if it is connected
 uart: ?struct { device: *Uart, index: u16, rx_pin: ?u16 } = null,
-/// when the UART's line next changes, for its node waiting on the pin while
-/// a node earlier in time runs (see `wakeOnPin`)
-pin_edge: ?u64 = null,
+/// when something next happens outside the nodes, for a node waiting on it
+/// while a node earlier in time runs: the UART's line changing (see
+/// `wakeOnPin`), or a word arriving on a SERDES link (see `arrivals`)
+next_event: ?u64 = null,
 /// the nodes' GPIO pins and the nets that join them to each other and to
 /// devices
 wiring: *gpio.Wiring,
+/// links between SERDES nodes of different chips (see `attachSerdes`)
+serdes: *SerdesLinks,
 
 const Chip = @This();
 
 pub const max_breakpoints = 32;
 pub const max_watches = 32;
+pub const max_serdes = 4;
+
+pub const SerdesLinks = struct {
+    items: [max_serdes]Serdes = @splat(.init(0, 0)),
+    len: u8 = 0,
+
+    pub fn slice(self: *SerdesLinks) []Serdes {
+        return self.items[0..self.len];
+    }
+};
+
+/// Formats a node number as GreenArrays write it, such as 708, and on a
+/// chip after the first, with the chip before it, such as 1.708
+pub fn nodeName(number: u16) NodeName {
+    return .{ .number = number };
+}
+
+pub const NodeName = struct {
+    number: u16,
+
+    pub fn format(self: NodeName, writer: *Io.Writer) Io.Writer.Error!void {
+        const chip = self.number / Layout.chip_numbers;
+        if (chip > 0) try writer.print("{d}.", .{chip});
+        try writer.print("{d:0>3}", .{self.number % Layout.chip_numbers});
+    }
+};
+
+/// Parses a node number as `nodeName` writes it, such as 708 or 1.708
+pub fn parseNode(text: []const u8) error{InvalidNode}!u16 {
+    const dot = std.mem.indexOfScalar(u8, text, '.') orelse
+        return std.fmt.parseInt(u16, text, 10) catch error.InvalidNode;
+    const chip = std.fmt.parseInt(u16, text[0..dot], 10) catch return error.InvalidNode;
+    const local = std.fmt.parseInt(u16, text[dot + 1 ..], 10) catch return error.InvalidNode;
+    if (local >= Layout.chip_numbers or chip > Layout.max_chips) return error.InvalidNode;
+    return std.math.add(u16, chip * Layout.chip_numbers, local) catch error.InvalidNode;
+}
 
 /// A node about to fetch the word at an address. RAM and ROM addresses that
 /// repeat the same word, such as x000 and x040, are the same breakpoint.
@@ -115,9 +158,9 @@ pub const Stop = union(enum) {
         pub fn format(self: Description, writer: *Io.Writer) Io.Writer.Error!void {
             const number = self.layout.nodeNumber(self.stop.index());
             switch (self.stop) {
-                .breakpoint => |b| try writer.print("node {d:0>3} reached {x:0>3}", .{ number, b.address }),
-                .watch => |w| try writer.print("node {d:0>3} {s} {x:0>5} {s} {t}", .{
-                    number,
+                .breakpoint => |b| try writer.print("node {f} reached {x:0>3}", .{ nodeName(number), b.address }),
+                .watch => |w| try writer.print("node {f} {s} {x:0>5} {s} {t}", .{
+                    nodeName(number),
                     if (w.watch.write) "wrote" else "read",
                     @as(u18, @bitCast(w.value)),
                     if (w.watch.write) "to" else "from",
@@ -181,6 +224,7 @@ pub const Snapshot = struct {
     console_port: Port = .{},
     feeder_port: Port = .{},
     feeder_next: usize = 0,
+    serdes: SerdesLinks = .{},
 
     /// Allocates a snapshot of a chip with `layout`
     pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Snapshot {
@@ -221,11 +265,22 @@ pub const Feeder = struct {
     }
 };
 
+/// The nodes' arrangement: rows and columns, on each of `chips` chips, as on
+/// a board of several. Node numbers are yxx on the first chip, and k yyxx
+/// on chip k, as arrayForth 3 numbers chips, written k.yxx; chip k's nodes
+/// follow chip k-1's.
 pub const Layout = struct {
     rows: u8,
     columns: u8,
+    chips: u8 = 1,
 
     pub const ga144: Layout = .{ .rows = 8, .columns = 18 };
+
+    /// node numbers of each chip, after the previous chip's
+    pub const chip_numbers = 10000;
+
+    /// the most chips node numbers can tell apart
+    pub const max_chips = std.math.maxInt(u16) / chip_numbers;
 
     /// Parses rows and columns such as 8x18. Node numbers limit both to 100.
     pub fn parse(text: []const u8) error{InvalidLayout}!Layout {
@@ -237,26 +292,49 @@ pub const Layout = struct {
     }
 
     pub fn count(self: Layout) usize {
-        return @as(usize, self.rows) * self.columns;
+        return @as(usize, self.chipCount()) * self.chips;
+    }
+
+    /// the number of nodes on each chip
+    pub fn chipCount(self: Layout) u16 {
+        return @as(u16, self.rows) * self.columns;
     }
 
     /// the number of ports between neighbours
     pub fn portCount(self: Layout) usize {
         const rows: usize = self.rows;
         const columns: usize = self.columns;
-        return rows * (columns - 1) + (rows - 1) * columns;
+        return (rows * (columns - 1) + (rows - 1) * columns) * self.chips;
     }
 
     /// index into `Chip.nodes` of a node number, if the node exists
     pub fn index(self: Layout, number: u16) ?u16 {
+        const chip = number / chip_numbers;
         const x = number % 100;
-        const y = number / 100;
-        if (x >= self.columns or y >= self.rows) return null;
-        return y * self.columns + x;
+        const y = number % chip_numbers / 100;
+        if (chip >= self.chips or x >= self.columns or y >= self.rows) return null;
+        return chip * self.chipCount() + y * self.columns + x;
     }
 
     pub fn nodeNumber(self: Layout, i: u16) u16 {
-        return i / self.columns * 100 + i % self.columns;
+        const local = i % self.chipCount();
+        return i / self.chipCount() * chip_numbers + local / self.columns * 100 + local % self.columns;
+    }
+
+    /// for messages, such as `a 8x18 layout`, or `2 chips of 8x18`
+    pub fn format(self: Layout, writer: *Io.Writer) Io.Writer.Error!void {
+        if (self.chips == 1) return writer.print("a {d}x{d} layout", .{ self.rows, self.columns });
+        try writer.print("{d} chips of {d}x{d}", .{ self.chips, self.rows, self.columns });
+    }
+
+    /// the column of node `i` on its chip
+    pub fn column(self: Layout, i: u16) u16 {
+        return i % self.chipCount() % self.columns;
+    }
+
+    /// the row of node `i` on its chip
+    pub fn row(self: Layout, i: u16) u16 {
+        return i % self.chipCount() / self.columns;
     }
 
     /// the ports of a node that face its neighbours, where it waits for code
@@ -269,8 +347,8 @@ pub const Layout = struct {
 
     /// index of the node on the other side of a port, if it is on the chip
     pub fn neighbour(self: Layout, i: u16, direction: Direction) ?u16 {
-        const x = i % self.columns;
-        const y = i / self.columns;
+        const x = self.column(i);
+        const y = self.row(i);
         return switch (facing(x, y, direction)) {
             .north => if (y + 1 < self.rows) i + self.columns else null,
             .south => if (y > 0) i - self.columns else null,
@@ -320,11 +398,11 @@ pub const Flow = struct {
 pub fn flow(self: *const Chip, i: u16, cardinal: Cardinal) ?Flow {
     const layout = self.layout;
     const n = &self.nodes[i];
-    const direction = portToward(i % layout.columns, i / layout.columns, cardinal);
+    const direction = portToward(layout.column(i), layout.row(i), cardinal);
     const link = n.ports[@backingInt(direction)];
     const p = link.port orelse return null;
     const j = layout.neighbour(i, direction) orelse return null;
-    const facing_back = portToward(j % layout.columns, j / layout.columns, cardinal.opposite());
+    const facing_back = portToward(layout.column(j), layout.row(j), cardinal.opposite());
     const other = &self.nodes[j];
 
     if (n.transfers.written.contains(direction) or other.transfers.read.contains(facing_back)) return .{ .outward = true, .kind = .moved };
@@ -378,7 +456,14 @@ pub fn facing(x: u16, y: u16, direction: Direction) Cardinal {
 /// multiport execute of their neighbours' ports, waiting for code, until
 /// they are loaded with ROM or a program.
 pub fn init(gpa: Allocator, spec: Spec) Allocator.Error!Chip {
-    const layout = spec.layout();
+    return initChips(gpa, spec, 1);
+}
+
+/// As `init`, for `chips` chips alike, as on a board of several, which
+/// SERDES links (`attachSerdes`) and wires between their pins join
+pub fn initChips(gpa: Allocator, spec: Spec, chips: u8) Allocator.Error!Chip {
+    var layout = spec.layout();
+    layout.chips = chips;
     const count = layout.count();
     const nodes = try gpa.alloc(Computer, count);
     errdefer gpa.free(nodes);
@@ -391,11 +476,16 @@ pub fn init(gpa: Allocator, spec: Spec) Allocator.Error!Chip {
     const queued = try gpa.alloc(bool, count);
     errdefer gpa.free(queued);
 
-    var chip: Chip = .{ .layout = layout, .spec = spec, .nodes = nodes, .ports = ports, .queue = queue, .queued = queued, .wiring = undefined };
+    const serdes = try gpa.create(SerdesLinks);
+    errdefer gpa.destroy(serdes);
+    serdes.* = .{};
+
+    var chip: Chip = .{ .layout = layout, .spec = spec, .nodes = nodes, .ports = ports, .queue = queue, .queued = queued, .wiring = undefined, .serdes = serdes };
     @memset(ports, .{});
     @memset(queued, false);
     for (nodes, 0..) |*n, i| {
-        const number = layout.nodeNumber(@intCast(i));
+        // as on its own chip
+        const number = layout.nodeNumber(@intCast(i)) % Layout.chip_numbers;
         n.* = .reset;
         n.pins = spec.pins(number);
         n.wake_port = wakePort(layout, @intCast(i), n.pins);
@@ -406,9 +496,9 @@ pub fn init(gpa: Allocator, spec: Spec) Allocator.Error!Chip {
 
     // the west or south node of each pair takes side a
     var next_port: usize = 0;
-    for (0..rows) |y| {
+    for (0..chips) |c| for (0..rows) |y| {
         for (0..columns) |x| {
-            const i = y * columns + x;
+            const i = c * layout.chipCount() + y * columns + x;
             if (x + 1 < columns) {
                 chip.connect(i, i + 1, portToward(@intCast(x), @intCast(y), .east), &ports[next_port]);
                 next_port += 1;
@@ -418,7 +508,7 @@ pub fn init(gpa: Allocator, spec: Spec) Allocator.Error!Chip {
                 next_port += 1;
             }
         }
-    }
+    };
     std.debug.assert(next_port == ports.len);
     chip.wiring = try .create(gpa, nodes);
     return chip;
@@ -430,6 +520,7 @@ pub fn deinit(self: *Chip, gpa: Allocator) void {
     gpa.free(self.queue);
     gpa.free(self.queued);
     self.wiring.destroy(gpa);
+    gpa.destroy(self.serdes);
     self.* = undefined;
 }
 
@@ -442,6 +533,7 @@ pub fn save(self: Chip, snapshot: *Snapshot) void {
     snapshot.queue_len = self.queue_len;
     snapshot.steps = self.steps;
     snapshot.started = self.started;
+    snapshot.serdes = self.serdes.*;
     if (self.console) |console| snapshot.console_port = console.device.port;
     if (self.feeder) |feeder| {
         snapshot.feeder_port = feeder.device.port;
@@ -459,7 +551,8 @@ pub fn restore(self: *Chip, snapshot: *const Snapshot) void {
     self.steps = snapshot.steps;
     self.started = snapshot.started;
     self.hit = null;
-    self.pin_edge = null;
+    self.next_event = null;
+    self.serdes.* = snapshot.serdes;
     // the pins' histories are of the future the chip went back from
     self.wiring.reset();
     if (self.console) |console| console.device.port = snapshot.console_port;
@@ -478,7 +571,8 @@ pub fn matches(self: *const Chip, snapshot: *const Snapshot) bool {
         !eql(u8, bytes(self.ports), bytes(snapshot.ports)) or
         !eql(u8, bytes(self.queue), bytes(snapshot.queue)) or
         !eql(bool, self.queued, snapshot.queued) or
-        self.queue_len != snapshot.queue_len) return false;
+        self.queue_len != snapshot.queue_len or
+        !std.meta.eql(self.serdes.*, snapshot.serdes)) return false;
     if (self.console) |console| if (!std.meta.eql(console.device.port, snapshot.console_port)) return false;
     if (self.feeder) |feeder| if (!std.meta.eql(feeder.device.port, snapshot.feeder_port) or feeder.device.next != snapshot.feeder_next) return false;
     return true;
@@ -489,7 +583,7 @@ pub fn matches(self: *const Chip, snapshot: *const Snapshot) bool {
 /// array
 fn wakePort(layout: Layout, i: u16, pins: u18) ?Direction {
     if (pins & 1 << 17 == 0) return null;
-    const y = i / layout.columns;
+    const y = layout.row(i);
     const direction: Direction = if (y == 0 or y + 1 == layout.rows) .up else .left;
     return if (layout.neighbour(i, direction) == null) direction else null;
 }
@@ -513,7 +607,8 @@ pub fn node(self: Chip, number: u16) ?*Computer {
 pub fn loadRom(self: *Chip, roms: []const ga144.NodeRom) error{MissingRom}!void {
     const basic = findRom(roms, ga144.basic_node);
     for (self.nodes, 0..) |*n, i| {
-        const number = self.layout.nodeNumber(@intCast(i));
+        // as on its own chip
+        const number = self.layout.nodeNumber(@intCast(i)) % Layout.chip_numbers;
         const own = romOfType(roms, number, self.spec.node(number).rom);
         const rom = own orelse basic orelse return error.MissingRom;
         @memcpy(n.mem[64..], &rom.words);
@@ -672,6 +767,30 @@ pub fn attachUartPins(self: *Chip, uart: *Uart, rx: ?PinRef, tx: ?PinRef) error{
     }
 }
 
+/// Links two SERDES nodes, as the EVB002 links host node 701 to target
+/// node 001: each node's up port, which faces off its chip, sends to the
+/// other's. Link nodes before stepping the chip.
+pub fn attachSerdes(self: *Chip, a: u16, b: u16) error{ NoSuchNode, NotSerdes, PortConnected, Full }!void {
+    const ends = [2]u16{ self.layout.index(a) orelse return error.NoSuchNode, self.layout.index(b) orelse return error.NoSuchNode };
+    if (ends[0] == ends[1]) return error.NotSerdes;
+    for (ends) |i| {
+        const n = &self.nodes[i];
+        // a node with pins has them on its pin device
+        if (n.data == null or n.pins != 0) return error.NotSerdes;
+        if (n.ports[@backingInt(Direction.up)].port != null or self.layout.neighbour(i, .up) != null) return error.PortConnected;
+    }
+    if (self.serdes.len == max_serdes) return error.Full;
+    const link = &self.serdes.items[self.serdes.len];
+    self.serdes.len += 1;
+    link.* = .init(ends[0], ends[1]);
+    for (&link.ends) |*end| {
+        const n = &self.nodes[end.index];
+        n.ports[@backingInt(Direction.up)] = .{ .port = &end.port, .side = Serdes.side.other() };
+        n.pin_device = Serdes.pinDevice(end);
+        end.written(n);
+    }
+}
+
 /// a GPIO pin of a node, by its number, out of 17, 5, 3 and 1
 pub const PinRef = struct { node: u16, pin: u5 };
 
@@ -715,7 +834,7 @@ fn feed(self: *Chip) bool {
 /// behind in time then, which may be the same node again. Returns false
 /// when every node is suspended, and stepping would do nothing.
 pub fn step(self: *Chip) bool {
-    if (self.uart != null) self.wakeOnPin();
+    if (self.uart != null or self.serdes.len > 0) self.fireEvents();
     if (self.queue_len == 0) return false;
     if (!self.started) {
         // a breakpoint on the first word a node runs
@@ -729,11 +848,10 @@ pub fn step(self: *Chip) bool {
     // stepping again
     if (self.hit != null) return self.roundAfterStop();
     for (0..self.queue_len) |_| {
-        // a node that stopped may be the earliest still, and the node
-        // waiting on the UART's line wakes when the earliest gets to the
-        // line's next change
+        // a node that stopped may be the earliest still, and a node waiting
+        // on something outside the nodes wakes when the earliest gets to it
         if (self.hit != null) break;
-        if (self.pin_edge) |edge| if (self.nodes[self.queue[0]].time >= edge) self.wakeOnPin();
+        if (self.next_event) |time| if (self.nodes[self.queue[0]].time >= time) self.fireEvents();
         self.stepQueued(self.dequeue().?);
     }
     return true;
@@ -742,17 +860,29 @@ pub fn step(self: *Chip) bool {
 /// `step`'s round, with `hit` set already
 noinline fn roundAfterStop(self: *Chip) bool {
     for (0..self.queue_len) |_| {
-        if (self.pin_edge) |edge| if (self.nodes[self.queue[0]].time >= edge) self.wakeOnPin();
+        if (self.next_event) |time| if (self.nodes[self.queue[0]].time >= time) self.fireEvents();
         self.stepQueued(self.dequeue().?);
     }
     return true;
+}
+
+/// Wakes the nodes waiting on what happens outside them by the time the
+/// earliest node that is running gets there, and notes when the next thing
+/// does (`next_event`)
+noinline fn fireEvents(self: *Chip) void {
+    self.next_event = null;
+    if (self.uart != null) self.wakeOnPin();
+    if (self.serdes.len > 0) self.arrivals();
+}
+
+fn schedule(self: *Chip, time: u64) void {
+    self.next_event = @min(self.next_event orelse time, time);
 }
 
 /// Wakes the node with the UART if it waits on its wakeup pin, and the pin
 /// is already as it waits for, such as when input arrives, or changes before
 /// any node that is running gets there, so the node wakes at its time
 fn wakeOnPin(self: *Chip) void {
-    self.pin_edge = null;
     const uart = self.uart orelse return;
     const n = &self.nodes[uart.index];
     if (self.queued[uart.index] or !n.waitsOnPin()) return;
@@ -762,13 +892,57 @@ fn wakeOnPin(self: *Chip) void {
     if (!n.pinAwake()) {
         const edge = uart.device.nextRxEdge(n.time) orelse return;
         if (self.queue_len > 0 and self.nodes[self.queue[0]].time < edge) {
-            self.pin_edge = edge;
+            self.schedule(edge);
             return;
         }
         n.time = edge;
     }
     uart.device.used = true;
     self.wake(uart.index);
+}
+
+/// Lands the words on SERDES links that arrive before any node that is
+/// running gets there, waking the nodes that read them, at their arrival if
+/// they were behind it. With every node waiting, the next word lands.
+fn arrivals(self: *Chip) void {
+    for (self.serdes.slice()) |*link| for (0..2) |k| {
+        const from: u1 = @intCast(k);
+        while (link.ends[from].nextArrival()) |time| {
+            if (self.queue_len > 0 and self.nodes[self.queue[0]].time < time) {
+                self.schedule(time);
+                break;
+            }
+            link.land(from);
+            self.deliver(&link.ends[1 - from]);
+        }
+    };
+}
+
+/// hands a SERDES node the word it received, if it is reading up
+fn deliver(self: *Chip, end: *Serdes.End) void {
+    const arrival = end.deliver() orelse return;
+    if (self.nodes[end.index].time < arrival) self.later(end.index, arrival);
+    self.wake(end.index);
+}
+
+/// A SERDES node's up port changed: a word it writes is taken if it is
+/// sending, the node going on when the word starts to be sent, and a word it
+/// received is delivered if it reads
+noinline fn serdesPortChanged(self: *Chip, i: u16) void {
+    for (self.serdes.slice()) |*link| for (&link.ends, 0..) |*end, k| if (end.index == i) {
+        // words that arrived by the node's time, which only a node stepped
+        // by hand, out of turn, gets to before they land
+        while (end.nextArrival()) |time| {
+            if (time > self.nodes[i].time) break;
+            link.land(@intCast(k));
+            self.deliver(&link.ends[1 - k]);
+        }
+        if (end.take(self.nodes[i].time)) |start| {
+            if (self.nodes[i].time < start) self.later(i, start);
+            self.wake(i);
+            self.schedule(end.nextArrival().?);
+        } else self.deliver(end);
+    };
 }
 
 /// Wakes the nodes waiting on pin 17 whose nets node `i` changed in its
@@ -825,6 +999,7 @@ fn dequeue(self: *Chip) ?u16 {
 /// Steps a node and wakes the neighbours on any port it changed, since a
 /// suspended node can only continue once one of its ports changes.
 pub fn stepNode(self: *Chip, i: u16) void {
+    if (self.uart != null or self.serdes.len > 0) self.fireEvents();
     const queued = self.queued[i];
     self.stepQueued(i);
     // stepped while queued, as by hand, so later in time than its place
@@ -852,6 +1027,8 @@ fn stepQueued(self: *Chip, i: u16) void {
         self.wakeOnNets(i);
         // a change that a node ahead of it made after the time it waits from
         if (n.waitsOnPin()) self.wakeOnNet(i);
+        // a word a SERDES node started to send, setting io bit 17
+        if (self.serdes.len > 0) self.serdesSent(i);
     }
     // a read of the wakeup pin, not a device on its port, that did not have
     // to wait for it
@@ -876,13 +1053,23 @@ fn stepQueued(self: *Chip, i: u16) void {
     }
 }
 
+/// notes when the word a SERDES node is sending arrives
+noinline fn serdesSent(self: *Chip, i: u16) void {
+    for (self.serdes.slice()) |*link| for (&link.ends) |*end| if (end.index == i) {
+        if (end.nextArrival()) |time| self.schedule(time);
+    };
+}
+
 /// Wakes the neighbour on a port of node `i` that changed from `state`, but
 /// not if it is still waiting after the change, such as when it reads the
 /// port too: a later change that lets it go on wakes it then. Stepped at
 /// once, as it is behind, it would only wait again. Out of line, as most
 /// steps change no port.
 noinline fn portChanged(self: *Chip, i: u16, direction: Direction, state: Port.State) void {
-    const j = self.layout.neighbour(i, direction) orelse return;
+    const j = self.layout.neighbour(i, direction) orelse {
+        if (direction == .up and self.serdes.len > 0) self.serdesPortChanged(i);
+        return;
+    };
     const n = &self.nodes[i];
     const other = &self.nodes[j];
     // a word passes between neighbours when the second of them gets to the
@@ -904,7 +1091,7 @@ noinline fn portChanged(self: *Chip, i: u16, direction: Direction, state: Port.S
 fn writeTrace(self: *const Chip, writer: *Io.Writer, i: u16) Io.Writer.Error!void {
     const n = &self.nodes[i];
     const address: u9 = @bitCast(n.word_address);
-    try writer.print("{d:0>3} {x:0>3} {x:0>5} ", .{ self.layout.nodeNumber(i), address, @as(u18, @bitCast(n.i)) });
+    try writer.print("{f} {x:0>3} {x:0>5} ", .{ nodeName(self.layout.nodeNumber(i)), address, @as(u18, @bitCast(n.i)) });
     try disassembler.write(writer, n.i, address);
     try writer.print("  T {x:0>5} S {x:0>5} R {x:0>5}{s}\n", .{
         @as(u18, @bitCast(n.data_stack.t)),
@@ -1000,7 +1187,7 @@ pub fn advance(self: *Chip) !bool {
 /// null when every node is waiting.
 pub fn stepNext(self: *Chip) !?u16 {
     _ = try self.service();
-    if (self.uart != null) self.wakeOnPin();
+    if (self.uart != null or self.serdes.len > 0) self.fireEvents();
     const i = self.dequeue() orelse return null;
     self.stepNode(i);
     return i;
@@ -1152,6 +1339,160 @@ test Layout {
     try expectEqual(null, layout.index(18));
     try expectEqual(null, layout.index(800));
     try expectEqual(717, layout.nodeNumber(143));
+}
+
+test "chips after the first" {
+    const layout: Layout = .{ .rows = 8, .columns = 18, .chips = 2 };
+    try expectEqual(288, layout.count());
+    try expectEqual(2 * Layout.ga144.portCount(), layout.portCount());
+    try expectEqual(144 + 134, layout.index(10708));
+    try expectEqual(null, layout.index(20000));
+    try expectEqual(null, layout.index(10018));
+    try expectEqual(10708, layout.nodeNumber(144 + 134));
+    try expectEqual(8, layout.column(144 + 134));
+    try expectEqual(7, layout.row(144 + 134));
+    // neighbours are on the same chip
+    try expectEqual(null, layout.neighbour(144 + 17, .left));
+    try expectEqual(null, layout.neighbour(144, .up));
+    try expectEqual(144 + 18, layout.neighbour(144, .down));
+
+    try expectEqual(10708, try parseNode("1.708"));
+    try expectEqual(708, try parseNode("708"));
+    try expectEqual(708, try parseNode("0.708"));
+    try expectError(error.InvalidNode, parseNode("1.10000"));
+    try expectError(error.InvalidNode, parseNode("1."));
+    try expectError(error.InvalidNode, parseNode("7.000"));
+    var buffer: [8]u8 = undefined;
+    try expectEqualStrings("1.008", try std.fmt.bufPrint(&buffer, "{f}", .{nodeName(10008)}));
+    try expectEqualStrings("008", try std.fmt.bufPrint(&buffer, "{f}", .{nodeName(8)}));
+
+    var chip: Chip = try .initChips(std.testing.allocator, .ga144, 2);
+    defer chip.deinit(std.testing.allocator);
+    // each chip's nodes are as the spec says
+    try expectEqual(1 << 17 | 1 << 1, chip.node(10708).?.pins);
+    try expect(chip.node(10001).?.data != null);
+    try expectEqual(Direction.up, chip.node(10708).?.wake_port);
+    try expectEqual(null, chip.node(10017).?.ports[@backingInt(Direction.left)].port);
+}
+
+/// two chips of a SERDES node each, 000 and 1.000, linked, with `source`
+/// loaded
+fn serdesPair(source: []const u8) !Chip {
+    const spec: Spec = .{ .rows = 1, .columns = 1, .nodes = &.{.{ .node = 0, .rom = .serdes_boot }} };
+    var chip: Chip = try .initChips(std.testing.allocator, spec, 2);
+    errdefer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [2]assembler.Program = undefined;
+    for (try assembler.assembleNodes(source, &programs, &diagnostic)) |program| try chip.load(program);
+    try chip.attachSerdes(0, 10000);
+    return chip;
+}
+
+test "words sent on a SERDES link arrive a word's time apart" {
+    // 000 writes 5 to data and sets io bit 17, then writes 7 to up, while
+    // 1.000 reads up twice
+    var chip = try serdesPair(
+        \\ 0x141 a! 5 ! io b! 0x20000 !b up b! 7 !b left b! @b
+        \\ node 1.000 up b! @b @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    const n = chip.node(10000).?;
+    try expectEqual(7, n.data_stack.t);
+    try expectEqual(5, n.data_stack.s);
+    // 000 went on as its second word started to be sent, which 1.000 took
+    // a word's time later, and both then ran the same words
+    try expectEqual(chip.node(0).?.time + Serdes.word_time, n.time);
+}
+
+test "a word sent on a SERDES link that is not read before the next is lost" {
+    var chip = try serdesPair(
+        \\ 0x141 a! 1 ! io b! 0x20000 !b up b! 2 !b 3 !b left b! @b
+        \\ node 1.000 999 for unext up b! @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    try expectEqual(3, chip.node(10000).?.data_stack.t);
+}
+
+test "a SERDES node waiting on up and another port takes what comes first" {
+    // 1.000's multiport read takes the SERDES word, as its ROM's cold does
+    var chip = try serdesPair(
+        \\ 99 for unext 0x141 a! 9 ! io b! 0x20000 !b left b! @b
+        \\ node 1.000 0x125 b! @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    const n = chip.node(10000).?;
+    try expectEqual(9, n.data_stack.t);
+    // at the word's arrival, not before
+    try expect(n.time >= 99 * 2400 + Serdes.word_time);
+}
+
+test "a SERDES node that is not sending does not send" {
+    var chip = try serdesPair(
+        \\ up b! 4 !b
+        \\ node 1.000 up b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    try expect(chip.node(0).?.suspended and chip.node(10000).?.suspended);
+    try expectEqual(0, chip.node(10000).?.data_stack.t);
+}
+
+test "the target's SERDES boot ROM runs code the host sends it" {
+    var roms: [144]ga144.NodeRom = undefined;
+    var chip: Chip = try .initChips(std.testing.allocator, .ga144, 2);
+    defer chip.deinit(std.testing.allocator);
+    try chip.loadRom(try testRom(&roms));
+    try chip.attachSerdes(701, 10001);
+    // 701 sends 1.001 an instruction to push a literal, then the literal
+    const push: u18 = @bitCast(comptime Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }));
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble(std.fmt.comptimePrint("node 701 0x141 a! {d} ! io b! 0x20000 !b up b! 42 !b left b! @b", .{push}), &diagnostic));
+
+    try chip.run();
+    try expectEqual(42, chip.node(10001).?.data_stack.t);
+}
+
+test "a SERDES node stepped by hand, out of turn, sends every word" {
+    var chip = try serdesPair(
+        \\ 0x141 a! 1 ! io b! 0x20000 !b up b! 2 !b 3 !b 4 !b left b! @b
+        \\ node 1.000 up b! @b @b @b @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    for (0..40) |_| chip.stepNode(0);
+    try chip.run();
+    const n = chip.node(10000).?;
+    try expectEqual(4, n.data_stack.t);
+    try expectEqual(3, n.data_stack.s);
+}
+
+test attachSerdes {
+    var chip: Chip = try .initChips(std.testing.allocator, .ga144, 2);
+    defer chip.deinit(std.testing.allocator);
+    try expectError(error.NotSerdes, chip.attachSerdes(701, 10708));
+    try expectError(error.NoSuchNode, chip.attachSerdes(701, 20001));
+    try expectError(error.NotSerdes, chip.attachSerdes(701, 701));
+    try chip.attachSerdes(701, 10001);
+    try expectError(error.PortConnected, chip.attachSerdes(1, 10001));
+}
+
+test "going back to a snapshot takes back words on a SERDES link" {
+    var chip = try serdesPair(
+        \\ 0x141 a! 5 ! io b! 0x20000 !b left b! @b
+        \\ node 1.000 999 for unext up b! @b left b! @b
+    );
+    defer chip.deinit(std.testing.allocator);
+    var snapshot: Snapshot = try .init(std.testing.allocator, chip.layout);
+    defer snapshot.deinit(std.testing.allocator);
+    chip.save(&snapshot);
+    try chip.run();
+    try expectEqual(5, chip.node(10000).?.data_stack.t);
+    chip.restore(&snapshot);
+    try expect(chip.matches(&snapshot));
+    try chip.run();
+    try expectEqual(5, chip.node(10000).?.data_stack.t);
 }
 
 test "neighbours share port names" {
@@ -2020,6 +2361,7 @@ const Instruction = f18.Instruction;
 const Word = f18.Word;
 const Opcode = @import("opcodes.zig").Opcode;
 const gpio = @import("pins.zig");
+const Serdes = @import("Serdes.zig");
 const port = @import("port.zig");
 const Direction = port.Direction;
 const Port = port.Port;
