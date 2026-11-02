@@ -16,7 +16,7 @@ stdenv.mkDerivation (
       if gui
       then "gasim-gui"
       else "gasim";
-    version = "0.0.1";
+    version = "0.2.0";
     src = lib.cleanSource ./.;
 
     # the build cannot fetch dependencies from its sandbox, so fetch them
