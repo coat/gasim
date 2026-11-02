@@ -1,7 +1,7 @@
 .{
     .name = .gasim,
 
-    .version = "0.1.0",
+    .version = "0.2.0",
 
     .fingerprint = 0xbf21d72499244c75, // Changing this has security and trust implications.
 
