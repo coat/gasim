@@ -158,7 +158,11 @@ done.
    - ✓ Pins read and driven at the node's time as it reads or writes io,
      not at the start of the word, which can run a long `unext` loop
      first, as a bit loop usually does.
-   - Pins as connections with drivers: node outputs, devices and pull-ups.
+   - ✓ Pins as connections with drivers: nets join node pins and devices,
+     driven strongly, by a pull resistor, by a node's weak pulldown (01 in
+     io, as after reset) or not at all; contention is reported; and nodes
+     read a net as it was at their own time (`pins.zig`, `Chip.wire`,
+     `Chip.pull`). The UART is a device on two nets.
    - The UART on a pty, TCP or the TUI; SPI flash backed by a file; the 2 MB
      SRAM on 007, 008 and 009; reset lines; the analog nodes' outputs.
    - Pin activity dumped as VCD files for GTKWave.

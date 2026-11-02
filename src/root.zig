@@ -21,6 +21,7 @@ pub const ga144 = @import("ga144.zig");
 pub const rom = @import("rom.zig");
 
 const f18 = @import("f18.zig");
+pub const pins = @import("pins.zig");
 pub const port = @import("port.zig");
 
 test {
@@ -35,6 +36,7 @@ test {
     _ = @import("disassembler.zig");
     _ = @import("ga144.zig");
     _ = @import("opcodes.zig");
+    _ = @import("pins.zig");
     _ = @import("port.zig");
     _ = @import("rom.zig");
     _ = @import("Spec.zig");
