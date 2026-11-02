@@ -2620,7 +2620,7 @@ fn romLabels(node: u16) []const Label {
             .{ .name = "warm", .value = 0xa9 }, .{ .name = "noop", .value = 0xaa }, .{ .name = "cmd", .value = 0xac },
             .{ .name = "idle", .value = 0xae }, .{ .name = "init", .value = 0xc0 },
         },
-        else => switch (ga144.romType(node)) {
+        else => switch (Spec.ga144.node(node).rom) {
             .basic, .special => &rom_basic,
             .analog => &rom_analog,
             .serdes_boot => &rom_serdes,
@@ -2811,6 +2811,7 @@ const Instruction = f18.Instruction;
 const Slot = f18.Slot;
 const Word = f18.Word;
 const ga144 = @import("ga144.zig");
+const Spec = @import("Spec.zig");
 const Opcode = @import("opcodes.zig").Opcode;
 
 const std = @import("std");

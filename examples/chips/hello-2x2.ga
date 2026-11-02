@@ -1,0 +1,24 @@
+\ hello-2x2.ga - print a greeting on the serial port of node 100, on the
+\ chip that examples/chips/2x2.zon describes, as uart.ga does on node 708
+\ of a GA144:
+\
+\     gasim run --chip examples/chips/2x2.zon --uart 100 examples/chips/hello-2x2.ga
+
+node 100
+: main
+    io b!                  \ B addresses io, to drive pin 1
+    'message a!            \ A walks through the message
+    @+ for @+ send next    \ the first word is the length - 1
+    right a! @             \ wait forever on node 101
+
+\ drives pin 1 high (3) or low (2) for a bit: 429 unexts of 2.4 ns each,
+\ and the code around them
+: bit ( level ) !b 428 for unext ;
+
+\ a start bit, 8 data bits from the lowest, and a stop bit, inverted
+: send ( c )
+    3 bit
+    7 for dup 1 and 1 xor 2 + bit 2/ next drop
+    2 bit ;
+
+: message 13 , "Hello, world!" 10 ,

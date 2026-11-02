@@ -30,8 +30,9 @@ commands alone (see [The CLI without the TUI](#the-cli-without-the-tui)).
 - **The F18A computer:** all 32 opcodes, stacks, the memory map, extended
   arithmetic and per-opcode timing. Instruction words are XORed with `x15555`
   as on real hardware.
-- **The chip:** any `RxC` layout (8x18 by default) with GA144 port naming, a
-  run-queue scheduler, ROM from a dump of a real chip or assembled from
+- **The chip:** the GA144 by default, or one a chip file describes
+  (`--chip`), or an `RxC` array of basic nodes (`--layout`), with GA144
+  port naming, a run-queue scheduler, ROM from a dump of a real chip or assembled from
   arrayForth 3's `pFDISK.blk` (every node's ROM matches a G144A12's), reset
   into warm or cold, and boot streams through node 001's SERDES port
   (`--boot`).
@@ -119,16 +120,21 @@ node times that meant something different in each.
 
 The aim is that GreenArrays' arrayForth 3 drives a simulated EVB002 as it
 drives the real one, and then that pF/144, their polyFORTH, runs on the
-simulated chip with `20 DRIVE HI AFORTH` at its prompt. ✓ marks what PR #33
-did.
+simulated chip with `20 DRIVE HI AFORTH` at its prompt. ✓ marks what is
+done.
 
-1. **Chip and board files.** A chip file gives the size and, per node, the
-   ROM type, pins, buses and reset address, and the GA144 becomes the default
-   chip file instead of code (`ga144.zig`). A board file lists the chips, the
-   connections between pins, devices and other chips, pull-ups and jumpers.
-   Ship `ga144` and `evb002`. ZON, read on the host side, so the core still
-   does no allocation. Custom layouts would get no pins unless their file
-   declares them, which changes how they behave today.
+1. **Chip and board files.**
+   - ✓ A chip file gives the size and, per node, the ROM type, pins and
+     reset word, in ZON read on the host side
+     (`--chip`). The GA144 is the default, `src/chips/ga144.zon` instead
+     of code in `ga144.zig`. `--layout` gives basic nodes with no pins,
+     where it used to borrow the GA144's by node number.
+   - Buses, such as node 007, 008 and 009's to external memory, in the
+     chip file, once something uses them.
+   - A board file lists the chips, the connections between pins, devices
+     and other chips, pull-ups and jumpers, and ships as `evb002`. It
+     waits for pins as connections with drivers (step 3), which its
+     connections need.
 2. **A shared clock.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
      later of their times as a word passes between them.
@@ -273,9 +279,6 @@ blocks.
   DB001 §2.4.1 and DB002 §5.3 say they vary with temperature, voltage and
   process. Should board files set them, such as DB002's minimum and maximum,
   and should a real board be measured?
-- **Pins on custom layouts.** Today they come from the GA144 by node number,
-  so a 9x18 layout's 708 has pins but no wakeup. Should custom layouts have
-  no pins unless a chip file declares them?
 - Should `.af` stay the extension for arrayForth 3 text, or should the syntax
   be chosen by a flag or by finding `ASM[`?
 - Should going back in the TUI also restore the forth session's stack and

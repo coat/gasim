@@ -112,11 +112,17 @@ pub fn assemble(source: []const u8, diagnostic: *Diagnostic) Error!Program {
 /// Assembles source for any number of nodes into `programs`, returning the
 /// programs of the nodes that have code.
 pub fn assembleNodes(source: []const u8, programs: []Program, diagnostic: *Diagnostic) Error![]Program {
+    return assembleNodesFor(&Spec.ga144, source, programs, diagnostic);
+}
+
+/// `assembleNodes` for a chip other than the GA144, whose nodes may have
+/// other ROMs, and so other ROM words
+pub fn assembleNodesFor(chip: *const Spec, source: []const u8, programs: []Program, diagnostic: *Diagnostic) Error![]Program {
     var tokens: Tokenizer = .{ .source = source };
     var count: usize = 0;
     var node: Directive = .{ .number = 0 };
     while (true) {
-        var assembler: Assembler = .{ .tokens = &tokens, .diagnostic = diagnostic, .node = node.number };
+        var assembler: Assembler = .{ .tokens = &tokens, .diagnostic = diagnostic, .chip = chip, .node = node.number };
         const next_node = try assembler.run();
         if (assembler.builder.len > 0) {
             errdefer diagnostic.* = node.diagnostic;
@@ -169,7 +175,8 @@ const Control = union(enum) {
 const Assembler = struct {
     tokens: *Tokenizer,
     diagnostic: *Diagnostic,
-    /// number of the node being assembled, which decides its ROM words
+    chip: *const Spec,
+    /// number of the node being assembled, whose ROM decides its ROM words
     node: u16,
 
     builder: Builder = .{},
@@ -247,7 +254,7 @@ const Assembler = struct {
         const b = &self.builder;
         if (eql(token, ":")) {
             const name = try self.next() orelse return error.MissingLabelName;
-            if (reserved(name) or ga144.romWord(self.node, name) != null) return error.ReservedLabel;
+            if (reserved(name) or self.chip.romWord(self.node, name) != null) return error.ReservedLabel;
             try b.define(name);
         } else if (eql(token, ";")) {
             try b.ret();
@@ -339,7 +346,7 @@ const Assembler = struct {
 
     /// the address of a ROM word of the node, noting the first one used
     fn romWord(self: *Assembler, name: []const u8) ?u10 {
-        const destination = ga144.romWord(self.node, name) orelse return null;
+        const destination = self.chip.romWord(self.node, name) orelse return null;
         if (self.rom_word == null) self.rom_word = .{ .line = self.tokens.start_line, .token = name };
         return destination;
     }
@@ -703,7 +710,7 @@ test "labels and then at the end of RAM" {
 
 const Builder = @import("Builder.zig");
 const f18 = @import("f18.zig");
-const ga144 = @import("ga144.zig");
+const Spec = @import("Spec.zig");
 const Address = f18.Address;
 const Computer = f18.Computer;
 const Instruction = f18.Instruction;
