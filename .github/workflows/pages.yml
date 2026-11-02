@@ -1,7 +1,6 @@
 name: Pages
 
-# the web version, published to GitHub Pages. Without the ROM, which is
-# GreenArrays', so visitors give their own; the page keeps it for them.
+# the web version published to GitHub Pages.
 
 on:
   push:
