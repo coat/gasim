@@ -73,7 +73,9 @@ function lines(view) {
   let previous = null;
   view.tokens.forEach((t, i) => {
     while (rows.length <= t.line) rows.push([]);
-    rows[t.line].push(token(t, i, view, previous));
+    // a hidden word leaves no hole, as Mithril throws on one among keyed spans
+    const word = token(t, i, view, previous);
+    if (word) rows[t.line].push(word);
     previous = t.color;
   });
   if (rows.length === 0) rows.push([]);
