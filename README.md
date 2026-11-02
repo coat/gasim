@@ -135,8 +135,10 @@ more info.
 
 ### Options
 
-- `--layout <rows>x<columns>`: size of the array of nodes, up to 100x100
-  (default `8x18`)
+- `--chip <file>`: the chip, described in a chip file (see [Chip
+  files](#chip-files); default the GA144)
+- `--layout <rows>x<columns>`: a chip of that size, up to 100x100, of basic
+  nodes with no pins, instead of the GA144
 - `--console <node>:<port>`: where the console is attached, on a port facing
   off the edge of the array (default `000:up`)
 - `--rom <path>`: ROM to load into the nodes: a dump of it, or arrayForth
@@ -217,6 +219,34 @@ node 000
 ```
 
 See [`src/assembler.zig`](src/assembler.zig) for the assembler syntax.
+
+### Chip files
+
+A chip file says what a chip is made of, in [ZON](https://ziglang.org/documentation/master/#toc-ZON):
+the size of its array, and each node that is not a basic node with no
+pins, with its ROM type, GPIO pins, and the word of its ROM it starts at
+after reset (`.cold` or `.warm`). SERDES boot nodes have a data register.
+The GA144's is
+[`src/chips/ga144.zon`](src/chips/ga144.zon), built into gasim.
+[`examples/chips/2x2.zon`](examples/chips/2x2.zon) is a chip of four nodes,
+one of them wired as the GA144's 708 is:
+
+```
+$ gasim run --chip examples/chips/2x2.zon --uart 100 examples/chips/hello-2x2.ga
+Hello, world!
+```
+
+A node gets the ROM of the GA144 node with its number if that node has the
+same ROM type, and else of a GA144 node that does (basic nodes 404's; the
+special nodes, whose ROMs differ, only their own). A ROM names ports, and
+its `warm` jumps to its GA144 node's neighbours, so a node with a borrowed
+ROM should sit as that node does: in a column and row of the same parity,
+and off the same edges. Pin 17 wakes a node through up on the top and
+bottom rows and left on the others, where that port faces off the array.
+
+Programs in `.ga` are assembled for the chip's ROMs. arrayForth 3 and
+colorForth programs are assembled for the GA144's, and gasim refuses one
+for a node whose ROM type differs from the GA144's node of its number.
 
 ### ROM
 

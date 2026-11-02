@@ -10,8 +10,8 @@
 //! and up faces south, and odd rows are the reverse. Ports facing off the edge
 //! of the array are unconnected unless a device is attached.
 //!
-//! Nodes are configured like the GA144 node of the same number, with its
-//! GPIO pins and, once loaded, its ROM. See `ga144`.
+//! Nodes are configured as the chip's `Spec` says, with their ROM types,
+//! GPIO pins and data registers, the GA144's by default (`Spec.ga144`).
 //!
 //! Each node keeps its own time, as it executes. A node that waits on a port
 //! catches up with the node it transfers a word with, and the node furthest
@@ -19,6 +19,8 @@
 //! their nodes' times, see what the nodes do in the order they do it.
 
 layout: Layout,
+/// what the chip is made of; the nodes it lists must outlive the chip
+spec: Spec,
 nodes: []Computer,
 /// ports between neighbours
 ports: []Port,
@@ -367,7 +369,8 @@ pub fn facing(x: u16, y: u16, direction: Direction) Cardinal {
 /// Allocates and wires up the nodes. As after reset, nodes start with a
 /// multiport execute of their neighbours' ports, waiting for code, until
 /// they are loaded with ROM or a program.
-pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Chip {
+pub fn init(gpa: Allocator, spec: Spec) Allocator.Error!Chip {
+    const layout = spec.layout();
     const count = layout.count();
     const nodes = try gpa.alloc(Computer, count);
     errdefer gpa.free(nodes);
@@ -379,15 +382,15 @@ pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Chip {
     errdefer gpa.free(queue);
     const queued = try gpa.alloc(bool, count);
 
-    var chip: Chip = .{ .layout = layout, .nodes = nodes, .ports = ports, .queue = queue, .queued = queued };
+    var chip: Chip = .{ .layout = layout, .spec = spec, .nodes = nodes, .ports = ports, .queue = queue, .queued = queued };
     @memset(ports, .{});
     @memset(queued, false);
     for (nodes, 0..) |*n, i| {
         const number = layout.nodeNumber(@intCast(i));
         n.* = .reset;
-        n.pins = ga144.pins(number);
+        n.pins = spec.pins(number);
         n.wake_port = wakePort(layout, @intCast(i), n.pins);
-        if (ga144.hasData(number)) n.data = 0;
+        if (spec.hasData(number)) n.data = 0;
         n.p.address = Address.fromWord(port.multiport(layout.neighbourPorts(@intCast(i))));
         chip.wake(@intCast(i));
     }
@@ -488,22 +491,35 @@ pub fn node(self: Chip, number: u16) ?*Computer {
     return &self.nodes[self.layout.index(number) orelse return null];
 }
 
-/// Loads each node's ROM from a dump, by node number, and starts the boot
-/// nodes in ROM as after reset. Nodes missing from the dump get the ROM of a
-/// basic node, and wait for code on their ports as basic nodes do. Load ROM
-/// before programs, and before stepping the chip.
+/// Loads each node's ROM from a dump of a GA144's, and starts the nodes the
+/// chip starts in ROM as after reset. A node gets the ROM of the GA144 node
+/// with its number if that has the ROM type the chip gives it, and else of
+/// a GA144 node that has. Nodes whose ROM is missing from the dump get a
+/// basic node's, and wait for code on their ports as basic nodes do. Load
+/// ROM before programs, and before stepping the chip.
 pub fn loadRom(self: *Chip, roms: []const ga144.NodeRom) error{MissingRom}!void {
     const basic = findRom(roms, ga144.basic_node);
     for (self.nodes, 0..) |*n, i| {
         const number = self.layout.nodeNumber(@intCast(i));
-        const own = findRom(roms, number);
+        const own = romOfType(roms, number, self.spec.node(number).rom);
         const rom = own orelse basic orelse return error.MissingRom;
         @memcpy(n.mem[64..], &rom.words);
-        // cold and warm are where they are only in the node's own ROM
-        if (own != null) if (ga144.resetAddress(number)) |address| {
+        // cold and warm are where they are only in a ROM of the node's type
+        if (own != null) if (self.spec.resetAddress(number)) |address| {
             n.p.address = Address.fromWord(address);
         };
     }
+}
+
+/// the ROM in a dump of a GA144's for a node with `rom_type`: node
+/// `number`'s if it has that type, or else another's that has. The special
+/// nodes' ROMs differ from each other, so they have only their own.
+fn romOfType(roms: []const ga144.NodeRom, number: u16, rom_type: ga144.RomType) ?*const ga144.NodeRom {
+    if (Spec.ga144.node(number).rom == rom_type) if (findRom(roms, number)) |own| return own;
+    if (rom_type == .special) return null;
+    if (rom_type == .basic) if (findRom(roms, ga144.basic_node)) |basic| return basic;
+    for (roms) |*rom| if (Spec.ga144.node(rom.node).rom == rom_type) return rom;
+    return null;
 }
 
 fn findRom(roms: []const ga144.NodeRom, number: u16) ?*const ga144.NodeRom {
@@ -1202,6 +1218,33 @@ test "the node furthest behind in time steps first" {
     for (chip.nodes) |n| try expect(n.suspended);
 }
 
+test "a chip of a size alone has basic nodes with no pins" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 9, .columns = 18 });
+    defer chip.deinit(std.testing.allocator);
+    // 708 and 001 are not the GA144's
+    try expectEqual(0, chip.node(708).?.pins);
+    try expectEqual(null, chip.node(708).?.wake_port);
+    try expectEqual(null, chip.node(1).?.data);
+}
+
+test "a node gets the ROM of a GA144 node of its type" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    var chip: Chip = try .init(std.testing.allocator, .{
+        .rows = 2,
+        .columns = 2,
+        .nodes = &.{.{ .node = 100, .rom = .async_boot, .pins = &.{ 17, 1 }, .reset = .cold }},
+    });
+    defer chip.deinit(std.testing.allocator);
+    try chip.loadRom(parsed);
+
+    // 708's ROM, starting at cold; and 101, basic, 404's, waiting on its ports
+    try expectEqualSlices(Word, &findRom(parsed, 708).?.words, chip.node(100).?.mem[64..]);
+    try expectEqual(Address.fromWord(0xaa), chip.node(100).?.p.address);
+    try expectEqualSlices(Word, &findRom(parsed, 404).?.words, chip.node(101).?.mem[64..]);
+    try expect(chip.node(101).?.p.address.io);
+}
+
 test "warm in ROM goes to the ports each node is wired to" {
     var roms: [144]ga144.NodeRom = undefined;
     const parsed = try testRom(&roms);
@@ -1220,7 +1263,7 @@ test "warm in ROM goes to the ports each node is wired to" {
         try expectEqual(@as(u9, @bitCast(reset_address)), @as(u9, @intCast(warm & 0x1ff)));
         // boot nodes start at cold instead
         const number = chip.layout.nodeNumber(@intCast(i));
-        if (ga144.resetAddress(number) == null) try expectEqual(reset_address, n.p.address);
+        if (Spec.ga144.resetAddress(number) == null) try expectEqual(reset_address, n.p.address);
     }
 }
 
@@ -1738,6 +1781,7 @@ const assembler = @import("assembler.zig");
 const boot = @import("boot.zig");
 const disassembler = @import("disassembler.zig");
 const ga144 = @import("ga144.zig");
+const Spec = @import("Spec.zig");
 const testRom = @import("rom.zig").testRom;
 const Console = @import("Console.zig");
 const Uart = @import("Uart.zig");
@@ -1756,5 +1800,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;

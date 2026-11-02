@@ -31,7 +31,7 @@ pub fn assemble(gpa: Allocator, disk: []const u8, roms: *[144]ga144.NodeRom, dia
     }
     for (0..layout.count()) |i| {
         const node = layout.nodeNumber(@intCast(i));
-        const block: u32 = switch (ga144.romType(node)) {
+        const block: u32 = switch (Spec.ga144.node(node).rom) {
             .basic => 2222,
             .serdes_boot => 2223,
             .sync_boot => 2224,
@@ -126,3 +126,4 @@ const arrayforth = @import("arrayforth.zig");
 const assembler = @import("assembler.zig");
 const Chip = @import("Chip.zig");
 const ga144 = @import("ga144.zig");
+const Spec = @import("Spec.zig");

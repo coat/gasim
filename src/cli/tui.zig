@@ -2160,13 +2160,13 @@ const TestTui = struct {
         return self.initLayout(source, .ga144);
     }
 
-    fn initLayout(self: *TestTui, source: []const u8, layout: Chip.Layout) !void {
+    fn initLayout(self: *TestTui, source: []const u8, spec: gasim.Spec) !void {
         const gpa = std.testing.allocator;
-        self.chip = try .init(gpa, layout);
+        self.chip = try .init(gpa, spec);
         errdefer self.chip.deinit(gpa);
         var programs: [4]gasim.assembler.Program = undefined;
         var diagnostic: gasim.assembler.Diagnostic = .{};
-        for (try gasim.assembler.assembleNodes(source, &programs, &diagnostic)) |program| try self.chip.load(program);
+        for (try gasim.assembler.assembleNodesFor(&spec, source, &programs, &diagnostic)) |program| try self.chip.load(program);
 
         self.input = .init(&self.input_buffer);
         self.output = .fixed(&self.output_buffer);

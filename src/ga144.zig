@@ -1,7 +1,6 @@
-//! Configuration of the nodes of a GA144: which ROM each node has, its GPIO
-//! pins, and where it starts after reset. Chips with other layouts use the
-//! same configuration by node number, and nodes beyond the GA144's are basic
-//! nodes.
+//! The GA144's ROMs: the kinds of ROM a node can have, their named entry
+//! points, and dumps of a real chip's ROM. Which node has which, and its
+//! pins, are in `chips/ga144.zon` (see `Spec`).
 
 pub const RomType = enum {
     basic,
@@ -14,19 +13,6 @@ pub const RomType = enum {
     /// external memory and eForth support, whose ROM words are not described
     special,
 };
-
-pub fn romType(node: u16) RomType {
-    return switch (node) {
-        117, 617, 709, 713, 717 => .analog,
-        1, 701 => .serdes_boot,
-        300 => .sync_boot,
-        708 => .async_boot,
-        705 => .spi_boot,
-        200 => .one_wire,
-        7, 8, 9, 105, 106, 107, 108 => .special,
-        else => .basic,
-    };
-}
 
 pub const RomWord = struct { []const u8, u10 };
 
@@ -70,9 +56,9 @@ pub fn romWords(rom_type: RomType) []const RomWord {
     };
 }
 
-/// address of a named ROM word in a node
-pub fn romWord(node: u16, name: []const u8) ?u10 {
-    return rom_word_maps.get(romType(node)).get(name);
+/// address of a named ROM word in a ROM of `rom_type`
+pub fn romWordOf(rom_type: RomType, name: []const u8) ?u10 {
+    return rom_word_maps.get(rom_type).get(name);
 }
 
 const rom_word_maps = maps: {
@@ -81,32 +67,7 @@ const rom_word_maps = maps: {
     break :maps maps;
 };
 
-/// Boot nodes start at cold, in ROM, after reset. Node 200 starts at warm.
-/// Every other node starts with a multiport execute of its neighbours' ports.
-pub fn resetAddress(node: u16) ?u9 {
-    return switch (node) {
-        1, 300, 701, 705, 708 => 0xaa,
-        200 => 0xa9,
-        else => null,
-    };
-}
-
-/// io bits of the GPIO pins a node has, out of 17, 5, 3 and 1
-pub fn pins(node: u16) u18 {
-    return switch (node) {
-        100, 200, 500, 600, 715, 217, 317, 417, 517 => 1 << 17,
-        300, 708 => 1 << 17 | 1 << 1,
-        705, 8 => 1 << 17 | 1 << 5 | 1 << 3 | 1 << 1,
-        else => 0,
-    };
-}
-
-/// True for the SERDES nodes, whose data register is written at reset
-pub fn hasData(node: u16) bool {
-    return node == 1 or node == 701;
-}
-
-/// the node whose ROM is given to nodes beyond a GA144
+/// the GA144 node whose ROM a basic node gets
 pub const basic_node = 404;
 
 pub const NodeRom = struct {
@@ -132,11 +93,10 @@ pub fn parseRom(text: []const u8, roms: []NodeRom) error{ InvalidRom, TooManyNod
     return roms[0..count];
 }
 
-test romWord {
-    try expectEqual(0xa9, romWord(404, "warm"));
-    try expectEqual(0xcc, romWord(300, "*.17"));
-    try expectEqual(null, romWord(708, "*.17"));
-    try expectEqual(0xb0, romWord(1717, "*.17"));
+test romWordOf {
+    try expectEqual(0xa9, romWordOf(.basic, "warm"));
+    try expectEqual(0xcc, romWordOf(.sync_boot, "*.17"));
+    try expectEqual(null, romWordOf(.async_boot, "*.17"));
 }
 
 test parseRom {
