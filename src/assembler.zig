@@ -207,6 +207,8 @@ const Assembler = struct {
 
     fn nodeNumber(self: *Assembler) Error!u16 {
         const token = try self.next() orelse return error.InvalidNode;
+        // on a chip after the first, such as 1.708
+        if (std.mem.indexOfScalar(u8, token, '.') != null) return Chip.parseNode(token) catch error.InvalidNode;
         const value = number(token) catch return error.InvalidNode;
         if (value == null or value.? < 0 or value.? > 9999) return error.InvalidNode;
         return @intCast(value.?);
@@ -709,6 +711,7 @@ test "labels and then at the end of RAM" {
 }
 
 const Builder = @import("Builder.zig");
+const Chip = @import("Chip.zig");
 const f18 = @import("f18.zig");
 const Spec = @import("Spec.zig");
 const Address = f18.Address;
@@ -755,10 +758,13 @@ test "node directive" {
     try expectEqualStrings("node 1", diagnostic.token);
     // a single node can be any node
     try expectEqual(5, (try assemble("node 5 dup", &diagnostic)).node);
+    // on a chip after the first
+    try expectEqual(10708, (try assemble("node 1.708 dup", &diagnostic)).node);
     try expectError(error.UndefinedLabel, assemble("node 1 : x node 2 x", &diagnostic));
     try expectAssembleError(error.InvalidNode, "node");
     try expectAssembleError(error.InvalidNode, "node 10000");
     try expectAssembleError(error.InvalidNode, "node up");
+    try expectAssembleError(error.InvalidNode, "node 1.10000");
     try expectAssembleError(error.ReservedLabel, ": node");
 }
 

@@ -134,9 +134,15 @@ done.
    - ✓ A board file lists serial ports on the chip's pins, pull-ups, wires
      and jumpers (`--board`, `--usb`, `--jumper`), and ships as `evb002`:
      its host chip, with USB ports A and B, NO BOOT and its pull-ups.
-   - Boards of more than one chip: the EVB002's target, joined to the host
-     by SERDES (701 to 001) and through J34 and J35 by node 300, its USB
-     port C, and reset lines between them.
+   - ✓ Boards of more than one chip, alike, whose nodes run under one
+     scheduler and are numbered k.yxx on chip k: the EVB002's target,
+     joined to the host by SERDES (701 to 001, word by word as DB001 §3.6
+     describes it, with no flow control) and through J34 and J35 by node
+     300, and its USB port C. Within 1% of the instructions before on the
+     benchmarks.
+   - The EVB002's reset lines: host 500.17 and port C's RTS resetting the
+     target through J22.
+   - Chips after the first in arrayForth 3 programs and the IDE's words.
 2. **A shared clock.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
      later of their times as a word passes between them.
@@ -176,7 +182,9 @@ done.
    - ✓ Streams made by [ga-tools](https://github.com/mschuldt/ga-tools)
      booting 708 (`zig build ga-tools`): a check that doesn't involve
      GreenArrays' code.
-   - SPI boot through 705's ROM, and two chips over SERDES and 300↔300.
+   - ✓ Code from the host chip running on the target's SERDES boot ROM.
+   - SPI boot through 705's ROM, and the host booting the target over
+     SERDES and 300↔300 with GreenArrays' own code.
 5. **arrayForth 3 under Wine, driving gasim.** The board's USB ports A, B and
    C as ptys, mapped to Wine COM ports, so that the unmodified
    `sF5b2-af3.exe` boots the chip, runs its IDE and burns flash. Risk:
