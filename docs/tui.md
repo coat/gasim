@@ -20,12 +20,13 @@ executing.
 | `n` | step the selected node |
 | `z` | go back to before the last step or run, up to 64 times |
 | `hjkl`, arrows | select a node on the map, or move through memory in the node panel |
-| `tab`, `shift+tab` | move to the next or previous panel, from the map and node panels |
+| `tab`, `shift+tab` | move to the next or previous panel, except while typing |
 | `t` | on the map, show tiles where they fit and numbers otherwise, numbers, or tiles to scroll through |
-| `alt+1`-`5` | move to the map, console, node, aforth or debug panel from any panel, showing it, as does `ctrl` in terminals that report it |
+| `alt+1`-`5` | move to the map, console, node, aforth or debug panel from any panel, even while typing, showing it, as does `ctrl` in terminals that report it; `alt+2` and `alt+4` type into the console or aforth panel |
+| `alt+h` `j` `k` `l` | move to the panel to the left, below, above or to the right, from any panel and even while typing: the nearest, and of those the one last left, typing into the console or aforth panel as `alt+2` and `alt+4` do |
 | `1` `2` `3` `4` `5` | show or hide the map, console, node, aforth and debug panels |
 | `f`, `esc` | fill the screen with the panel, and go back |
-| `<` `>` `-` `+` | resize the panels, as can dragging their borders |
+| `<` `>` `-` `+` | narrow or widen the left column, and shorten or lengthen the focused panel in it, or the map from the node panel, as can dragging any border between panels |
 | `pgup` `pgdn` | page through memory, or scroll the console or aforth panel |
 | `b` | set or clear a breakpoint on the word in memory under the cursor |
 | `w` | watch the selected node's reads from a port, with `r` `d` `l` `u`, or its writes to one, with `R` `D` `L` `U`, or stop watching it |
@@ -40,10 +41,17 @@ is about to fetch a word with a breakpoint, or makes a watched transfer,
 and selects that node. Going back leaves the console as it is: its output
 stays, and input that nodes have read is not read again.
 Borders between panels can be dragged, or on touch screens, which turn drags
-into scrolling, tapped and then tapped again where they should go. In
-the console, typed text is sent as input with `enter`, `ctrl+d` ends the
-input as the end of a pipe would, and `esc` goes back to the map. Long lines
-of output wrap.
+into scrolling, tapped and then tapped again where they should go.
+
+The console and the aforth panel have two modes, like the colorForth
+editor. Until you start typing, they take the same keys as the other
+panels, so they can be zoomed, hidden, resized and left, and the chip run
+and stepped, while `j` `k` or `up` `down` scroll their output, `pgup`
+`pgdn` page it, and `g` `G` or `home` `end` go to its start and end. `i`,
+`a` or `enter` starts typing, as do `alt+2` and `alt+4` and clicking the
+prompt, and the status bar shows `typing`; `esc` stops. In
+the console, typed text is sent as input with `enter`, and `ctrl+d` ends the
+input as the end of a pipe would. Long lines of output wrap.
 
 The aforth panel takes lines of arrayForth 3, as `gasim aforth` does, with the
 selected node as the target of the IDE's words: `x15. LIT` pushes onto its

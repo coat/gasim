@@ -74,9 +74,12 @@ const Panel = enum { map, console, forth, node, debug };
 /// the chip's panels, or the colorForth editor
 const Screen = enum { chip, editor };
 
-/// the border between the left panels and the node panel, or between the
-/// map and the console
-const Border = enum { columns, rows };
+/// the border between the left panels and the node panel, or the one above
+/// a panel in the left column, by its place in `Tui.stacked`
+const Border = union(enum) { columns, rows: usize };
+
+/// a panel in the left column, where it was last drawn
+const Stacked = struct { panel: Panel, top: u16, height: u16 };
 
 /// what the debug panel shows: the trace, the breakpoints and watches, or
 /// the steps and runs to go back to
@@ -133,9 +136,10 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "alt+1-5", "the map, console, node, aforth or debug panel, showing it" },
         .{ "ctrl+1-5", "the same, in terminals that report it" },
         .{ "alt+6", "the colorForth editor, with a .cf file open" },
+        .{ "alt+h j k l", "the panel to the left, below, above or right" },
         .{ "ctrl+c", "quit" },
     } },
-    .{ "map and node panels", &.{
+    .{ "panels, except while typing", &.{
         .{ "space", "run or pause" },
         .{ "s", "step the next node to run, and select it" },
         .{ "S", "a round of steps, the furthest behind first" },
@@ -145,7 +149,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "1 2 3 4 5", "show or hide the map, console, node, aforth and debug panels" },
         .{ "f, esc", "fill the screen with the panel, and go back" },
         .{ "< >", "narrow or widen the panels on the left" },
-        .{ "- +", "shorten or lengthen the map" },
+        .{ "- +", "shorten or lengthen the panel, or the map" },
         .{ "q", "quit" },
     } },
     .{ "map", &.{
@@ -160,18 +164,26 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "w, then r d l u", "watch reads from a port, or stop watching them" },
         .{ "w, then R D L U", "watch writes to a port, or stop watching them" },
     } },
-    .{ "console", &.{
+    .{ "console and aforth", &.{
+        .{ "i a, enter", "type" },
+        .{ "alt+2, alt+4", "go to the console or aforth, typing" },
+        .{ "click the prompt", "type" },
+        .{ "up down, j k", "scroll" },
+        .{ "pgup pgdn", "page" },
+        .{ "g G, home end", "the first or last of the output" },
+    } },
+    .{ "typing in the console", &.{
         .{ "enter", "send the line" },
         .{ "ctrl+d", "send what is typed without a newline, or end the input" },
         .{ "pgup pgdn", "scroll" },
-        .{ "esc", "leave the console" },
+        .{ "esc", "done" },
     } },
-    .{ "aforth", &.{
+    .{ "typing in aforth", &.{
         .{ "enter", "interpret the line, with the selected node as the target" },
         .{ "tab", "complete a word" },
         .{ "up down", "recall lines typed" },
         .{ "pgup pgdn", "scroll" },
-        .{ "esc", "leave the aaforth panel" },
+        .{ "esc", "done" },
     } },
     .{ "debug", &.{
         .{ "h l, left right", "trace, breakpoints and watches, or history" },
@@ -258,11 +270,20 @@ const Tui = struct {
     selected: u16,
     screen: Screen = .chip,
     focus: Panel = .map,
+    /// whether keys are typed into the console or the aaforth panel, rather
+    /// than left to the panels, as in the editor
+    inserting: bool = false,
+    /// when each panel last had the focus, counting changes of focus, for
+    /// moving back to the one left with alt and h j k l
+    focused_at: std.EnumArray(Panel, u64) = .initFill(0),
+    focus_changes: u64 = 0,
     shown: std.EnumSet(Panel) = .full,
     zoomed: ?Panel = null,
     /// sizes chosen by the user, rather than fitting the chip
     left_width: ?u16 = null,
-    map_height: ?u16 = null,
+    /// heights of the map and the panels under it, the last of those shown
+    /// taking what is left
+    heights: std.EnumArray(Panel, ?u16) = .initFill(null),
     /// a border being moved, by dragging it, or by tapping it and then
     /// where it should go, for touch screens that do not report drags
     dragging: ?Border = null,
@@ -346,9 +367,10 @@ const Tui = struct {
     windows: std.EnumArray(Panel, ?vaxis.Window) = .initFill(null),
     memory_window: ?vaxis.Window = null,
     /// the column of the border between the left panels and the node panel,
-    /// and the row of the border between the map and the console
+    /// and the panels in the left column, top to bottom
     column_border: ?u16 = null,
-    row_border: ?u16 = null,
+    stacked: [4]Stacked = undefined,
+    stacked_len: usize = 0,
 
     /// text drawn in a frame, which must last until the frame is rendered
     frame_buffer: [64 * 1024]u8 = undefined,
@@ -450,6 +472,13 @@ const Tui = struct {
                         return true;
                     }
                 }
+                // and alt with h j k l the panel that way
+                if (self.screen == .chip) for ("hjkl", [_][2]i2{ .{ -1, 0 }, .{ 0, 1 }, .{ 0, -1 }, .{ 1, 0 } }) |letter, way| {
+                    if (k.matches(letter, .{ .alt = true })) {
+                        if (self.neighbor(way[0], way[1])) |panel| self.focusPanel(panel);
+                        return true;
+                    }
+                };
                 if (k.matches('6', .{ .alt = true }) or k.matches('6', .{ .ctrl = true })) {
                     if (self.options.colorforth == null) {
                         self.message = "open a .cf file to edit colorForth";
@@ -457,8 +486,8 @@ const Tui = struct {
                     return true;
                 }
                 if (self.screen == .editor) return self.editorKey(k);
-                if (self.focus == .console and try self.consoleKey(k)) return true;
-                if (self.focus == .forth and try self.forthKey(k)) return true;
+                if (self.inserting and self.focus == .console and try self.consoleKey(k)) return true;
+                if (self.inserting and self.focus == .forth and try self.forthKey(k)) return true;
                 return self.key(k);
             },
             .mouse => |m| self.mouse(m),
@@ -487,8 +516,8 @@ const Tui = struct {
         // resizing
         if (k.matches('<', .{})) self.left_width = (self.left_width orelse self.defaultLeftWidth()) -| 2;
         if (k.matches('>', .{})) self.left_width = (self.left_width orelse self.defaultLeftWidth()) + 2;
-        if (k.matches('-', .{})) self.map_height = (self.map_height orelse self.defaultMapHeight()) -| 1;
-        if (k.matchesAny(&.{ '+', '=' }, .{})) self.map_height = (self.map_height orelse self.defaultMapHeight()) + 1;
+        if (k.matches('-', .{})) self.resize(-1);
+        if (k.matchesAny(&.{ '+', '=' }, .{})) self.resize(1);
 
         // running and stepping
         if (k.matches(' ', .{})) {
@@ -552,9 +581,24 @@ const Tui = struct {
                 }
             },
             .debug => self.debugKey(k),
-            .console, .forth => {},
+            .console => self.textKey(k, &self.console_scroll),
+            .forth => self.textKey(k, &self.forth_scroll),
         }
         return true;
+    }
+
+    /// Handles keys for the console or the aaforth panel when not typing into
+    /// it, which scroll its output, or start typing
+    fn textKey(self: *Tui, k: vaxis.Key, scroll: *usize) void {
+        const panel = self.focus;
+        if (k.matchesAny(&.{ 'i', 'a', vaxis.Key.enter }, .{})) self.inserting = true;
+        if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) scroll.* += 1;
+        if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) scroll.* -|= 1;
+        if (k.matches(vaxis.Key.page_up, .{})) scroll.* += self.textPage(panel);
+        if (k.matches(vaxis.Key.page_down, .{})) scroll.* -|= self.textPage(panel);
+        // drawing stops at the first page
+        if (k.matchesAny(&.{ vaxis.Key.home, 'g' }, .{})) scroll.* = std.math.maxInt(usize);
+        if (k.matchesAny(&.{ vaxis.Key.end, 'G' }, .{})) scroll.* = 0;
     }
 
     /// Shows the help, at the editor's keys in the editor
@@ -851,18 +895,13 @@ const Tui = struct {
     }
 
     /// Handles keys typed into the console, returning false for keys it
-    /// leaves to the panels. Escape leaves it, and tab does nothing, as input
+    /// leaves to the panels. Escape stops typing, and tab does nothing, as input
     /// is printable characters.
     fn consoleKey(self: *Tui, k: vaxis.Key) !bool {
         if (k.codepoint == vaxis.Key.tab) {
             return true;
         } else if (k.matches(vaxis.Key.escape, .{})) {
-            // to a panel in view, rather than one hidden by zooming
-            self.zoomed = null;
-            for ([_]Panel{ .map, .node }) |panel| if (self.shown.contains(panel)) {
-                self.focus = panel;
-                break;
-            };
+            self.inserting = false;
         } else if (k.matches(vaxis.Key.page_up, .{})) {
             self.console_scroll += self.consolePage();
         } else if (k.matches(vaxis.Key.page_down, .{})) {
@@ -894,16 +933,12 @@ const Tui = struct {
     }
 
     /// Handles keys typed into the aaforth panel, returning false for keys it
-    /// leaves to the panels. Escape leaves it, and tab completes words.
+    /// leaves to the panels. Escape stops typing, and tab completes words.
     fn forthKey(self: *Tui, k: vaxis.Key) !bool {
         if (k.codepoint == vaxis.Key.tab) {
             if (!k.mods.shift) self.complete();
         } else if (k.matches(vaxis.Key.escape, .{})) {
-            self.zoomed = null;
-            for ([_]Panel{ .map, .node }) |panel| if (self.shown.contains(panel)) {
-                self.focus = panel;
-                break;
-            };
+            self.inserting = false;
         } else if (k.matches(vaxis.Key.page_up, .{})) {
             self.forth_scroll += self.textPage(.forth);
         } else if (k.matches(vaxis.Key.page_down, .{})) {
@@ -1071,7 +1106,9 @@ const Tui = struct {
         for ([_]Panel{ .map, .console, .forth, .debug, .node }) |panel| {
             const w = self.windows.get(panel) orelse continue;
             if (w.hasMouse(m) == null) continue;
-            self.focus = panel;
+            self.focusOn(panel);
+            // the prompt's row types into it
+            if ((panel == .console or panel == .forth) and m.row == w.y_off + w.height -| 1) self.inserting = true;
             // a row of the breakpoints or the history chooses it
             if (panel == .debug and self.debug != .trace) {
                 const row = self.debug_first + @as(usize, @intCast(m.row - w.y_off));
@@ -1104,14 +1141,51 @@ const Tui = struct {
     /// the border between panels under the mouse
     fn onBorder(self: Tui, m: vaxis.Mouse) ?Border {
         if (self.column_border) |column| if (m.col == column or m.col + 1 == column) return .columns;
-        if (self.row_border) |row| if ((m.row == row or m.row + 1 == row) and (self.column_border == null or m.col < self.column_border.?)) return .rows;
+        if (self.column_border != null and m.col >= self.column_border.?) return null;
+        for (self.stacked[0..self.stacked_len], 0..) |stacked, n| {
+            if (n > 0 and (m.row == stacked.top or m.row + 1 == stacked.top)) return .{ .rows = n };
+        }
         return null;
     }
 
     fn moveBorder(self: *Tui, border: Border, m: vaxis.Mouse) void {
         switch (border) {
             .columns => self.left_width = @intCast(@max(m.col, 0)),
-            .rows => self.map_height = @intCast(@max(m.row, 0)),
+            .rows => |n| self.moveRow(n, @intCast(@max(m.row, 0))),
+        }
+    }
+
+    /// Moves the border above the nth panel in the left column to a row,
+    /// keeping the bottom of that panel where it is
+    fn moveRow(self: *Tui, n: usize, row: u16) void {
+        // from a layout since drawn too small for one
+        if (n == 0 or n >= self.stacked_len) return;
+        // so the panels sharing what is left keep their heights too
+        for (self.stacked[0 .. self.stacked_len - 1]) |stacked| {
+            if (self.heights.get(stacked.panel) == null) self.heights.set(stacked.panel, stacked.height);
+        }
+        const above = self.stacked[n - 1];
+        const below = self.stacked[n];
+        const top = @max(row, above.top);
+        self.heights.set(above.panel, top - above.top);
+        // the last takes what is left
+        if (n + 1 < self.stacked_len) self.heights.set(below.panel, (below.top + below.height) -| top);
+    }
+
+    /// Lengthens or shortens the focused panel in the left column, or the
+    /// map from the node panel, by moving its bottom border, or its top one
+    /// for the last
+    fn resize(self: *Tui, rows: i32) void {
+        if (self.stacked_len < 2) return;
+        var focused: ?usize = if (self.stacked[0].panel == .map) 0 else null;
+        for (self.stacked[0..self.stacked_len], 0..) |stacked, i| {
+            if (stacked.panel == self.focus) focused = i;
+        }
+        const n = focused orelse return;
+        if (n + 1 < self.stacked_len) {
+            self.moveRow(n + 1, @intCast(@max(@as(i32, self.stacked[n + 1].top) + rows, 0)));
+        } else {
+            self.moveRow(n, @intCast(@max(@as(i32, self.stacked[n].top) - rows, 0)));
         }
     }
 
@@ -1235,7 +1309,16 @@ const Tui = struct {
         if (panel == .forth and self.options.forth == null) return;
         self.shown.insert(panel);
         if (self.zoomed != null) self.zoomed = panel;
+        self.focusOn(panel);
+        self.inserting = panel == .console or panel == .forth;
+    }
+
+    /// Moves the focus to a panel, not typing into it
+    fn focusOn(self: *Tui, panel: Panel) void {
+        self.focus_changes += 1;
+        self.focused_at.set(self.focus, self.focus_changes);
         self.focus = panel;
+        self.inserting = false;
     }
 
     fn toggle(self: *Tui, panel: Panel) void {
@@ -1243,13 +1326,61 @@ const Tui = struct {
         if (self.shown.contains(panel) and self.shown.count() == 1) return;
         self.shown.toggle(panel);
         if (self.zoomed == panel) self.zoomed = null;
-        // rather than the console, where keys would be typed as input
+        // the chip's panels first
         if (!self.shown.contains(self.focus)) {
             for ([_]Panel{ .node, .map, .console, .forth, .debug }) |other| if (self.shown.contains(other)) {
-                self.focus = other;
+                self.focusOn(other);
                 break;
             };
         }
+    }
+
+    /// The panel in view beside the focused one, to the left, below, above
+    /// or to the right: the nearest, then the one focused last, and then the
+    /// one beside the middle of the focused one
+    fn neighbor(self: *Tui, dx: i2, dy: i2) ?Panel {
+        const from = self.windows.get(self.focus) orelse return null;
+        const Candidate = struct { panel: Panel, gap: i32, focused_at: u64, middle: bool };
+        var best: ?Candidate = null;
+        for (std.enums.values(Panel)) |panel| {
+            if (panel == self.focus) continue;
+            const w = self.windows.get(panel) orelse continue;
+            // squeezed to no rows
+            if (w.width == 0 or w.height == 0) continue;
+            // the axis moved along, and the one across it
+            const along: [2][2]i32 = if (dx != 0)
+                .{ .{ from.x_off, from.width }, .{ w.x_off, w.width } }
+            else
+                .{ .{ from.y_off, from.height }, .{ w.y_off, w.height } };
+            const across: [2][2]i32 = if (dx != 0)
+                .{ .{ from.y_off, from.height }, .{ w.y_off, w.height } }
+            else
+                .{ .{ from.x_off, from.width }, .{ w.x_off, w.width } };
+            const gap = if (dx + dy < 0)
+                along[0][0] - (along[1][0] + along[1][1])
+            else
+                along[1][0] - (along[0][0] + along[0][1]);
+            if (gap < 0) continue;
+            if (across[1][0] >= across[0][0] + across[0][1] or across[0][0] >= across[1][0] + across[1][1]) continue;
+            const middle = across[0][0] + @divFloor(across[0][1], 2);
+            const candidate: Candidate = .{
+                .panel = panel,
+                .gap = gap,
+                .focused_at = self.focused_at.get(panel),
+                .middle = middle >= across[1][0] and middle < across[1][0] + across[1][1],
+            };
+            const better = if (best) |b|
+                if (candidate.gap != b.gap)
+                    candidate.gap < b.gap
+                else if (candidate.focused_at != b.focused_at)
+                    candidate.focused_at > b.focused_at
+                else
+                    candidate.middle and !b.middle
+            else
+                true;
+            if (better) best = candidate;
+        }
+        return if (best) |b| b.panel else null;
     }
 
     /// moves the focus to the next panel in view
@@ -1260,7 +1391,7 @@ const Tui = struct {
             i = @intCast(@mod(@as(isize, @intCast(i)) + direction, panels.len));
             if (self.visible().contains(panels[i])) break;
         }
-        self.focus = panels[i];
+        self.focusOn(panels[i]);
     }
 
     fn visible(self: Tui) std.EnumSet(Panel) {
@@ -1315,7 +1446,7 @@ const Tui = struct {
         self.windows = .initFill(null);
         self.memory_window = null;
         self.column_border = null;
-        self.row_border = null;
+        self.stacked_len = 0;
         if (win.width < 30 or win.height < 8) {
             _ = win.printSegment(.{ .text = "The terminal is too small" }, .{});
             return;
@@ -1327,64 +1458,68 @@ const Tui = struct {
         const layout = self.chip.layout;
         const body_height = win.height - 1;
         const shown = self.visible();
-        // the panels under the map, sharing the rest of the column
-        const below = [_]Panel{ .console, .forth, .debug };
-        var below_count: u16 = 0;
-        for (below) |panel| below_count += @intFromBool(shown.contains(panel));
-        const below_map = below_count > 0;
-        const left = shown.contains(.map) or below_map;
+        // the map, and the panels under it sharing the rest of the column
+        var column: [4]Panel = undefined;
+        var count: usize = 0;
+        for ([_]Panel{ .map, .console, .forth, .debug }) |panel| if (shown.contains(panel)) {
+            column[count] = panel;
+            count += 1;
+        };
+        const below_count: u16 = @intCast(count - @intFromBool(shown.contains(.map)));
 
         // the map and console on the left, and the node on the right
         var left_width: u16 = win.width;
         if (shown.contains(.node)) {
-            left_width = if (left) std.math.clamp(self.left_width orelse @min(self.defaultLeftWidth(), win.width -| 36), 12, win.width - 12) else 0;
-            if (left) {
+            left_width = if (count > 0) std.math.clamp(self.left_width orelse @min(self.defaultLeftWidth(), win.width -| 36), 12, win.width - 12) else 0;
+            if (count > 0) {
                 self.column_border = left_width;
                 // so resizing back takes effect at once
                 if (self.left_width != null) self.left_width = left_width;
             }
         }
-        var map_height: u16 = body_height;
-        if (shown.contains(.map) and below_map) {
-            map_height = std.math.clamp(self.map_height orelse @min(self.defaultMapHeight(), body_height -| 5), 3, body_height - 3);
-            self.row_border = map_height;
-            if (self.map_height != null) self.map_height = map_height;
-        } else if (!shown.contains(.map)) map_height = 0;
 
-        if (shown.contains(.map)) {
-            const mode = switch (self.map_mode) {
-                .auto => "",
-                .numbers => " numbers",
-                .registers => " registers",
+        var y: u16 = 0;
+        var share = if (below_count > 0) body_height / below_count else 0;
+        for (column[0..count], 0..) |panel, n| {
+            const remaining = body_height - y;
+            const height = if (n + 1 == count) remaining else height: {
+                const chosen = self.heights.get(panel);
+                // the rest share what is left, as evenly as it divides
+                if (chosen == null and panel != .map) break :height @min(share, remaining);
+                // leaving the panels below rows of their own
+                const height = @min(@max(chosen orelse @min(self.defaultMapHeight(), body_height -| 5), 3), remaining -| 3);
+                if (chosen != null) self.heights.set(panel, height);
+                break :height height;
             };
-            const title = self.print("1 chip {d}x{d}{s}", .{ layout.rows, layout.columns, mode });
-            self.drawMap(self.drawPanel(win, .map, 0, 0, left_width, map_height, title));
-            // which way the nodes out of view are, after the title
-            if (self.map_more.len > 0) {
-                const heading = win.child(.{ .x_off = 3 + @as(u16, @intCast(title.len)), .width = left_width -| (4 + @as(u16, @intCast(title.len))), .height = 1 });
-                _ = heading.printSegment(.{ .text = self.map_more, .style = .{ .bold = true } }, .{ .wrap = .none });
-            }
-        }
-        const rest = body_height - map_height;
-        var y = map_height;
-        var drawn: u16 = 0;
-        for (below) |panel| if (shown.contains(panel)) {
-            drawn += 1;
-            // the last takes what is left over
-            const height = if (drawn == below_count) body_height - y else rest / below_count;
+            if (panel == .map and below_count > 0) share = (body_height - height) / below_count;
+            self.stacked[n] = .{ .panel = panel, .top = y, .height = height };
             const title = switch (panel) {
+                .map => self.print("1 chip {d}x{d}{s}", .{ layout.rows, layout.columns, switch (self.map_mode) {
+                    .auto => "",
+                    .numbers => " numbers",
+                    .registers => " registers",
+                } }),
                 .console => self.print("2 console {d:0>3}:{t}", .{ self.options.console_node, self.options.console_port }),
                 .forth => "4 aforth",
                 else => self.debugTitle(),
             };
             const inside = self.drawPanel(win, panel, 0, y, left_width, height, title);
             switch (panel) {
+                .map => {
+                    self.drawMap(inside);
+                    // which way the nodes out of view are, after the title
+                    if (self.map_more.len > 0) {
+                        const heading = win.child(.{ .x_off = 3 + @as(u16, @intCast(title.len)), .width = left_width -| (4 + @as(u16, @intCast(title.len))), .height = 1 });
+                        _ = heading.printSegment(.{ .text = self.map_more, .style = .{ .bold = true } }, .{ .wrap = .none });
+                    }
+                },
                 .console => self.drawConsole(inside),
                 .forth => self.drawForth(inside),
                 else => self.drawDebug(inside),
             }
             y += height;
-        };
+        }
+        self.stacked_len = count;
         if (shown.contains(.node)) {
             self.drawNode(self.drawPanel(win, .node, left_width, 0, win.width - left_width, body_height, self.print("3 node {d:0>3}", .{layout.nodeNumber(self.selected)})));
         }
@@ -1712,7 +1847,7 @@ const Tui = struct {
 
         const style: vaxis.Style = if (self.focus == panel) .{} else colors.dim;
         _ = win.printSegment(.{ .text = prompt, .style = style }, .{ .row_offset = win.height - 1, .wrap = .none });
-        if (self.focus == panel and panel != .debug and scroll.* == 0) win.showCursor(@intCast(@min(prompt.len, win.width - 1)), win.height - 1);
+        if (self.focus == panel and self.inserting and scroll.* == 0) win.showCursor(@intCast(@min(prompt.len, win.width - 1)), win.height - 1);
     }
 
     /// prints labelled values on a row, with the labels in their own color
@@ -1925,8 +2060,14 @@ const Tui = struct {
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
         const hints: []const Hint = switch (self.focus) {
             .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "t", "tiles" }, .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" }, .{ "q", "quit" } },
-            .console => &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" }, .{ "esc", "map" } },
-            .forth => &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" }, .{ "esc", "map" } },
+            .console => if (self.inserting)
+                &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "esc", "done" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" } }
+            else
+                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" }, .{ "q", "quit" } },
+            .forth => if (self.inserting)
+                &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "esc", "done" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" } }
+            else
+                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" }, .{ "q", "quit" } },
             .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" } },
             .debug => switch (self.debug) {
                 .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "c", "clear" }, .{ "w", "save trace.txt" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
@@ -1934,10 +2075,14 @@ const Tui = struct {
                 .history => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "go back" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
             },
         };
-        var segments: [3 + 2 * 13]vaxis.Segment = undefined;
+        var segments: [4 + 2 * 13]vaxis.Segment = undefined;
         var len: usize = 0;
         segments[len] = state;
         len += 1;
+        if (self.inserting) {
+            segments[len] = .{ .text = " typing ", .style = .{ .fg = .{ .index = 4 }, .reverse = true, .bold = true } };
+            len += 1;
+        }
         segments[len] = .{ .text = self.print(" {d} steps ", .{self.chip.steps}), .style = colors.dim };
         len += 1;
         if (self.message) |message| {
@@ -2246,11 +2391,12 @@ test "draws the chip, console and selected node" {
     try t.press('1');
     try expect(try t.shows(0, "2 console"));
     try t.press('1');
-    // tab moves on from the map to the console, which keeps tab, and alt
-    // with a digit moves to a panel from anywhere
+    // tab moves on from the map to the console, which keeps tab while
+    // typing, and alt with a digit moves to a panel from anywhere
     t.tui.focus = .map;
     try t.press(vaxis.Key.tab);
     try expectEqual(.console, t.tui.focus);
+    try t.press('i');
     try t.press(vaxis.Key.tab);
     try expectEqual(.console, t.tui.focus);
     try t.pressWith('3', .{ .alt = true });
@@ -2285,6 +2431,7 @@ test "draws the chip, console and selected node" {
     // typing into the console, after the map
     try t.press(vaxis.Key.tab);
     try expectEqual(.console, t.tui.focus);
+    try t.press('i');
     try t.press('h');
     try t.press('i');
     try expect(try t.shows(27, "> hi"));
@@ -2334,34 +2481,62 @@ test "help lists the keys, and scrolls" {
     try expectEqual(null, t.tui.help_scroll);
 }
 
-test "escapes from the console, and ends moving a border with a key" {
+test "types into the console only after i, and ends moving a border with a key" {
     var t: TestTui = .{ .chip = undefined };
     try t.init("");
     defer t.deinit();
     t.draw();
 
-    // the cursor shows only in the console
-    t.tui.focus = .console;
-    t.draw();
+    // alt+2 types into the console, with the cursor shown, and escape
+    // stops typing, staying in the console
+    try t.pressWith('2', .{ .alt = true });
+    try expect(t.tui.inserting);
     try expect(t.screen.cursor_vis);
-    try t.pressWith('1', .{ .alt = true });
+    try t.press('f');
+    try expectEqualStrings("f", t.tui.input[0..t.tui.input_len]);
+    try t.press(vaxis.Key.escape);
+    try expect(!t.tui.inserting);
     try expect(!t.screen.cursor_vis);
+    try expectEqual(.console, t.tui.focus);
 
-    // escape from a zoomed console shows the map again
-    t.tui.focus = .console;
-    t.tui.zoomed = .console;
+    // and then keys are the panels': zooming, stepping, and leaving
+    try t.press('f');
+    try expectEqual(.console, t.tui.zoomed);
+    try expectEqualStrings("f", t.tui.input[0..t.tui.input_len]);
+    try t.press('s');
+    try expectEqual(1, t.tui.chip.steps);
     try t.press(vaxis.Key.escape);
     try expectEqual(null, t.tui.zoomed);
-    try expectEqual(.map, t.tui.focus);
-    try expect(try t.shows(0, "1 chip"));
+    try expectEqual(.console, t.tui.focus);
+    try t.press(vaxis.Key.tab);
+    try expect(t.tui.focus != .console);
 
-    // escape with the map hidden goes to the node
-    t.tui.focus = .console;
-    t.tui.shown.remove(.map);
+    // tab to the console does not type into it, and i or enter does
+    t.tui.focus = .map;
+    try t.press(vaxis.Key.tab);
+    try expectEqual(.console, t.tui.focus);
+    try expect(!t.tui.inserting);
+    try t.press(vaxis.Key.enter);
+    try expect(t.tui.inserting);
     try t.press(vaxis.Key.escape);
-    try expectEqual(.node, t.tui.focus);
-    t.tui.shown.insert(.map);
-    t.draw();
+
+    // the console can be hidden from itself
+    try t.press('2');
+    try expect(!t.tui.shown.contains(.console));
+    try expect(t.tui.focus != .console);
+    try t.press('2');
+
+    // clicking the prompt types into the console, and its output does not
+    const console = t.tui.windows.get(.console).?;
+    const x: u16 = @intCast(console.x_off);
+    const y: u16 = @intCast(console.y_off);
+    try t.click(x, y, .press);
+    try expectEqual(.console, t.tui.focus);
+    try expect(!t.tui.inserting);
+    try t.click(x, y + console.height - 1, .press);
+    try expect(t.tui.inserting);
+    try t.pressWith('1', .{ .alt = true });
+    try expect(!t.tui.inserting);
 
     // a key after tapping a border leaves it where it is
     const border = t.tui.column_border.?;
@@ -2390,7 +2565,7 @@ test "wraps the console, ends its input, and keeps sizes on screen" {
     try expectEqual(0, t.tui.console_scroll);
 
     // ctrl+d sends text typed so far, and then ends the input
-    t.tui.focus = .console;
+    try t.pressWith('2', .{ .alt = true });
     try t.press('h');
     const ctrl_d: Event = .{ .key_press = .{ .codepoint = 'd', .mods = .{ .ctrl = true } } };
     try expect(try t.tui.handle(ctrl_d));
@@ -2418,8 +2593,8 @@ test "wraps the console, ends its input, and keeps sizes on screen" {
     // titles stay within their panels
     t.tui.left_width = 12;
     t.draw();
-    try expect(try t.shows(t.tui.row_border.?, "2 console"));
-    try expect(!try t.shows(t.tui.row_border.?, "000:up"));
+    try expect(try t.shows(t.tui.stacked[1].top, "2 console"));
+    try expect(!try t.shows(t.tui.stacked[1].top, "000:up"));
 }
 
 test "stops at breakpoints set in the memory listing" {
@@ -2587,8 +2762,7 @@ test "the aaforth panel interprets arrayForth 3 at the selected node" {
     defer arena.deinit();
     t.tui.options.forth = .{ .session = &session, .output = &output, .diagnostic = &diagnostic, .arena = arena.allocator() };
     t.tui.shown.insert(.forth);
-    t.tui.focus = .forth;
-    t.draw();
+    try t.pressWith('4', .{ .alt = true });
     try expect(try t.shows(19, "4 aforth"));
 
     // NODE selects the node, and LIT pushes onto its stack
@@ -2653,6 +2827,148 @@ test "alt or ctrl and a digit focus a panel, showing it" {
     // there is no aforth panel without a session
     try t.pressWith('4', .{ .alt = true });
     try expectEqual(.node, t.tui.focus);
+}
+
+test "alt and h j k l focus the panel that way" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+
+    // the map and the console on the left, and the node on the right
+    t.tui.focus = .map;
+    try t.pressWith('l', .{ .alt = true });
+    try expectEqual(.node, t.tui.focus);
+    // back to the panel left, rather than the console beside the middle
+    try t.pressWith('h', .{ .alt = true });
+    try expectEqual(.map, t.tui.focus);
+    // nothing further up or left
+    try t.pressWith('k', .{ .alt = true });
+    try t.pressWith('h', .{ .alt = true });
+    try expectEqual(.map, t.tui.focus);
+
+    // typing into the console, as alt and a digit do, and still moving on
+    try t.pressWith('j', .{ .alt = true });
+    try expectEqual(.console, t.tui.focus);
+    try expect(t.tui.inserting);
+    try t.pressWith('l', .{ .alt = true });
+    try expectEqual(.node, t.tui.focus);
+    try expect(!t.tui.inserting);
+    try t.pressWith('h', .{ .alt = true });
+    try expectEqual(.console, t.tui.focus);
+
+    // from the node, without a panel left before, the one beside its middle
+    t.tui.focused_at = .initFill(0);
+    t.tui.focus = .node;
+    try t.pressWith('h', .{ .alt = true });
+    try expectEqual(.console, t.tui.focus);
+
+    // a panel filling the screen has none beside it
+    try t.press(vaxis.Key.escape);
+    try t.press('f');
+    try t.pressWith('l', .{ .alt = true });
+    try expectEqual(.console, t.tui.focus);
+}
+
+test "resizes the panels under the map" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+    // the map, the console and the debug panel
+    try t.press('5');
+    try expectEqual(3, t.tui.stacked_len);
+    const map = t.tui.stacked[0];
+    const console = t.tui.stacked[1];
+    const debug = t.tui.stacked[2];
+
+    // dragging the border between the console and the debug panel leaves
+    // the map as it is
+    try t.click(1, debug.top, .press);
+    try t.click(1, debug.top - 2, .drag);
+    try t.click(1, debug.top - 2, .release);
+    try expectEqual(map.height, t.tui.stacked[0].height);
+    try expectEqual(console.height - 2, t.tui.stacked[1].height);
+    try expectEqual(debug.top - 2, t.tui.stacked[2].top);
+    try expectEqual(debug.height + 2, t.tui.stacked[2].height);
+
+    // and so does dragging the map's, keeping the debug panel's top
+    try t.click(1, console.top, .press);
+    try t.click(1, console.top + 1, .drag);
+    try t.click(1, console.top + 1, .release);
+    try expectEqual(map.height + 1, t.tui.stacked[0].height);
+    try expectEqual(debug.top - 2, t.tui.stacked[2].top);
+
+    // + lengthens the focused panel, moving its bottom border, or its top
+    // one for the last, and - shortens it
+    t.tui.focus = .console;
+    try t.press('+');
+    try expectEqual(debug.top - 1, t.tui.stacked[2].top);
+    t.tui.focus = .debug;
+    try t.press('+');
+    try expectEqual(debug.top - 2, t.tui.stacked[2].top);
+    try t.press('-');
+    try expectEqual(debug.top - 1, t.tui.stacked[2].top);
+
+    // a panel keeps rows of its own however far a border is dragged
+    try t.click(1, t.tui.stacked[2].top, .press);
+    try t.click(1, 29, .drag);
+    try t.click(1, 29, .release);
+    try expectEqual(3, t.tui.stacked[2].height);
+    try t.click(1, t.tui.stacked[2].top, .press);
+    try t.click(1, 0, .drag);
+    try t.click(1, 0, .release);
+    try expectEqual(t.tui.stacked[1].top + 3, t.tui.stacked[2].top);
+}
+
+test "the four panels on the left share it, and keep their places as one border moves" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    var programs: [1]gasim.assembler.Program = undefined;
+    var descriptors: [1]gasim.boot.Descriptor = undefined;
+    var buffer: [64]u8 = undefined;
+    var output: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &output });
+    t.tui.options.forth = .{ .session = &session, .output = &output, .diagnostic = &diagnostic, .arena = std.testing.allocator };
+    t.tui.shown.insert(.forth);
+    t.tui.shown.insert(.debug);
+
+    // on a short screen, as evenly as before, with a row for each
+    t.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = 17, .screen = &t.screen });
+    try expectEqual(4, t.tui.stacked_len);
+    for (t.tui.stacked[1..4]) |stacked| try expect(stacked.height >= 2);
+
+    // moving the map's border leaves the one between aforth and debug
+    t.draw();
+    const debug = t.tui.stacked[3].top;
+    const console = t.tui.stacked[1].top;
+    try t.click(1, console, .press);
+    try t.click(1, console - 3, .drag);
+    try t.click(1, console - 3, .release);
+    try expectEqual(console - 3, t.tui.stacked[1].top);
+    try expectEqual(debug, t.tui.stacked[3].top);
+    try t.click(1, console - 3, .press);
+    try t.click(1, console + 2, .drag);
+    try t.click(1, console + 2, .release);
+    try expectEqual(debug, t.tui.stacked[3].top);
+
+    // alt and k from debug passes over panels with no rows inside
+    t.tui.heights = .initFill(null);
+    t.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = 12, .screen = &t.screen });
+    try expectEqual(0, t.tui.windows.get(.forth).?.height);
+    t.tui.focus = .debug;
+    try expect(try t.tui.handle(.{ .key_press = .{ .codepoint = 'k', .mods = .{ .alt = true } } }));
+    try expect(t.tui.windows.get(t.tui.focus).?.height > 0);
+
+    // - and + from the node panel do nothing with the map hidden
+    t.tui.shown.remove(.map);
+    t.draw();
+    const top = t.tui.stacked[1].top;
+    t.tui.focus = .node;
+    try t.press('+');
+    try expectEqual(top, t.tui.stacked[1].top);
 }
 
 test "a short screen leaves text panels no rows" {
