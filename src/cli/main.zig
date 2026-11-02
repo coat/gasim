@@ -27,6 +27,15 @@ const usage =
     \\are decompressed, and the kernel's blocks before block 18 left out.
     \\
     \\options:
+    \\  --board <file>             with run, the board around the chip,
+    \\                             described in a board file, such as
+    \\                             src/boards/evb002.zon, or evb002 for that,
+    \\                             with stdin and stdout on a serial port
+    \\  --usb <port>               the board's serial port on stdin and stdout
+    \\                             (default its first, such as A)
+    \\  --jumper <name>=on|off     set one of the board's jumpers otherwise
+    \\                             than as shipped, such as J26=off. Can be
+    \\                             given more than once.
     \\  --chip <file>              the chip, described in a chip file, such as
     \\                             src/chips/ga144.zon (default the GA144)
     \\  --layout <rows>x<columns>  a chip of that size, of basic nodes with no
@@ -100,6 +109,10 @@ pub fn main(init: std.process.Init) !void {
     const command = commandOf(args, try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io));
 
     var chip_path: ?[]const u8 = null;
+    var board_path: ?[]const u8 = null;
+    var usb: ?[]const u8 = null;
+    var settings: [32]gasim.Board.Setting = undefined;
+    var settings_len: usize = 0;
     var layout_given: ?Chip.Layout = null;
     var console_node: u16 = 0;
     var console_port: Direction = .up;
@@ -122,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = if (named(args)) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--chip") or std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load") or std.mem.eql(u8, arg, "--uart")) {
+        if (std.mem.eql(u8, arg, "--board") or std.mem.eql(u8, arg, "--usb") or std.mem.eql(u8, arg, "--jumper") or std.mem.eql(u8, arg, "--chip") or std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load") or std.mem.eql(u8, arg, "--uart")) {
             i += 1;
             if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
             const value = args[i];
@@ -172,6 +185,18 @@ pub fn main(init: std.process.Init) !void {
                 if (parts.next() != null) fatal("invalid UART '{s}', expected for example 708 or 708:460800", .{value});
             } else if (std.mem.eql(u8, arg, "--chip")) {
                 chip_path = value;
+            } else if (std.mem.eql(u8, arg, "--board")) {
+                board_path = value;
+            } else if (std.mem.eql(u8, arg, "--usb")) {
+                usb = value;
+            } else if (std.mem.eql(u8, arg, "--jumper")) {
+                const equals = std.mem.indexOfScalar(u8, value, '=') orelse
+                    fatal("invalid jumper '{s}', expected for example J26=off", .{value});
+                const state = value[equals + 1 ..];
+                const on = if (std.mem.eql(u8, state, "on")) true else if (std.mem.eql(u8, state, "off")) false else fatal("invalid jumper '{s}', expected on or off after =", .{value});
+                if (settings_len == settings.len) fatal("too many --jumper settings, at most {d}", .{settings.len});
+                settings[settings_len] = .{ .name = value[0..equals], .on = on };
+                settings_len += 1;
             } else if (std.mem.eql(u8, arg, "--layout")) {
                 layout_given = Chip.Layout.parse(value) catch fatal("invalid layout '{s}', expected for example 8x18", .{value});
             } else {
@@ -197,6 +222,40 @@ pub fn main(init: std.process.Init) !void {
             path = arg;
         } else fatal(usage, .{});
     }
+    // the board, its chip, and the serial port on stdin and stdout, which is
+    // as --uart is
+    if (board_path != null) {
+        if (chip_path != null or layout_given != null) fatal("--board gives the chip, so --chip and --layout cannot", .{});
+        if (uart_node != null) fatal("--board puts its serial port on stdin and stdout, so --uart cannot", .{});
+        if (command == .blocks) fatal("blocks reads a file of blocks, so it has no board for --board", .{});
+    } else if (usb != null or settings_len > 0) fatal("--usb and --jumper need --board", .{});
+    const board: ?gasim.Board = if (board_path) |p| readBoard(io, arena, init.gpa, p) else null;
+    if (board) |b| {
+        for (settings[0..settings_len]) |setting| {
+            for (b.jumpers) |j| {
+                if (std.mem.eql(u8, j.name, setting.name)) break;
+            } else fatal("--jumper {s}: {s} has no such jumper", .{ setting.name, b.name });
+        }
+        // relative to the board file, unless absolute
+        chip_path = if (std.mem.eql(u8, b.chip, "ga144")) null else try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(board_path.?) orelse ".", b.chip });
+        if (b.serial.len > 0 and console_given) fatal("--board puts its serial port on stdin and stdout, so there is no console for --console", .{});
+    }
+    const serial: ?gasim.Board.Serial = if (board) |b| port: {
+        if (usb) |name| break :port b.serialPort(name) orelse fatal("--usb {s}: {s} has no such serial port", .{ name, b.name });
+        break :port if (b.serial.len > 0) b.serial[0] else null;
+    } else null;
+    if (serial) |s| {
+        const on = settings[0..settings_len];
+        const rx = board.?.jumperOn(s.rx.jumper, on);
+        const tx = board.?.jumperOn(s.tx.jumper, on);
+        if (!rx and !tx) fatal("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches stdin or stdout", .{s.name});
+        if (!rx and (boot or path == null))
+            fatal("--jumper {s}=off leaves port {s}'s rx unconnected, so nothing can boot node {d:0>3} from it", .{ s.rx.jumper.?, s.name, s.rx.node });
+        uart_node = if (rx) s.rx.node else s.tx.node;
+        uart_baud = s.baud;
+    }
+    // for messages, what put stdin and stdout on a UART
+    const uart_option = if (board != null) "--board" else "--uart";
     if (path == null and needsProgram(command, listing, uart_node != null)) fatal(usage, .{});
     if (command == .blocks) return writeBlocks(io, arena, path.?, loads[0..loads_len]);
     if (chip_path != null and layout_given != null) fatal("--chip and --layout both give the chip", .{});
@@ -207,6 +266,14 @@ pub fn main(init: std.process.Init) !void {
     else
         .ga144;
     const layout = spec.layout();
+    if (board) |b| {
+        var fault: gasim.Board.Fault = .none;
+        b.check(spec, &fault) catch |err| switch (fault) {
+            .none => fatal("{s}: {t}", .{ board_path.?, err }),
+            .name => |name| fatal("{s}: {s}: {t}", .{ board_path.?, name, err }),
+            .pin => |pin| fatal("{s}: {d:0>3}.{d}: {t}, on {s}", .{ board_path.?, pin.node, pin.pin, err, spec.name }),
+        };
+    }
     const source_path = path orelse "";
     // colorForth blocks, which the terminal user interface edits, and only
     // compiles at the start with --load
@@ -215,7 +282,7 @@ pub fn main(init: std.process.Init) !void {
     if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
     if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
     if (!listing and stats and command != .run) fatal("--stats needs run", .{});
-    if (!listing and uart_node != null and command != .run) fatal("--uart needs run, as stdin and stdout are the UART's", .{});
+    if (!listing and uart_node != null and command != .run) fatal("{s} needs run, as stdin and stdout are its serial port's", .{if (board != null) "--board" else "--uart"});
     if (uart_node != null and console_given) fatal("--uart puts stdin and stdout on the UART, so there is no console for --console", .{});
     if (uart_node != null and boot and path == null) fatal("--boot needs a program to send node {d:0>3}", .{uart_node.?});
 
@@ -366,7 +433,7 @@ pub fn main(init: std.process.Init) !void {
     if (boot and uart_node != null) {
         const root = uart_node.?;
         if (spec.node(root).rom != .async_boot)
-            fatal("--boot with --uart needs a node whose ROM boots from its pins, as 708's does, not node {d:0>3}", .{root});
+            fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {d:0>3}", .{ uart_option, root });
         if (roms == null) fatal("--boot needs a ROM, for node {d:0>3} to boot from (see --rom)", .{root});
         const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors) + 3 * (descriptors.len + 2));
         const words = gasim.boot.asyncStream(init.gpa, layout, root, descriptors, programs, buffer) catch |err| switch (err) {
@@ -409,9 +476,17 @@ pub fn main(init: std.process.Init) !void {
             .blocks => unreachable,
         },
     };
+    if (board) |b| {
+        var fault: gasim.Board.Fault = .none;
+        b.apply(&chip, if (serial != null) &uart else null, serial, settings[0..settings_len], &fault) catch |err| switch (fault) {
+            .none => fatal("{s}: {t}", .{ board_path.?, err }),
+            .name => |name| fatal("{s}: port {s}: {t}", .{ board_path.?, name, err }),
+            .pin => |pin| fatal("{s}: {d:0>3}.{d}: {t}", .{ board_path.?, pin.node, pin.pin, err }),
+        };
+    }
     if (uart_node) |node| {
         uart.input = .{ .io = io, .queue = &input };
-        chip.attachUart(&uart, node) catch |err| switch (err) {
+        if (board == null) chip.attachUart(&uart, node) catch |err| switch (err) {
             error.NoSuchNode => fatal("--uart node {d:0>3} is not in a {d}x{d} layout", .{ node, layout.rows, layout.columns }),
             error.NoPins => fatal("--uart node {d:0>3} has no pins 17 and 1", .{node}),
         };
@@ -419,7 +494,7 @@ pub fn main(init: std.process.Init) !void {
         // chip, up on the top and bottom rows and left on the others
         if (boot or path == null) {
             if (spec.node(node).rom != .async_boot)
-                fatal("--uart without a program boots node {d:0>3} from its ROM, which is not an asynchronous boot ROM, as 708's is", .{node});
+                fatal("{s} without a program boots node {d:0>3} from its ROM, which is not an asynchronous boot ROM, as 708's is", .{ uart_option, node });
             if (chip.nodes[layout.index(node).?].wake_port == null)
                 fatal("node {d:0>3} has no port facing off the chip that pin 17 could wake it through to boot: up on the top and bottom rows, left on the others", .{node});
         }
@@ -505,7 +580,11 @@ pub fn main(init: std.process.Init) !void {
     if (why) logWaiting(chip);
     if (chip.wiring.contention) |c| logContention(chip, c);
     if (uart_node) |node| {
-        if (!uart.used) std.log.warn("node {d:0>3} never sent a byte on the UART or woke on its input", .{node});
+        if (!uart.used) {
+            if (serial) |s| {
+                std.log.warn("port {s} ({d:0>3}.{d} in, {d:0>3}.{d} out) never carried a byte", .{ s.name, s.rx.node, s.rx.pin, s.tx.node, s.tx.pin });
+            } else std.log.warn("node {d:0>3} never sent a byte on the UART or woke on its input", .{node});
+        }
     } else if (!console.used) {
         // most likely the console is on a port the program does not use
         std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
@@ -891,6 +970,22 @@ fn assemble(
 ) gasim.arrayforth.Error!gasim.arrayforth.Assembled {
     if (std.mem.endsWith(u8, path, ".af")) return gasim.arrayforth.assembleNodes(source, programs, descriptors, diagnostic);
     return .{ .programs = try assembler.assembleNodesFor(spec, source, programs, diagnostic), .descriptors = &.{} };
+}
+
+/// Reads a board file, or the EVB002's for evb002, exiting with what is
+/// wrong with it if anything is. It is checked once its chip is read.
+fn readBoard(io: Io, arena: Allocator, gpa: Allocator, path: []const u8) gasim.Board {
+    if (std.mem.eql(u8, path, "evb002")) return .evb002;
+    const text = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch |err| fatal("{s}: {t}", .{ path, err });
+    const source = arena.dupeSentinel(u8, text, 0) catch fatal("out of memory", .{});
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    return gasim.Board.parse(gpa, arena, source, &diagnostics) catch |err| switch (err) {
+        error.OutOfMemory => fatal("out of memory", .{}),
+        error.ParseZon => {
+            diagnostics.log(path);
+            std.process.exit(1);
+        },
+    };
 }
 
 /// Reads and checks a chip file, exiting with what is wrong with it if

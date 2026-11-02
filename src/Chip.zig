@@ -54,8 +54,10 @@ console: ?struct { device: *Console, index: u16 } = null,
 /// words fed into a node, such as a boot stream
 feeder: ?struct { device: *Feeder, index: u16 } = null,
 /// the UART on a node's pins, and the index of that node
-/// and the pin it drives, an index into `wiring.pins`
-uart: ?struct { device: *Uart, index: u16, rx_pin: u16 } = null,
+/// `index` is the node of its rx pin, the one it drives, or of its tx pin
+/// if rx is unconnected; `rx_pin` is the rx pin's index in `wiring.pins`,
+/// if it is connected
+uart: ?struct { device: *Uart, index: u16, rx_pin: ?u16 } = null,
 /// when the UART's line next changes, for its node waiting on the pin while
 /// a node earlier in time runs (see `wakeOnPin`)
 pin_edge: ?u64 = null,
@@ -642,11 +644,32 @@ pub fn attachUart(self: *Chip, uart: *Uart, number: u16) error{ NoSuchNode, NoPi
     const i = self.layout.index(number) orelse return error.NoSuchNode;
     const pins = self.nodes[i].pins;
     if (pins & uart.rx_pin == 0 or pins & uart.tx_pin == 0) return error.NoPins;
-    const rx = self.wiring.pin(i, uart.rx_pin).?;
-    self.uart = .{ .device = uart, .index = i, .rx_pin = @intCast(rx - self.wiring.pins.ptr) };
-    self.wiring.nets[rx.net].device = uart.rxDevice();
-    self.wiring.nets[self.wiring.pin(i, uart.tx_pin).?.net].device = uart.txDevice();
-    self.wiring.hook(i);
+    self.attachUartPins(uart, .{ .node = number, .pin = @intCast(@ctz(uart.rx_pin)) }, .{ .node = number, .pin = @intCast(@ctz(uart.tx_pin)) }) catch
+        return error.NoPins;
+}
+
+/// Attaches a UART to two pins, which may be of different nodes: it drives
+/// `rx`, which the chip receives on, and listens to `tx`, which it sends
+/// on. Either may be left out, as a board's jumper can leave a line
+/// unconnected.
+pub fn attachUartPins(self: *Chip, uart: *Uart, rx: ?PinRef, tx: ?PinRef) error{ NoSuchPin, TwoDevices }!void {
+    const rx_pin = if (rx) |r| try self.pinOf(r) else null;
+    const tx_pin = if (tx) |t| try self.pinOf(t) else null;
+    const wiring = self.wiring;
+    for ([_]?*gpio.Pin{ rx_pin, tx_pin }) |p| if (p) |pin| if (wiring.nets[pin.net].device != null) return error.TwoDevices;
+    if (rx_pin != null and tx_pin != null and rx_pin.?.net == tx_pin.?.net) return error.TwoDevices;
+    const index = if (rx_pin orelse tx_pin) |p| p.node else return;
+    self.uart = .{ .device = uart, .index = index, .rx_pin = if (rx_pin) |p| @intCast(p - wiring.pins.ptr) else null };
+    if (rx_pin) |p| {
+        uart.rx_pin = p.bit;
+        wiring.nets[p.net].device = uart.rxDevice();
+        wiring.hook(p.node);
+    }
+    if (tx_pin) |p| {
+        uart.tx_pin = p.bit;
+        wiring.nets[p.net].device = uart.txDevice();
+        wiring.hook(p.node);
+    }
 }
 
 /// a GPIO pin of a node, by its number, out of 17, 5, 3 and 1
@@ -734,7 +757,8 @@ fn wakeOnPin(self: *Chip) void {
     const n = &self.nodes[uart.index];
     if (self.queued[uart.index] or !n.waitsOnPin()) return;
     const rx = uart.device.rx_pin;
-    if (self.wiring.level(self.wiring.pins[uart.rx_pin].net, n.time)) n.pin_inputs |= rx else n.pin_inputs &= ~rx;
+    const rx_pin = uart.rx_pin orelse return;
+    if (self.wiring.level(self.wiring.pins[rx_pin].net, n.time)) n.pin_inputs |= rx else n.pin_inputs &= ~rx;
     if (!n.pinAwake()) {
         const edge = uart.device.nextRxEdge(n.time) orelse return;
         if (self.queue_len > 0 and self.nodes[self.queue[0]].time < edge) {
@@ -831,7 +855,7 @@ fn stepQueued(self: *Chip, i: u16) void {
     }
     // a read of the wakeup pin, not a device on its port, that did not have
     // to wait for it
-    if (uart) |u| if (n.wake_port) |w| if (n.transfers.read.contains(w) and n.ports[@backingInt(w)].port == null) {
+    if (uart) |u| if (n.wake_port) |w| if (self.uart.?.rx_pin != null and n.transfers.read.contains(w) and n.ports[@backingInt(w)].port == null) {
         u.used = true;
     };
     if (!n.suspended) self.wake(i);
@@ -1033,6 +1057,8 @@ fn waitForInput(self: *Chip) !bool {
         return true;
     };
     const uart = self.uart orelse return false;
+    // input cannot reach a node with no rx line
+    if (uart.rx_pin == null) return false;
     const n = &self.nodes[uart.index];
     return n.waitsOnPin() and try uart.device.waitForInput(n.time);
 }
