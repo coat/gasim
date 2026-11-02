@@ -1,7 +1,9 @@
 {
   lib,
   stdenv,
+  copyDesktopItems,
   elfkickers,
+  makeDesktopItem,
   makeWrapper,
   runCommand,
   sdl3,
@@ -48,7 +50,7 @@ stdenv.mkDerivation (
         zig.hook
       ]
       ++ lib.optionals stdenv.hostPlatform.isLinux [elfkickers]
-      ++ lib.optionals (gui && stdenv.hostPlatform.isLinux) [makeWrapper];
+      ++ lib.optionals (gui && stdenv.hostPlatform.isLinux) [copyDesktopItems makeWrapper];
 
     buildInputs = lib.optionals gui [sdl3];
 
@@ -70,6 +72,18 @@ stdenv.mkDerivation (
     # program it finds on PATH, or else asks in the terminal. Zenity goes
     # after PATH, so a desktop's own kdialog still comes first. macOS has
     # osascript.
+    # a desktop entry, so launchers start gasim-gui as an application; one
+    # that only finds it on PATH runs it as a command, in a terminal
+    desktopItems = lib.optionals (gui && stdenv.hostPlatform.isLinux) [
+      (makeDesktopItem {
+        name = "com.sadbeast.gasim";
+        desktopName = "gasim";
+        genericName = "GA144 simulator";
+        exec = "gasim-gui %f";
+        categories = ["Development"];
+      })
+    ];
+
     postFixup = lib.optionalString (gui && stdenv.hostPlatform.isLinux) ''
       wrapProgram $out/bin/gasim-gui --suffix PATH : ${lib.makeBinPath [zenity]}
     '';
