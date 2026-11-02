@@ -131,10 +131,12 @@ done.
      where it used to borrow the GA144's by node number.
    - Buses, such as node 007, 008 and 009's to external memory, in the
      chip file, once something uses them.
-   - A board file lists the chips, the connections between pins, devices
-     and other chips, pull-ups and jumpers, and ships as `evb002`. It
-     waits for pins as connections with drivers (step 3), which its
-     connections need.
+   - ✓ A board file lists serial ports on the chip's pins, pull-ups, wires
+     and jumpers (`--board`, `--usb`, `--jumper`), and ships as `evb002`:
+     its host chip, with USB ports A and B, NO BOOT and its pull-ups.
+   - Boards of more than one chip: the EVB002's target, joined to the host
+     by SERDES (701 to 001) and through J34 and J35 by node 300, its USB
+     port C, and reset lines between them.
 2. **A shared clock.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
      later of their times as a word passes between them.

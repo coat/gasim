@@ -10,6 +10,7 @@ pub const arrayforth = @import("arrayforth.zig");
 pub const assembler = @import("assembler.zig");
 pub const colorforth = @import("colorforth.zig");
 pub const boot = @import("boot.zig");
+pub const Board = @import("Board.zig");
 pub const Chip = @import("Chip.zig");
 pub const Console = @import("Console.zig");
 pub const Editor = @import("Editor.zig");
@@ -27,6 +28,7 @@ pub const port = @import("port.zig");
 test {
     _ = @import("arrayforth.zig");
     _ = @import("assembler.zig");
+    _ = @import("Board.zig");
     _ = @import("boot.zig");
     _ = @import("Builder.zig");
     _ = @import("Chip.zig");

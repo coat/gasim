@@ -137,6 +137,13 @@ more info.
 
 ### Options
 
+- `--board <file>`: with `run`, the board around the chip, described in a
+  board file (see [Board files](#board-files)), or `evb002` for
+  GreenArrays' EVB002, with stdin and stdout on one of its serial ports
+- `--usb <port>`: the board's serial port on stdin and stdout (default its
+  first, such as `A`)
+- `--jumper <name>=on|off`: set one of the board's jumpers otherwise than
+  as it is shipped, such as `J26=off`. Can be given more than once.
 - `--chip <file>`: the chip, described in a chip file (see [Chip
   files](#chip-files); default the GA144)
 - `--layout <rows>x<columns>`: a chip of that size, up to 100x100, of basic
@@ -249,6 +256,33 @@ bottom rows and left on the others, where that port faces off the array.
 Programs in `.ga` are assembled for the chip's ROMs. arrayForth 3 and
 colorForth programs are assembled for the GA144's, and gasim refuses one
 for a node whose ROM type differs from the GA144's node of its number.
+
+### Board files
+
+A board file says what a board puts around its chip, in ZON: its chip
+file (`ga144` for the GA144, or a path relative to the board file),
+serial ports wired to the chip's pins, pull
+resistors, wires between pins, and named jumpers that connect some of
+them, on or off as the board is shipped. The EVB002's,
+[`src/boards/evb002.zon`](src/boards/evb002.zon), is built in as `evb002`,
+from its data book (DB014) and the jumper settings it ships with (AN021):
+its host chip, with USB ports A (708's pins 17 and 1) and B (200.17 in,
+100.17 out), J26 (NO BOOT) holding 705.17 high, and pull-ups on the SPI
+flash's and the SRAM's chip enables.
+
+```
+$ gasim run --board evb002 examples/uart.ga
+Hello, world!
+$ gasim run --board evb002 --jumper J23.3-4=off examples/uart.ga
+warning: node 708 never sent a byte on the UART or woke on its input
+```
+
+Serial ports other than the one on stdin and stdout are left unconnected,
+which their nodes' pulldowns read as an idle, inverted line. A board with
+no serial ports has the console instead (`--console`). A wire can't go to a
+serial port's pin yet, as the port's input would not wake the other pin's
+node. The EVB002's
+target chip, and its port C, wait for boards of more than one chip.
 
 ### ROM
 
