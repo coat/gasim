@@ -16,6 +16,7 @@ const usage =
     \\arrayForth 2 compiles F18 code, from block 0 or the blocks --load
     \\names. The interface opens it in its editor instead, compiling it at
     \\the start only with --load, and creates it if it does not exist.
+    \\Without one, the editor starts a new file, to name when it is saved.
     \\
     \\With aforth, reads lines of arrayForth 3 from stdin and interprets them,
     \\to assemble code and act on the chip with the words of arrayForth 3's
@@ -438,7 +439,8 @@ pub fn main(init: std.process.Init) !void {
         .console_node = console_node,
         .console_port = console_port,
         .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
-        .colorforth = if (colorforth_blocks) |cf| try editColorForth(arena, cf, source_path) else null,
+        // without a .cf file, on a new file of blocks, to name when it is saved
+        .colorforth = try editColorForth(arena, colorforth_blocks orelse try newColorForth(arena), if (colorforth) source_path else null),
     });
 
     var stderr_buffer: [4096]u8 = undefined;
@@ -561,8 +563,15 @@ fn readColorForth(io: Io, arena: Allocator, path: []const u8, new: bool) !ColorF
     return .{ .bytes = bytes, .count = count, .compressed = compressed != null };
 }
 
+/// no blocks yet, with room for as many as a file read has
+fn newColorForth(arena: Allocator) !ColorForthBlocks {
+    const bytes = try arena.alloc(u8, editor_blocks * gasim.colorforth.block_size);
+    @memset(bytes, 0);
+    return .{ .bytes = bytes, .count = 0, .compressed = false };
+}
+
 /// an editor on colorForth blocks, which compiling in the editor reads
-fn editColorForth(arena: Allocator, blocks: ColorForthBlocks, path: []const u8) !tui.ColorForth {
+fn editColorForth(arena: Allocator, blocks: ColorForthBlocks, path: ?[]const u8) !tui.ColorForth {
     const editor = try arena.create(gasim.Editor);
     editor.open(blocks.bytes, blocks.count);
     return .{ .editor = editor, .path = path, .compressed = blocks.compressed };
