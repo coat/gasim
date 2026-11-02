@@ -42,7 +42,7 @@ trace: ?*Tail = null,
 /// text and JSON for JavaScript to read
 out: Writer.Allocating,
 
-pub const layout: Chip.Layout = .ga144;
+pub const layout: Chip.Layout = Spec.ga144.layout();
 pub const console_node = 0;
 pub const console_port: Direction = .up;
 pub const history_capacity = 64;
@@ -90,7 +90,7 @@ pub const Cause = enum(u8) {
 pub fn init(self: *Sim, gpa: Allocator) Allocator.Error!void {
     self.* = .{
         .gpa = gpa,
-        .chip = try .init(gpa, layout),
+        .chip = try .init(gpa, .ga144),
         .console_out = .init(gpa),
         .programs = &.{},
         .descriptors = &.{},
@@ -169,7 +169,7 @@ pub fn setRom(self: *Sim, bytes: []const u8) error{ InvalidRom, OutOfMemory }!vo
 pub fn load(self: *Sim, kind: Kind, file: []const u8, loads: []const u32) error{ LoadFailed, OutOfMemory }!void {
     self.out.clearRetainingCapacity();
     // the breakpoints and watches stay, as the chip starts again
-    var chip: Chip = try .init(self.gpa, layout);
+    var chip: Chip = try .init(self.gpa, .ga144);
     chip.breakpoints = self.chip.breakpoints;
     chip.watches = self.chip.watches;
     self.chip.deinit(self.gpa);
@@ -992,6 +992,7 @@ const Direction = gasim.Direction;
 const disassembler = gasim.disassembler;
 const Editor = gasim.Editor;
 const ga144 = gasim.ga144;
+const Spec = gasim.Spec;
 const rom = gasim.rom;
 const Tail = gasim.Tail;
 const Word = gasim.Word;

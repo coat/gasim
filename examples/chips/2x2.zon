@@ -1,0 +1,15 @@
+// A chip of 2 rows of 2 nodes, whose node 100 is wired as the GA144's 708
+// is: its ROM boots from pin 17, and pin 1 drives a serial line. Node 100
+// is in an even column of an odd row, as 708 is, so its ports have the
+// same names, and its pin 17 wakes it through up. The other nodes are
+// basic nodes with no pins.
+//
+//     gasim run --chip examples/chips/2x2.zon --uart 100 examples/chips/hello-2x2.ga
+.{
+    .name = "2x2",
+    .rows = 2,
+    .columns = 2,
+    .nodes = .{
+        .{ .node = 100, .rom = .async_boot, .pins = .{ 17, 1 }, .reset = .cold },
+    },
+}

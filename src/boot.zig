@@ -157,7 +157,8 @@ pub fn asyncStream(
     };
 
     const d = tree.descriptor_of[root_index] orelse {
-        (try builder.reserve(3)).* = frameHeader(ga144.romWord(root, "cold").?, 0, 0);
+        // the root's ROM, an asynchronous boot ROM's
+        (try builder.reserve(3)).* = frameHeader(ga144.romWordOf(.async_boot, "cold").?, 0, 0);
         return buffer[0..builder.len];
     };
     var end: usize = 0;

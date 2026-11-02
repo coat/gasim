@@ -27,6 +27,25 @@ test "uart" {
     try expectEqualStrings("Hello, world!\n", output.buffered());
 }
 
+test "hello-2x2 on the chip of a chip file" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    var diagnostics: std.zon.parse.Diagnostics = undefined;
+    const spec = try gasim.Spec.parse(std.testing.allocator, arena_state.allocator(), @embedFile("chips/2x2.zon"), &diagnostics);
+    var chip: Chip = try .init(std.testing.allocator, spec);
+    defer chip.deinit(std.testing.allocator);
+    var programs: [1]gasim.assembler.Program = undefined;
+    var diagnostic: gasim.assembler.Diagnostic = .{};
+    for (try gasim.assembler.assembleNodesFor(&spec, @embedFile("chips/hello-2x2.ga"), &programs, &diagnostic)) |program| try chip.load(program);
+
+    var buffer: [32]u8 = undefined;
+    var output: std.Io.Writer = .fixed(&buffer);
+    var uart: gasim.Uart = .init(921600, &output);
+    try chip.attachUart(&uart, 100);
+    try chip.run();
+    try expectEqualStrings("Hello, world!\n", output.buffered());
+}
+
 // and the same in arrayForth 3
 
 test "hello.af" {

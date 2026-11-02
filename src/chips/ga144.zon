@@ -1,0 +1,48 @@
+// GreenArrays' GA144: 8 rows of 18 nodes, from its data book (DB002) and
+// the ROM it ships with. Nodes not listed are basic nodes with no pins.
+//
+// rom: which ROM the node has (see `ga144.RomType`)
+// pins: its GPIO pins, out of 17, 5, 3 and 1
+// reset: the word of its ROM it starts at after reset, rather than waiting
+//   for code on its ports; the boot nodes start at cold, and node 200 at
+//   warm
+// A SERDES node has a data register, which its ROM writes to.
+.{
+    .name = "GA144",
+    .rows = 8,
+    .columns = 18,
+    .nodes = .{
+        // SERDES boot, to and from another chip
+        .{ .node = 1, .rom = .serdes_boot, .reset = .cold },
+        .{ .node = 701, .rom = .serdes_boot, .reset = .cold },
+        // the synchronous, asynchronous and SPI boot nodes
+        .{ .node = 300, .rom = .sync_boot, .pins = .{ 17, 1 }, .reset = .cold },
+        .{ .node = 708, .rom = .async_boot, .pins = .{ 17, 1 }, .reset = .cold },
+        .{ .node = 705, .rom = .spi_boot, .pins = .{ 17, 5, 3, 1 }, .reset = .cold },
+        // 1-wire
+        .{ .node = 200, .rom = .one_wire, .pins = .{17}, .reset = .warm },
+        // analog
+        .{ .node = 117, .rom = .analog },
+        .{ .node = 617, .rom = .analog },
+        .{ .node = 709, .rom = .analog },
+        .{ .node = 713, .rom = .analog },
+        .{ .node = 717, .rom = .analog },
+        // external memory and eForth support
+        .{ .node = 7, .rom = .special },
+        .{ .node = 8, .rom = .special, .pins = .{ 17, 5, 3, 1 } },
+        .{ .node = 9, .rom = .special },
+        .{ .node = 105, .rom = .special },
+        .{ .node = 106, .rom = .special },
+        .{ .node = 107, .rom = .special },
+        .{ .node = 108, .rom = .special },
+        // a single GPIO pin
+        .{ .node = 100, .pins = .{17} },
+        .{ .node = 500, .pins = .{17} },
+        .{ .node = 600, .pins = .{17} },
+        .{ .node = 715, .pins = .{17} },
+        .{ .node = 217, .pins = .{17} },
+        .{ .node = 317, .pins = .{17} },
+        .{ .node = 417, .pins = .{17} },
+        .{ .node = 517, .pins = .{17} },
+    },
+}
