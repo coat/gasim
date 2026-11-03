@@ -34,7 +34,15 @@ const usage =
     \\                             Nodes of chips after the first are
     \\                             numbered with the chip, such as 1.708.
     \\  --usb <port>               the board's serial port on stdin and stdout
-    \\                             (default its first, such as A)
+    \\                             (default its first not on a pty, such as A)
+    \\  --pty <port>[=<link>]      put one of the board's serial ports on a
+    \\                             pseudo-terminal, such as for arrayForth 3
+    \\                             under Wine, saying its path, and making a
+    \\                             symbolic link to it at <link> if given,
+    \\                             such as ~/.wine/dosdevices/com3. Can be
+    \\                             given more than once. stdin and stdout
+    \\                             are then on --usb's port, or none, and
+    \\                             the run goes on until ctrl+c.
     \\  --jumper <name>=on|off     set one of the board's jumpers otherwise
     \\                             than as shipped, such as J26=off. Can be
     \\                             given more than once.
@@ -90,6 +98,12 @@ const max_source_len = 64 * 1024;
 /// the most a .blk file may hold, which is more than arrayForth 3's disks
 const max_blocks_len = 64 * 1024 * 1024;
 
+/// symbolic links to ptys, which the end of a run or ctrl+c removes
+var links: [Chip.max_uarts]struct { link: [:0]const u8, target: []const u8 } = undefined;
+var links_len: usize = 0;
+/// written by ctrl+c, to ring the doorbell a run with ptys waits on
+var interrupt_pipe: ?posix.fd_t = null;
+
 /// what ctrl+c stops: the console, or the UART
 var interruptible: ?struct { interrupted: *std.atomic.Value(bool), waiting: *std.atomic.Value(bool) } = null;
 
@@ -113,6 +127,8 @@ pub fn main(init: std.process.Init) !void {
     var chip_path: ?[]const u8 = null;
     var board_path: ?[]const u8 = null;
     var usb: ?[]const u8 = null;
+    var pty_ports: [Chip.max_uarts]struct { name: []const u8, link: ?[]const u8 } = undefined;
+    var pty_len: usize = 0;
     var settings: [32]gasim.Board.Setting = undefined;
     var settings_len: usize = 0;
     var layout_given: ?Chip.Layout = null;
@@ -137,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = if (named(args)) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--board") or std.mem.eql(u8, arg, "--usb") or std.mem.eql(u8, arg, "--jumper") or std.mem.eql(u8, arg, "--chip") or std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load") or std.mem.eql(u8, arg, "--uart")) {
+        if (std.mem.eql(u8, arg, "--board") or std.mem.eql(u8, arg, "--usb") or std.mem.eql(u8, arg, "--pty") or std.mem.eql(u8, arg, "--jumper") or std.mem.eql(u8, arg, "--chip") or std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load") or std.mem.eql(u8, arg, "--uart")) {
             i += 1;
             if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
             const value = args[i];
@@ -191,6 +207,12 @@ pub fn main(init: std.process.Init) !void {
                 board_path = value;
             } else if (std.mem.eql(u8, arg, "--usb")) {
                 usb = value;
+            } else if (std.mem.eql(u8, arg, "--pty")) {
+                if (!Pty.supported) fatal("--pty needs pseudo-terminals, which this system does not have", .{});
+                if (pty_len == pty_ports.len) fatal("more than {d} --pty ports", .{pty_ports.len});
+                const equals = std.mem.indexOfScalar(u8, value, '=');
+                pty_ports[pty_len] = .{ .name = value[0 .. equals orelse value.len], .link = if (equals) |e| value[e + 1 ..] else null };
+                pty_len += 1;
             } else if (std.mem.eql(u8, arg, "--jumper")) {
                 const equals = std.mem.indexOfScalar(u8, value, '=') orelse
                     fatal("invalid jumper '{s}', expected for example J26=off", .{value});
@@ -230,7 +252,7 @@ pub fn main(init: std.process.Init) !void {
         if (chip_path != null or layout_given != null) fatal("--board gives the chip, so --chip and --layout cannot", .{});
         if (uart_node != null) fatal("--board puts its serial port on stdin and stdout, so --uart cannot", .{});
         if (command == .blocks) fatal("blocks reads a file of blocks, so it has no board for --board", .{});
-    } else if (usb != null or settings_len > 0) fatal("--usb and --jumper need --board", .{});
+    } else if (usb != null or settings_len > 0 or pty_len > 0) fatal("--usb, --pty and --jumper need --board", .{});
     const board: ?gasim.Board = if (board_path) |p| readBoard(io, arena, init.gpa, p) else null;
     if (board) |b| {
         // the terminal user interface and arrayForth 3 know one chip
@@ -244,10 +266,27 @@ pub fn main(init: std.process.Init) !void {
         chip_path = if (std.mem.eql(u8, b.chip, "ga144")) null else try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(board_path.?) orelse ".", b.chip });
         if (b.serial.len > 0 and console_given) fatal("--board puts its serial port on stdin and stdout, so there is no console for --console", .{});
     }
+    // the ports on ptys, and the one on stdin and stdout, if any
+    const ptys = pty_ports[0..pty_len];
+    for (ptys, 0..) |p, k| {
+        if (board.?.serialPort(p.name) == null) fatal("--pty {s}: {s} has no such serial port", .{ p.name, board.?.name });
+        for (ptys[0..k]) |other| if (std.mem.eql(u8, other.name, p.name)) fatal("--pty {s} is given twice", .{p.name});
+        if (usb) |name| if (std.mem.eql(u8, name, p.name)) fatal("--usb {s} puts port {s} on stdin and stdout, so --pty cannot", .{ name, name });
+        const s = board.?.serialPort(p.name).?;
+        if (!board.?.jumperOn(s.rx.jumper, settings[0..settings_len]) and !board.?.jumperOn(s.tx.jumper, settings[0..settings_len]))
+            fatal("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches its pty", .{s.name});
+    }
+    if (pty_len > 0 and command != .run and !listing) fatal("--pty needs run", .{});
+    if (pty_len == pty_ports.len and usb != null) fatal("more than {d} serial ports, with --usb's", .{Chip.max_uarts});
+    // with ptys, stdin and stdout are on a port only if --usb says
     const serial: ?gasim.Board.Serial = if (board) |b| port: {
         if (usb) |name| break :port b.serialPort(name) orelse fatal("--usb {s}: {s} has no such serial port", .{ name, b.name });
-        break :port if (b.serial.len > 0) b.serial[0] else null;
+        break :port if (b.serial.len > 0 and pty_len == 0) b.serial[0] else null;
     } else null;
+    if (board != null and serial == null and pty_len > 0) {
+        if (boot) fatal("--boot sends through the port on stdin and stdout, which --pty leaves on none without --usb", .{});
+        if (console_given) fatal("--board with --pty has no console for --console", .{});
+    }
     if (serial) |s| {
         const on = settings[0..settings_len];
         const rx = board.?.jumperOn(s.rx.jumper, on);
@@ -260,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
     }
     // for messages, what put stdin and stdout on a UART
     const uart_option = if (board != null) "--board" else "--uart";
-    if (path == null and needsProgram(command, listing, uart_node != null)) fatal(usage, .{});
+    if (path == null and needsProgram(command, listing, uart_node != null or pty_len > 0)) fatal(usage, .{});
     if (command == .blocks) return writeBlocks(io, arena, path.?, loads[0..loads_len]);
     if (chip_path != null and layout_given != null) fatal("--chip and --layout both give the chip", .{});
     const spec: gasim.Spec = if (chip_path) |p|
@@ -435,6 +474,25 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     var uart: gasim.Uart = .init(uart_baud, &stdout_file_writer.interface);
+    // the serial ports on ptys, each with its UART, read on its own thread
+    // as stdin is, ringing the doorbell that a run waiting for any input
+    // waits on
+    var pty_devices: [pty_ports.len]Pty = undefined;
+    var pty_uarts: [pty_ports.len]gasim.Uart = undefined;
+    var pty_inputs: [pty_ports.len]Io.Queue(u8) = undefined;
+    var pty_input_buffers: [pty_ports.len][1024]u8 = undefined;
+    var pty_output_buffers: [pty_ports.len][1024]u8 = undefined;
+    var pty_queue_buffers: [pty_ports.len][4096]u8 = undefined;
+    var pty_read_buffers: [pty_ports.len][1024]u8 = undefined;
+    var pty_readers: [pty_ports.len]Io.File.Reader = undefined;
+    var doorbell_buffer: [64]u8 = undefined;
+    var doorbell: Io.Queue(u8) = .init(&doorbell_buffer);
+    for (ptys, 0..) |p, k| {
+        pty_devices[k] = Pty.open(io, arena, &pty_output_buffers[k], &pty_queue_buffers[k]) catch |err| fatal("--pty {s}: {t}", .{ p.name, err });
+        pty_inputs[k] = .init(&pty_input_buffers[k]);
+        pty_readers[k] = .initStreaming(pty_devices[k].master, io, &pty_read_buffers[k]);
+    }
+    defer for (pty_devices[0..pty_len]) |*device| device.close(io);
     var feeder: Chip.Feeder = .{ .words = &.{} };
     if (boot and uart_node != null) {
         const root = uart_node.?;
@@ -489,7 +547,20 @@ pub fn main(init: std.process.Init) !void {
     };
     if (board) |b| {
         var fault: gasim.Board.Fault = .none;
-        b.apply(&chip, if (serial != null) &uart else null, serial, settings[0..settings_len], &fault) catch |err| switch (fault) {
+        var attachments: [Chip.max_uarts]gasim.Board.Attachment = undefined;
+        var count: usize = 0;
+        if (serial) |s| {
+            attachments[0] = .{ .uart = &uart, .port = s };
+            count = 1;
+        }
+        for (ptys, 0..) |p, k| {
+            const s = b.serialPort(p.name).?;
+            pty_uarts[k] = .init(s.baud, &pty_devices[k].writer);
+            pty_uarts[k].input = .{ .io = io, .queue = &pty_inputs[k] };
+            attachments[count] = .{ .uart = &pty_uarts[k], .port = s };
+            count += 1;
+        }
+        b.apply(&chip, attachments[0..count], settings[0..settings_len], &fault) catch |err| switch (fault) {
             .none => fatal("{s}: {t}", .{ board_path.?, err }),
             .name => |name| fatal("{s}: port {s}: {t}", .{ board_path.?, name, err }),
             .pin => |pin| fatal("{s}: {f}.{d}: {t}", .{ board_path.?, Chip.nodeName(pin.node), pin.pin, err }),
@@ -511,7 +582,7 @@ pub fn main(init: std.process.Init) !void {
             if (chip.nodes[layout.index(node).?].wake_port == null)
                 fatal("node {f} has no port facing off the chip that pin 17 could wake it through to boot: up on the top and bottom rows, left on the others", .{Chip.nodeName(node)});
         }
-    } else chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
+    } else if (pty_len == 0) chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
         error.NoSuchNode => fatal("console node {f} is not in {f}", .{ Chip.nodeName(console_node), layout }),
         error.PortConnected => fatal("console port {t} of node {f} is connected to another node", .{ console_port, Chip.nodeName(console_node) }),
     };
@@ -540,8 +611,9 @@ pub fn main(init: std.process.Init) !void {
     // returning skips this, so those paths flush first.
     defer stderr_file_writer.interface.flush() catch {};
 
-    interruptible = if (uart_node != null)
-        .{ .interrupted = &uart.interrupted, .waiting = &uart.waiting }
+    // a run with several UARTs waits on the first's (see `Chip.waitForInput`)
+    interruptible = if (chip.uarts.len > 0)
+        .{ .interrupted = &chip.uarts.items[0].device.interrupted, .waiting = &chip.uarts.items[0].device.waiting }
     else
         .{ .interrupted = &console.interrupted, .waiting = &console.waiting };
     if (have_sigint) posix.sigaction(.INT, &.{
@@ -550,10 +622,48 @@ pub fn main(init: std.process.Init) !void {
         .flags = 0,
     }, null);
 
-    // read stdin on its own thread, so the chip runs while it waits for input
-    var reading = io.concurrent(Console.readInput, .{ io, &stdin_file_reader.interface, &input }) catch |err|
-        fatal("cannot read input concurrently: {t}", .{err});
-    errdefer reading.cancel(io) catch {};
+    // read stdin on its own thread, so the chip runs while it waits for
+    // input, unless nothing is on it, as reading it in the background would
+    // stop gasim
+    const stdin_used = !(board != null and serial == null and pty_len > 0);
+    var reading = if (stdin_used) io.concurrent(readRinging, .{ io, &stdin_file_reader.interface, &input, if (pty_len > 0) &doorbell else null }) catch |err|
+        fatal("cannot read input concurrently: {t}", .{err}) else null;
+    errdefer if (reading) |*r| r.cancel(io) catch {};
+    var pty_reading: [pty_ports.len]Io.Future((error{ReadFailed} || Io.Cancelable)!void) = undefined;
+    var pty_writing: [pty_ports.len]Io.Future((Io.File.Writer.Error || Io.QueueClosedError)!void) = undefined;
+    for (ptys, 0..) |p, k| {
+        pty_reading[k] = io.concurrent(readRinging, .{ io, &pty_readers[k].interface, &pty_inputs[k], &doorbell }) catch |err|
+            fatal("cannot read input concurrently: {t}", .{err});
+        pty_writing[k] = io.concurrent(Pty.writeOut, .{&pty_devices[k]}) catch |err|
+            fatal("cannot write output concurrently: {t}", .{err});
+        std.log.info("port {s}: {s}", .{ p.name, pty_devices[k].path });
+    }
+    defer for (pty_reading[0..pty_len]) |*future| future.cancel(io) catch {};
+    defer for (pty_writing[0..pty_len]) |*future| future.cancel(io) catch {};
+    // ctrl+c, as the run waits on the doorbell, rings it through a pipe,
+    // so that the run ends as it would otherwise
+    var watching: ?Io.Future((error{ReadFailed} || Io.Cancelable)!void) = null;
+    var pipe_buffer: [1]u8 = undefined;
+    var pipe_reader: Io.File.Reader = undefined;
+    if (comptime Pty.supported) if (pty_len > 0) {
+        chip.doorbell = .{ .io = io, .queue = &doorbell };
+        var fds: [2]posix.fd_t = undefined;
+        if (std.c.pipe(&fds) != 0) fatal("cannot make a pipe for ctrl+c", .{});
+        pipe_reader = .initStreaming(.{ .handle = fds[0], .flags = .{ .nonblocking = false } }, io, &pipe_buffer);
+        watching = io.concurrent(ringOnInterrupt, .{ &pipe_reader.interface, io, &doorbell }) catch |err|
+            fatal("cannot read input concurrently: {t}", .{err});
+        interrupt_pipe = fds[1];
+    };
+    defer if (watching) |*w| w.cancel(io) catch {};
+    // the links last, after everything that could fail, removed at the end
+    // of the run, or by ctrl+c
+    for (ptys, 0..) |p, k| if (p.link) |link| {
+        makeLink(io, link, pty_devices[k].path);
+        links[links_len] = .{ .link = try arena.dupeSentinel(u8, link, 0), .target = pty_devices[k].path };
+        links_len += 1;
+    };
+    defer removeLinks();
+    stderr_file_writer.interface.flush() catch {};
     const started: Io.Timestamp = .now(io, .awake);
     try chip.run();
     if (stats) {
@@ -562,8 +672,10 @@ pub fn main(init: std.process.Init) !void {
         stderr_file_writer.interface.flush() catch {};
         logStats(chip, elapsed);
     }
+    for (ptys, 0..) |p, k| if (pty_devices[k].dropped > 0)
+        std.log.warn("port {s}: {d} bytes were dropped, as nothing read them from {s}", .{ p.name, pty_devices[k].dropped, pty_devices[k].path });
     // stops a read blocked waiting for input that will no longer be taken
-    reading.cancel(io) catch |err| switch (err) {
+    if (reading) |*r| r.cancel(io) catch |err| switch (err) {
         error.Canceled => {},
         error.ReadFailed => if (stdin_file_reader.err.? != error.Canceled) {
             stderr_file_writer.interface.flush() catch {};
@@ -588,6 +700,7 @@ pub fn main(init: std.process.Init) !void {
     // the conventional status for a program stopped by SIGINT
     if (interruptible.?.interrupted.load(.monotonic)) {
         stderr_file_writer.interface.flush() catch {};
+        removeLinks();
         std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
     }
     if (why) logWaiting(chip);
@@ -602,6 +715,76 @@ pub fn main(init: std.process.Init) !void {
         // most likely the console is on a port the program does not use
         std.log.warn("node {f} never used the console on its {t} port", .{ Chip.nodeName(console_node), console_port });
     }
+}
+
+/// Reads input into `input`, as `Console.readInput` does, ringing
+/// `doorbell` as it arrives and at its end, for a run waiting for any input
+fn readRinging(io: Io, reader: *Io.Reader, input: *Io.Queue(u8), doorbell: ?*Io.Queue(u8)) (error{ReadFailed} || Io.Cancelable)!void {
+    const bell = doorbell orelse return Console.readInput(io, reader, input);
+    defer input.close(io);
+    // a full doorbell has rung already
+    defer _ = bell.put(io, &.{0}, 0) catch {};
+    while (true) {
+        const bytes = reader.peekGreedy(1) catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => |e| return e,
+        };
+        reader.toss(input.put(io, bytes, 1) catch |err| switch (err) {
+            error.Closed => return,
+            else => |e| return e,
+        });
+        _ = bell.put(io, &.{0}, 0) catch |err| switch (err) {
+            error.Closed => return,
+            else => |e| return e,
+        };
+    }
+}
+
+/// Rings the doorbell once ctrl+c writes to the pipe
+fn ringOnInterrupt(pipe: *Io.Reader, io: Io, doorbell: *Io.Queue(u8)) (error{ReadFailed} || Io.Cancelable)!void {
+    _ = pipe.takeByte() catch |err| switch (err) {
+        error.EndOfStream => return,
+        else => |e| return e,
+    };
+    _ = doorbell.put(io, &.{0}, 0) catch {};
+}
+
+/// whether `link` is a symbolic link to `target`, with only calls safe in a
+/// signal handler
+fn pointsAt(link: [:0]const u8, target: []const u8) bool {
+    if (comptime !Pty.supported) return false;
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const len = std.c.readlink(link, &buffer, buffer.len);
+    return len >= 0 and std.mem.eql(u8, buffer[0..@intCast(len)], target);
+}
+
+/// removes the links to ptys that still point at them
+fn removeLinks() void {
+    if (comptime !Pty.supported) return;
+    for (links[0..links_len]) |l| if (pointsAt(l.link, l.target)) {
+        _ = std.c.unlink(l.link);
+    };
+    links_len = 0;
+}
+
+/// Makes a symbolic link at `link` to a pty's `path`, in place of a link
+/// there already to another pty, such as one left from an earlier run, or
+/// to nothing. A link to anything else, such as a serial port Wine found,
+/// is kept, and refused.
+fn makeLink(io: Io, link: []const u8, path: []const u8) void {
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    if (Io.Dir.cwd().readLink(io, link, &buffer)) |len| {
+        const old = buffer[0..len];
+        const dangling = if (Io.Dir.cwd().access(io, link, .{})) false else |_| true;
+        if (!dangling and !Pty.isPtyPath(old))
+            fatal("--pty: {s} is a link to {s} already; remove it to link it to the pty", .{ link, old });
+        Io.Dir.cwd().deleteFile(io, link) catch |err| fatal("--pty: {s}: {t}", .{ link, err });
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        error.NotLink => fatal("--pty: {s} is there already, and not a symbolic link", .{link}),
+        else => fatal("--pty: {s}: {t}", .{ link, err }),
+    }
+    Io.Dir.cwd().symLink(io, path, link, .{}) catch |err| fatal("--pty: {s}: {t}", .{ link, err });
 }
 
 /// whether the arguments start with a command, run, aforth or blocks
@@ -904,10 +1087,21 @@ fn dataPath(arena: Allocator, environ: *const std.process.Environ.Map, name: []c
 
 /// Stops the console or UART so its output is flushed. While it is blocked waiting
 /// for input there is nothing to flush, so ctrl+c terminates as usual, as it
-/// does when pressed a second time.
+/// does when pressed a second time, unless the run waits on a doorbell,
+/// which the pipe rings.
 fn handleInterrupt(_: posix.SIG) callconv(.c) void {
     const device = interruptible orelse return;
-    if (device.waiting.load(.acquire) or device.interrupted.swap(true, .monotonic)) {
+    const again = device.interrupted.swap(true, .monotonic);
+    if (comptime Pty.supported) if (!again) if (interrupt_pipe) |fd| {
+        _ = std.c.write(fd, "x", 1);
+        return;
+    };
+    if (device.waiting.load(.acquire) or again) {
+        // as readlink and unlink are safe to do here, with ptys
+        if (comptime Pty.supported)
+            for (links[0..links_len]) |l| if (pointsAt(l.link, l.target)) {
+                _ = std.c.unlink(l.link);
+            };
         posix.sigaction(.INT, &.{
             .handler = .{ .handler = posix.SIG.DFL },
             .mask = posix.sigemptyset(),
@@ -1053,11 +1247,13 @@ const ga144 = gasim.ga144;
 const ioName = gasim.disassembler.ioName;
 const aforth = @import("aforth.zig");
 const tui = @import("tui.zig");
+const Pty = @import("pty.zig");
 const vaxis = @import("vaxis");
 
 test {
     _ = aforth;
     _ = tui;
+    _ = Pty;
 }
 
 test "the terminal user interface and the prompt start without a program" {

@@ -242,13 +242,19 @@ fn checkJumper(self: Board, name: ?[]const u8, fault: *Fault) Error!void {
     return error.NoSuchJumper;
 }
 
+/// A UART on one of a board's serial ports
+pub const Attachment = struct {
+    uart: *Uart,
+    port: Serial,
+};
+
 /// Puts the board around `chip`, made with its chips of the spec it was
-/// checked against (`Chip.initChips`): its SERDES links, pulls and wires,
-/// and `uart` on serial port `port`, each through jumpers as `settings` set
-/// them. The other serial ports are left unconnected, as their lines idle:
-/// low on a line inverted as a USB serial chip's is, which a pin's pulldown
-/// reads as. What fails is reported in `fault`.
-pub fn apply(self: Board, chip: *Chip, uart: ?*Uart, port: ?Serial, settings: []const Setting, fault: *Fault) error{ NoSuchPin, TwoDevices, ConflictingPulls, NoSuchNode, NotSerdes, PortConnected, Full, NoSuchChip }!void {
+/// checked against (`Chip.initChips`): its SERDES links, pulls, wires and
+/// resets, and the UARTs on their serial ports, each through jumpers as
+/// `settings` set them. The other serial ports are left unconnected, as
+/// their lines idle: low on a line inverted as a USB serial chip's is,
+/// which a pin's pulldown reads as. What fails is reported in `fault`.
+pub fn apply(self: Board, chip: *Chip, ports: []const Attachment, settings: []const Setting, fault: *Fault) error{ NoSuchPin, TwoDevices, ConflictingPulls, NoSuchNode, NotSerdes, PortConnected, Full, NoSuchChip }!void {
     for (self.serdes) |link| {
         fault.* = .{ .link = .{ link.a.number(), link.b.number() } };
         try chip.attachSerdes(link.a.number(), link.b.number());
@@ -265,14 +271,15 @@ pub fn apply(self: Board, chip: *Chip, uart: ?*Uart, port: ?Serial, settings: []
         fault.* = .{ .pin = r.by.ref() };
         try chip.attachReset(r.chip, r.by.ref(), self.jumperOn(r.circuit, settings));
     };
-    const u = uart orelse return;
-    const s = port orelse return;
-    fault.* = .{ .name = s.name };
-    try chip.attachUartPins(
-        u,
-        if (self.jumperOn(s.rx.jumper, settings)) s.rx.ref() else null,
-        if (self.jumperOn(s.tx.jumper, settings)) s.tx.ref() else null,
-    );
+    for (ports) |attachment| {
+        const s = attachment.port;
+        fault.* = .{ .name = s.name };
+        try chip.attachUartPins(
+            attachment.uart,
+            if (self.jumperOn(s.rx.jumper, settings)) s.rx.ref() else null,
+            if (self.jumperOn(s.tx.jumper, settings)) s.tx.ref() else null,
+        );
+    }
 }
 
 /// Parses a board file, allocating what it names in `arena`. On
@@ -349,7 +356,7 @@ test "the EVB002 sends what node 708 sends on USB port A" {
     var output: std.Io.Writer = .fixed(&buffer);
     var uart: Uart = .init(921600, &output);
     var fault: Fault = .none;
-    try evb002.apply(&chip, &uart, evb002.serialPort("A"), &.{}, &fault);
+    try evb002.apply(&chip, &.{.{ .uart = &uart, .port = evb002.serialPort("A").? }}, &.{}, &fault);
     try chip.run();
     try std.testing.expectEqualStrings("Hi\n", output.buffered());
 
@@ -371,7 +378,7 @@ test "the EVB002's USB port B sends to node 200's pin 17" {
     uart.preload = "\x00";
     uart.arrived = 5_000_000;
     var fault: Fault = .none;
-    try evb002.apply(&chip, &uart, evb002.serialPort("B"), &.{}, &fault);
+    try evb002.apply(&chip, &.{.{ .uart = &uart, .port = evb002.serialPort("B").? }}, &.{}, &fault);
     try chip.run();
     const n = chip.node(200).?;
     try std.testing.expect(!n.waitsOnPin());
@@ -389,7 +396,7 @@ test "a jumper off leaves its line unconnected" {
     var output: std.Io.Writer = .fixed(&buffer);
     var uart: Uart = .init(921600, &output);
     var fault: Fault = .none;
-    try evb002.apply(&chip, &uart, evb002.serialPort("A"), &.{ .{ .name = "J23.3-4", .on = false }, .{ .name = "J26", .on = false } }, &fault);
+    try evb002.apply(&chip, &.{.{ .uart = &uart, .port = evb002.serialPort("A").? }}, &.{ .{ .name = "J23.3-4", .on = false }, .{ .name = "J26", .on = false } }, &fault);
     try chip.run();
     try std.testing.expectEqualStrings("", output.buffered());
     try std.testing.expect(!chip.node(705).?.pinHigh(1 << 17));
@@ -406,11 +413,30 @@ test "the EVB002's USB port C sends what target node 708 sends" {
     var output: std.Io.Writer = .fixed(&buffer);
     var uart: Uart = .init(921600, &output);
     var fault: Fault = .none;
-    try evb002.apply(&chip, &uart, evb002.serialPort("C"), &.{}, &fault);
+    try evb002.apply(&chip, &.{.{ .uart = &uart, .port = evb002.serialPort("C").? }}, &.{}, &fault);
     try chip.run();
     try std.testing.expectEqualStrings("Hi\n", output.buffered());
     // the target's 705.17 is pulled up, J26 or not
     try std.testing.expect(chip.node(10705).?.pinHigh(1 << 17));
+}
+
+test "the EVB002's USB ports A and C at once" {
+    var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
+    defer chip.deinit(std.testing.allocator);
+    var programs: [2]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    for (try assembler.assembleNodes(test_uart ++ "\n" ++ "node 1.708" ++ test_uart["node 708".len..], &programs, &diagnostic)) |program| try chip.load(program);
+
+    var buffers: [2][32]u8 = undefined;
+    var outputs: [2]std.Io.Writer = .{ .fixed(&buffers[0]), .fixed(&buffers[1]) };
+    var uarts: [2]Uart = .{ .init(921600, &outputs[0]), .init(921600, &outputs[1]) };
+    var fault: Fault = .none;
+    try evb002.apply(&chip, &.{
+        .{ .uart = &uarts[0], .port = evb002.serialPort("A").? },
+        .{ .uart = &uarts[1], .port = evb002.serialPort("C").? },
+    }, &.{}, &fault);
+    try chip.run();
+    for (outputs) |output| try std.testing.expectEqualStrings("Hi\n", output.buffered());
 }
 
 test "the EVB002's J35 joins the chips' 300.17, and SERDES their 701 and 001" {
@@ -428,7 +454,7 @@ test "the EVB002's J35 joins the chips' 300.17, and SERDES their 701 and 001" {
             \\node 1.001 up b! @b left b! @b
         , &programs, &diagnostic)) |program| try chip.load(program);
         var fault: Fault = .none;
-        try evb002.apply(&chip, null, null, &.{.{ .name = "J35", .on = on }}, &fault);
+        try evb002.apply(&chip, &.{}, &.{.{ .name = "J35", .on = on }}, &fault);
         try chip.run();
         // past the wait on its pin, waiting on right, or still on left
         try std.testing.expectEqual(@as(u9, if (on) 0x1d5 else 0x175), chip.node(10300).?.b);
@@ -452,7 +478,7 @@ test "the EVB002's host 500 resets the target through J22" {
             \\node 1.708 7 right b! @b
         , &programs, &diagnostic)) |program| try chip.load(program);
         var fault: Fault = .none;
-        try evb002.apply(&chip, null, null, &.{}, &fault);
+        try evb002.apply(&chip, &.{}, &.{}, &fault);
         try chip.run();
         try std.testing.expect(!chip.isHeld(1));
         // back in its ROM, waiting at cold for a boot stream on its pin
@@ -467,7 +493,7 @@ test "the EVB002's host 500 resets the target through J22" {
         defer chip.deinit(std.testing.allocator);
         try chip.loadRom(rom);
         var fault: Fault = .none;
-        try evb002.apply(&chip, null, null, &.{.{ .name = "J22.5-6", .on = false }}, &fault);
+        try evb002.apply(&chip, &.{}, &.{.{ .name = "J22.5-6", .on = false }}, &fault);
         try chip.run();
         try std.testing.expect(chip.isHeld(1));
     }
