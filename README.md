@@ -137,11 +137,11 @@ more info.
 
 ### Options
 
-- `--board <file>`: with `run`, the board around the chip, described in a
+- `--board <file>`: with `run`, the board around the chips, described in a
   board file (see [Board files](#board-files)), or `evb002` for
   GreenArrays' EVB002, with stdin and stdout on one of its serial ports
 - `--usb <port>`: the board's serial port on stdin and stdout (default its
-  first, such as `A`)
+  first, such as `A`; `C` is the EVB002's target chip's)
 - `--jumper <name>=on|off`: set one of the board's jumpers otherwise than
   as it is shipped, such as `J26=off`. Can be given more than once.
 - `--chip <file>`: the chip, described in a chip file (see [Chip
@@ -259,30 +259,53 @@ for a node whose ROM type differs from the GA144's node of its number.
 
 ### Board files
 
-A board file says what a board puts around its chip, in ZON: its chip
-file (`ga144` for the GA144, or a path relative to the board file),
-serial ports wired to the chip's pins, pull
-resistors, wires between pins, and named jumpers that connect some of
-them, on or off as the board is shipped. The EVB002's,
-[`src/boards/evb002.zon`](src/boards/evb002.zon), is built in as `evb002`,
-from its data book (DB014) and the jumper settings it ships with (AN021):
-its host chip, with USB ports A (708's pins 17 and 1) and B (200.17 in,
-100.17 out), J26 (NO BOOT) holding 705.17 high, and pull-ups on the SPI
-flash's and the SRAM's chip enables.
+A board file says what a board puts around its chips, in ZON: their chip
+file (`ga144` for the GA144, or a path relative to the board file), how
+many chips there are of it, serial ports wired to the chips' pins, pull
+resistors, wires between pins, SERDES links between nodes, and named
+jumpers that connect some of them, on or off as the board is shipped. The
+nodes of chips after the first are numbered with the chip before them, such
+as `1.708`, in a board file as `.chip = 1, .node = 708`, and in programs
+(`node 1.708`) and options (`--break 1.708:004`) as `1.708`. The nodes of
+all the chips run as one, the furthest behind in time first.
+
+The EVB002's, [`src/boards/evb002.zon`](src/boards/evb002.zon), is built
+in as `evb002`, from its data book (DB014) and the jumper settings it ships
+with (AN021):
+
+- the host chip, with USB ports A (708's pins 17 and 1) and B (200.17 in,
+  100.17 out), J26 (NO BOOT) holding 705.17 high, and pull-ups on the SPI
+  flash's and the SRAM's chip enables;
+- the target chip, chip 1, with USB port C (1.708's pins 17 and 1) and a
+  pull-up on 1.705.17;
+- SERDES from host 701 to target 001, and J34 and J35 joining the chips'
+  300.1 and 300.17.
 
 ```
 $ gasim run --board evb002 examples/uart.ga
 Hello, world!
 $ gasim run --board evb002 --jumper J23.3-4=off examples/uart.ga
-warning: node 708 never sent a byte on the UART or woke on its input
+warning: port A (708.17 in, 708.1 out) never carried a byte
+$ sed 's/^node 708/node 1.708/' examples/uart.ga > target.ga
+$ gasim run --board evb002 --usb C --boot target.ga
+Hello, world!
 ```
+
+A SERDES node sends a word by writing it to its data register and setting
+io bit 17, and each word after by writing it to up, which waits until the
+word before has been sent; it receives by reading up (DB001 §3.6). A word
+takes 40 ns, 18 bits at about 450 Mb/s, as the G144A12's data book gives no
+timing for it yet. There is no flow control, so a word that has not been
+read when the next arrives is lost.
 
 Serial ports other than the one on stdin and stdout are left unconnected,
 which their nodes' pulldowns read as an idle, inverted line. A board with
 no serial ports has the console instead (`--console`). A wire can't go to a
 serial port's pin yet, as the port's input would not wake the other pin's
-node. The EVB002's
-target chip, and its port C, wait for boards of more than one chip.
+node. `--boot` through a serial port boots the chip it is wired to. The
+EVB002's reset lines, from host 500.17 and port C's RTS to the target
+through J22, are not modelled yet, and arrayForth 3 programs (`.af`,
+`.blk`) only reach the first chip.
 
 ### ROM
 

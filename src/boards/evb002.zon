@@ -1,24 +1,33 @@
-// GreenArrays' EVB002 evaluation board, its host chip, from its data book
-// (DB014) and the jumper settings it ships with (AN021 1.2). The target
-// chip, the SERDES link from host 701 to target 001, and jumpers J34 and
-// J35 between the chips' nodes 300, wait for boards of more than one chip.
+// GreenArrays' EVB002 evaluation board, from its data book (DB014) and the
+// jumper settings it ships with (AN021 1.2): the host chip, chip 0, and the
+// target, chip 1, whose nodes are numbered 1.yxx. The target's reset lines
+// (J22) are not modelled yet.
 //
 // jumpers: on as shipped
 // serial: the FT232R USB serial chips, sending to the chip on rx and
 //   listening on tx, at 921600 baud, through J23 (DB014 5.2)
 // pulls: resistors to high or low
+// wires: between pins, through a jumper
+// serdes: SERDES links between nodes
 .{
     .name = "EVB002",
     .chip = "ga144",
+    .chips = 2,
     .jumpers = .{
-        // J23: USB serial lines to the host chip
-        .{ .name = "J23.1-2", .on = true }, // port A to 708.17
-        .{ .name = "J23.3-4", .on = true }, // port A from 708.1
-        .{ .name = "J23.5-6", .on = true }, // port B to 200.17
-        .{ .name = "J23.7-8", .on = true }, // port B from 100.17
-        // NO BOOT: holds 705.17 high, so that 705 does not boot from the
-        // SPI flash at reset (DB014 5.3.1, 5.6.3)
+        // J23: USB serial lines to the chips
+        .{ .name = "J23.1-2", .on = true }, // port A to host 708.17
+        .{ .name = "J23.3-4", .on = true }, // port A from host 708.1
+        .{ .name = "J23.5-6", .on = true }, // port B to host 200.17
+        .{ .name = "J23.7-8", .on = true }, // port B from host 100.17
+        .{ .name = "J23.9-10", .on = true }, // port C to target 708.17
+        .{ .name = "J23.11-12", .on = true }, // port C from target 708.1
+        // NO BOOT: holds host 705.17 high, so that 705 does not boot from
+        // the SPI flash at reset (DB014 5.3.1, 5.6.3)
         .{ .name = "J26", .on = true },
+        // host 300.1 and 300.17 to the target's, for synchronous boot
+        // (DB014 5.5, 6.3)
+        .{ .name = "J34", .on = true },
+        .{ .name = "J35", .on = true },
     },
     .serial = .{
         // for the arrayForth 3 IDE, and async boot through 708's ROM
@@ -33,6 +42,12 @@
             .rx = .{ .node = 200, .pin = 17, .jumper = "J23.5-6" },
             .tx = .{ .node = 100, .pin = 17, .jumper = "J23.7-8" },
         },
+        // for the arrayForth 3 IDE on the target (DB014 6.2)
+        .{
+            .name = "C",
+            .rx = .{ .chip = 1, .node = 708, .pin = 17, .jumper = "J23.9-10" },
+            .tx = .{ .chip = 1, .node = 708, .pin = 1, .jumper = "J23.11-12" },
+        },
     },
     .pulls = .{
         .{ .node = 705, .pin = 17, .high = true, .jumper = "J26" },
@@ -41,5 +56,16 @@
         // the SRAM's CE- and WE-, inactive at reset (DB014 8.2.1)
         .{ .node = 8, .pin = 1, .high = true },
         .{ .node = 8, .pin = 3, .high = true },
+        // so that the target's 705 does not boot from SPI (DB014 2.1)
+        .{ .chip = 1, .node = 705, .pin = 17, .high = true },
+    },
+    .wires = .{
+        // sync data and clock (DB014 8.3.4)
+        .{ .a = .{ .node = 300, .pin = 1 }, .b = .{ .chip = 1, .node = 300, .pin = 1 }, .jumper = "J34" },
+        .{ .a = .{ .node = 300, .pin = 17 }, .b = .{ .chip = 1, .node = 300, .pin = 17 }, .jumper = "J35" },
+    },
+    .serdes = .{
+        // hardwired, with probe points S1 and S17 (DB014 5.5)
+        .{ .a = .{ .node = 701 }, .b = .{ .chip = 1, .node = 1 } },
     },
 }

@@ -27,10 +27,12 @@ const usage =
     \\are decompressed, and the kernel's blocks before block 18 left out.
     \\
     \\options:
-    \\  --board <file>             with run, the board around the chip,
+    \\  --board <file>             with run, the board around the chips,
     \\                             described in a board file, such as
     \\                             src/boards/evb002.zon, or evb002 for that,
-    \\                             with stdin and stdout on a serial port
+    \\                             with stdin and stdout on a serial port.
+    \\                             Nodes of chips after the first are
+    \\                             numbered with the chip, such as 1.708.
     \\  --usb <port>               the board's serial port on stdin and stdout
     \\                             (default its first, such as A)
     \\  --jumper <name>=on|off     set one of the board's jumpers otherwise
@@ -150,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
                     fatal("invalid breakpoint '{s}', expected for example 105:003", .{value});
                 if (breakpoints_len == breakpoints.len) fatal("more than {d} breakpoints", .{breakpoints.len});
                 breakpoints[breakpoints_len] = .{
-                    .node = std.fmt.parseInt(u16, value[0..colon], 10) catch
+                    .node = Chip.parseNode(value[0..colon]) catch
                         fatal("invalid breakpoint node '{s}'", .{value[0..colon]}),
                     .address = std.fmt.parseInt(u9, value[colon + 1 ..], 16) catch
                         fatal("invalid breakpoint address '{s}', expected 000 to 1ff", .{value[colon + 1 ..]}),
@@ -167,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
                     fatal("invalid watch '{s}', expected read or write after the port", .{value});
                 if (watches_len == watches.len) fatal("more than {d} watches", .{watches.len});
                 watches[watches_len] = .{
-                    .node = std.fmt.parseInt(u16, node, 10) catch fatal("invalid watch node '{s}'", .{node}),
+                    .node = Chip.parseNode(node) catch fatal("invalid watch node '{s}'", .{node}),
                     .direction = std.meta.stringToEnum(Direction, direction) orelse
                         fatal("invalid watch port '{s}', expected right, down, left or up", .{direction}),
                     .read = kind == null or std.mem.eql(u8, kind.?, "read"),
@@ -177,7 +179,7 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, arg, "--uart")) {
                 var parts = std.mem.splitScalar(u8, value, ':');
                 const node = parts.first();
-                uart_node = std.fmt.parseInt(u16, node, 10) catch fatal("invalid UART node '{s}'", .{node});
+                uart_node = Chip.parseNode(node) catch fatal("invalid UART node '{s}'", .{node});
                 if (parts.next()) |baud| {
                     uart_baud = std.fmt.parseInt(u32, baud, 10) catch fatal("invalid baud '{s}'", .{baud});
                     if (uart_baud == 0) fatal("invalid baud '{s}'", .{baud});
@@ -203,7 +205,7 @@ pub fn main(init: std.process.Init) !void {
                 console_given = true;
                 const colon = std.mem.indexOfScalar(u8, value, ':') orelse
                     fatal("invalid console '{s}', expected for example 000:up", .{value});
-                console_node = std.fmt.parseInt(u16, value[0..colon], 10) catch
+                console_node = Chip.parseNode(value[0..colon]) catch
                     fatal("invalid console node '{s}'", .{value[0..colon]});
                 console_port = std.meta.stringToEnum(Direction, value[colon + 1 ..]) orelse
                     fatal("invalid console port '{s}', expected right, down, left or up", .{value[colon + 1 ..]});
@@ -231,6 +233,8 @@ pub fn main(init: std.process.Init) !void {
     } else if (usb != null or settings_len > 0) fatal("--usb and --jumper need --board", .{});
     const board: ?gasim.Board = if (board_path) |p| readBoard(io, arena, init.gpa, p) else null;
     if (board) |b| {
+        // the terminal user interface and arrayForth 3 know one chip
+        if (b.chips > 1 and command != .run and !listing) fatal("--board with more than one chip needs run", .{});
         for (settings[0..settings_len]) |setting| {
             for (b.jumpers) |j| {
                 if (std.mem.eql(u8, j.name, setting.name)) break;
@@ -250,8 +254,8 @@ pub fn main(init: std.process.Init) !void {
         const tx = board.?.jumperOn(s.tx.jumper, on);
         if (!rx and !tx) fatal("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches stdin or stdout", .{s.name});
         if (!rx and (boot or path == null))
-            fatal("--jumper {s}=off leaves port {s}'s rx unconnected, so nothing can boot node {d:0>3} from it", .{ s.rx.jumper.?, s.name, s.rx.node });
-        uart_node = if (rx) s.rx.node else s.tx.node;
+            fatal("--jumper {s}=off leaves port {s}'s rx unconnected, so nothing can boot node {f} from it", .{ s.rx.jumper.?, s.name, Chip.nodeName(s.rx.ref().node) });
+        uart_node = if (rx) s.rx.ref().node else s.tx.ref().node;
         uart_baud = s.baud;
     }
     // for messages, what put stdin and stdout on a UART
@@ -265,13 +269,15 @@ pub fn main(init: std.process.Init) !void {
         .{ .rows = l.rows, .columns = l.columns }
     else
         .ga144;
-    const layout = spec.layout();
+    const layout = if (board) |b| b.layout(spec) else spec.layout();
     if (board) |b| {
         var fault: gasim.Board.Fault = .none;
         b.check(spec, &fault) catch |err| switch (fault) {
             .none => fatal("{s}: {t}", .{ board_path.?, err }),
             .name => |name| fatal("{s}: {s}: {t}", .{ board_path.?, name, err }),
-            .pin => |pin| fatal("{s}: {d:0>3}.{d}: {t}, on {s}", .{ board_path.?, pin.node, pin.pin, err, spec.name }),
+            .pin => |pin| fatal("{s}: {f}.{d}: {t}, on {s}", .{ board_path.?, Chip.nodeName(pin.node), pin.pin, err, spec.name }),
+            .node => |node| fatal("{s}: {f}: {t}, on {s}", .{ board_path.?, Chip.nodeName(node), err, spec.name }),
+            .link => unreachable,
         };
     }
     const source_path = path orelse "";
@@ -284,7 +290,7 @@ pub fn main(init: std.process.Init) !void {
     if (!listing and stats and command != .run) fatal("--stats needs run", .{});
     if (!listing and uart_node != null and command != .run) fatal("{s} needs run, as stdin and stdout are its serial port's", .{if (board != null) "--board" else "--uart"});
     if (uart_node != null and console_given) fatal("--uart puts stdin and stdout on the UART, so there is no console for --console", .{});
-    if (uart_node != null and boot and path == null) fatal("--boot needs a program to send node {d:0>3}", .{uart_node.?});
+    if (uart_node != null and boot and path == null) fatal("--boot needs a program to send node {f}", .{Chip.nodeName(uart_node.?)});
 
     const blocks = std.mem.endsWith(u8, source_path, ".blk");
     if (loads_len > 0 and !blocks and !colorforth) fatal("--load needs a .blk or .cf file of blocks", .{});
@@ -313,14 +319,14 @@ pub fn main(init: std.process.Init) !void {
     else
         file;
 
-    var chip: Chip = try .init(init.gpa, spec);
+    var chip: Chip = try .initChips(init.gpa, spec, layout.chips);
     defer chip.deinit(init.gpa);
 
     const roms = readRom(io, arena, init.environ_map, rom_path);
     // which readRom checks for
     if (roms) |r| chip.loadRom(r) catch unreachable;
     if (uart_node != null and path == null and roms == null)
-        fatal("--uart without a program needs a ROM, for node {d:0>3} to boot from its input (see --rom)", .{uart_node.?});
+        fatal("--uart without a program needs a ROM, for node {f} to boot from its input (see --rom)", .{Chip.nodeName(uart_node.?)});
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     const descriptor_buffer = try arena.alloc(gasim.boot.Descriptor, layout.count());
@@ -353,7 +359,7 @@ pub fn main(init: std.process.Init) !void {
         assemble(&spec, source_path, file, program_buffer, descriptor_buffer, &diagnostic)) catch |err| {
         const where: Where = .{ .path = source_path, .line = diagnostic.line, .kind = if (blocks) .blocks else if (colorforth) .colorforth else .text };
         switch (err) {
-            error.TooManyNodes => fatal("{f}: more nodes than a {d}x{d} layout has at '{s}'", .{ where, layout.rows, layout.columns, diagnostic.token }),
+            error.TooManyNodes => fatal("{f}: more nodes than {f} has at '{s}'", .{ where, layout, diagnostic.token }),
             error.NoSuchBlock => if (diagnostic.line == 0) fatal("{s}: has fewer blocks than --load needs", .{source_path}),
             else => {},
         }
@@ -363,7 +369,7 @@ pub fn main(init: std.process.Init) !void {
     // arrayForth 3 and colorForth know the GA144's ROM words only
     if (colorforth or blocks or std.mem.endsWith(u8, source_path, ".af")) for (programs) |program| {
         if (spec.node(program.node).rom != gasim.Spec.ga144.node(program.node).rom)
-            fatal("{s}: node {d:0>3} has another ROM than the GA144's {d:0>3}, and arrayForth 3 and colorForth programs are assembled for the GA144's ROMs", .{ source_path, program.node, program.node });
+            fatal("{s}: node {f} has another ROM than the GA144's {d:0>3}, and arrayForth 3 and colorForth programs are assembled for the GA144's ROMs", .{ source_path, Chip.nodeName(program.node), program.node % Chip.Layout.chip_numbers });
     };
     if (assembled.first_difference) |first| std.log.warn("{f}: arrayForth 2 noted {x:0>3} here, where gasim is at {x:0>3}, and {d} more gray numbers differ", .{
         Where{ .path = source_path, .line = first.line, .kind = .colorforth },
@@ -378,7 +384,7 @@ pub fn main(init: std.process.Init) !void {
         for (programs, 0..) |program, n| {
             if (n > 0) try writer.writeByte('\n');
             if (program.bin) |bin| try writer.print("bin {d} ", .{bin});
-            try writer.print("node {d:0>3}\n", .{program.node});
+            try writer.print("node {f}\n", .{Chip.nodeName(program.node)});
             try gasim.disassembler.listing(writer, program, source);
         }
         for (assembled.descriptors) |descriptor| try writer.print("\n{f}", .{descriptor});
@@ -397,7 +403,7 @@ pub fn main(init: std.process.Init) !void {
         break :own descriptor_buffer[0..count];
     };
     for (descriptors) |descriptor| if (layout.index(descriptor.node) == null)
-        fatal("{s}: node {d:0>3} is not in a {d}x{d} layout", .{ source_path, descriptor.node, layout.rows, layout.columns });
+        fatal("{s}: node {f} is not in {f}", .{ source_path, Chip.nodeName(descriptor.node), layout });
 
     if (roms == null) for (descriptors) |descriptor| {
         for (descriptor.loads[0..descriptor.load_count]) |part| {
@@ -406,19 +412,19 @@ pub fn main(init: std.process.Init) !void {
                 fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .kind = if (blocks) .blocks else if (colorforth) .colorforth else .text }, word.token });
         }
         if (descriptor.p & 0x180 == 0x080)
-            fatal("{s}: node {d:0>3} starts in ROM at {x:0>3}, which is not loaded (see --rom)", .{ source_path, descriptor.node, descriptor.p });
+            fatal("{s}: node {f} starts in ROM at {x:0>3}, which is not loaded (see --rom)", .{ source_path, Chip.nodeName(descriptor.node), descriptor.p });
     };
 
     for (breakpoints[0..breakpoints_len]) |b| {
         const index = layout.index(b.node) orelse
-            fatal("breakpoint node {d:0>3} is not in a {d}x{d} layout", .{ b.node, layout.rows, layout.columns });
+            fatal("breakpoint node {f} is not in {f}", .{ Chip.nodeName(b.node), layout });
         // the same breakpoint twice is still set
         chip.breakpoints.insert(.init(index, b.address)) catch unreachable;
     }
 
     for (watches[0..watches_len]) |w| {
         const index = layout.index(w.node) orelse
-            fatal("watch node {d:0>3} is not in a {d}x{d} layout", .{ w.node, layout.rows, layout.columns });
+            fatal("watch node {f} is not in {f}", .{ Chip.nodeName(w.node), layout });
         for ([_]bool{ false, true }) |write| {
             if (!(if (write) w.write else w.read)) continue;
             chip.watches.insert(.{ .index = index, .direction = w.direction, .write = write }) catch
@@ -432,14 +438,17 @@ pub fn main(init: std.process.Init) !void {
     var feeder: Chip.Feeder = .{ .words = &.{} };
     if (boot and uart_node != null) {
         const root = uart_node.?;
+        // a boot stream sets up nodes of the chip it goes to
+        for (descriptors) |descriptor| if (descriptor.node / Chip.Layout.chip_numbers != root / Chip.Layout.chip_numbers)
+            fatal("--boot through node {f} boots its chip, not node {f}", .{ Chip.nodeName(root), Chip.nodeName(descriptor.node) });
         if (spec.node(root).rom != .async_boot)
-            fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {d:0>3}", .{ uart_option, root });
-        if (roms == null) fatal("--boot needs a ROM, for node {d:0>3} to boot from (see --rom)", .{root});
+            fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {f}", .{ uart_option, Chip.nodeName(root) });
+        if (roms == null) fatal("--boot needs a ROM, for node {f} to boot from (see --rom)", .{Chip.nodeName(root)});
         const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors) + 3 * (descriptors.len + 2));
         const words = gasim.boot.asyncStream(init.gpa, layout, root, descriptors, programs, buffer) catch |err| switch (err) {
-            error.NoSuchNode => fatal("--uart node {d:0>3} is not in a {d}x{d} layout", .{ root, layout.rows, layout.columns }),
+            error.NoSuchNode => fatal("--uart node {f} is not in {f}", .{ Chip.nodeName(root), layout }),
             error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
-            error.RootTooLong => fatal("--boot: node {d:0>3}'s program leaves no room in its RAM for the code that sets it up", .{root}),
+            error.RootTooLong => fatal("--boot: node {f}'s program leaves no room in its RAM for the code that sets it up", .{Chip.nodeName(root)}),
             else => |e| return e,
         };
         uart.preload = gasim.boot.asyncBytes(words, try arena.alloc(u8, 3 * words.len));
@@ -447,15 +456,17 @@ pub fn main(init: std.process.Init) !void {
         if (console_node == 1 and console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
         if (spec.node(1).rom != .serdes_boot) fatal("--boot needs node 001 to have a SERDES boot ROM, as the GA144's does", .{});
         if (roms == null) fatal("--boot needs a ROM, for node 001 to boot from (see --rom)", .{});
+        for (descriptors) |descriptor| if (descriptor.node >= Chip.Layout.chip_numbers)
+            fatal("--boot through node 001 boots its chip, not node {f}", .{Chip.nodeName(descriptor.node)});
         const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors));
         feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, descriptors, programs, buffer) catch |err| switch (err) {
-            error.NoSuchNode => fatal("--boot needs node 001, which is not in a {d}x{d} layout", .{ layout.rows, layout.columns }),
+            error.NoSuchNode => fatal("--boot needs node 001, which is not in {f}", .{layout}),
             error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
             else => |e| return e,
         };
         chip.attachFeeder(&feeder, 1, .up) catch fatal("--boot needs node 001's up port to face off the chip", .{});
     } else for (descriptors) |descriptor| chip.setUp(descriptor, programs) catch |err| switch (err) {
-        error.NoSuchBin => fatal("{s}: node {d:0>3} loads a bin that was not saved", .{ source_path, descriptor.node }),
+        error.NoSuchBin => fatal("{s}: node {f} loads a bin that was not saved", .{ source_path, Chip.nodeName(descriptor.node) }),
         error.NoSuchNode => unreachable,
     };
 
@@ -481,26 +492,28 @@ pub fn main(init: std.process.Init) !void {
         b.apply(&chip, if (serial != null) &uart else null, serial, settings[0..settings_len], &fault) catch |err| switch (fault) {
             .none => fatal("{s}: {t}", .{ board_path.?, err }),
             .name => |name| fatal("{s}: port {s}: {t}", .{ board_path.?, name, err }),
-            .pin => |pin| fatal("{s}: {d:0>3}.{d}: {t}", .{ board_path.?, pin.node, pin.pin, err }),
+            .pin => |pin| fatal("{s}: {f}.{d}: {t}", .{ board_path.?, Chip.nodeName(pin.node), pin.pin, err }),
+            .node => |node| fatal("{s}: {f}: {t}", .{ board_path.?, Chip.nodeName(node), err }),
+            .link => |link| fatal("{s}: SERDES {f} to {f}: {t}", .{ board_path.?, Chip.nodeName(link[0]), Chip.nodeName(link[1]), err }),
         };
     }
     if (uart_node) |node| {
         uart.input = .{ .io = io, .queue = &input };
         if (board == null) chip.attachUart(&uart, node) catch |err| switch (err) {
-            error.NoSuchNode => fatal("--uart node {d:0>3} is not in a {d}x{d} layout", .{ node, layout.rows, layout.columns }),
-            error.NoPins => fatal("--uart node {d:0>3} has no pins 17 and 1", .{node}),
+            error.NoSuchNode => fatal("--uart node {f} is not in {f}", .{ Chip.nodeName(node), layout }),
+            error.NoPins => fatal("--uart node {f} has no pins 17 and 1", .{Chip.nodeName(node)}),
         };
         // booting from ROM waits for pin 17 through the port facing off the
         // chip, up on the top and bottom rows and left on the others
         if (boot or path == null) {
             if (spec.node(node).rom != .async_boot)
-                fatal("{s} without a program boots node {d:0>3} from its ROM, which is not an asynchronous boot ROM, as 708's is", .{ uart_option, node });
+                fatal("{s} without a program boots node {f} from its ROM, which is not an asynchronous boot ROM, as 708's is", .{ uart_option, Chip.nodeName(node) });
             if (chip.nodes[layout.index(node).?].wake_port == null)
-                fatal("node {d:0>3} has no port facing off the chip that pin 17 could wake it through to boot: up on the top and bottom rows, left on the others", .{node});
+                fatal("node {f} has no port facing off the chip that pin 17 could wake it through to boot: up on the top and bottom rows, left on the others", .{Chip.nodeName(node)});
         }
     } else chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
-        error.NoSuchNode => fatal("console node {d:0>3} is not in a {d}x{d} layout", .{ console_node, layout.rows, layout.columns }),
-        error.PortConnected => fatal("console port {t} of node {d:0>3} is connected to another node", .{ console_port, console_node }),
+        error.NoSuchNode => fatal("console node {f} is not in {f}", .{ Chip.nodeName(console_node), layout }),
+        error.PortConnected => fatal("console port {t} of node {f} is connected to another node", .{ console_port, Chip.nodeName(console_node) }),
     };
 
     if (command == .aforth) return aforth.run(io, arena, &chip, session.?, &diagnostic, &aforth_writer.interface, .{
@@ -582,12 +595,12 @@ pub fn main(init: std.process.Init) !void {
     if (uart_node) |node| {
         if (!uart.used) {
             if (serial) |s| {
-                std.log.warn("port {s} ({d:0>3}.{d} in, {d:0>3}.{d} out) never carried a byte", .{ s.name, s.rx.node, s.rx.pin, s.tx.node, s.tx.pin });
-            } else std.log.warn("node {d:0>3} never sent a byte on the UART or woke on its input", .{node});
+                std.log.warn("port {s} ({f}.{d} in, {f}.{d} out) never carried a byte", .{ s.name, Chip.nodeName(s.rx.ref().node), s.rx.pin, Chip.nodeName(s.tx.ref().node), s.tx.pin });
+            } else std.log.warn("node {f} never sent a byte on the UART or woke on its input", .{Chip.nodeName(node)});
         }
     } else if (!console.used) {
         // most likely the console is on a port the program does not use
-        std.log.warn("node {d:0>3} never used the console on its {t} port", .{ console_node, console_port });
+        std.log.warn("node {f} never used the console on its {t} port", .{ Chip.nodeName(console_node), console_port });
     }
 }
 
@@ -752,7 +765,7 @@ fn logContention(chip: Chip, contention: gasim.pins.Contention) void {
     var buffer: [256]u8 = undefined;
     var nodes: Io.Writer = .fixed(&buffer);
     var it = chip.wiring.members(contention.net);
-    while (it.next()) |p| nodes.print(" {d:0>3}", .{chip.layout.nodeNumber(p.node)}) catch break;
+    while (it.next()) |p| nodes.print(" {f}", .{Chip.nodeName(chip.layout.nodeNumber(p.node))}) catch break;
     std.log.warn("pins were driven both ways on the same net, of nodes{s}, first at {d}.{d:0>3} us", .{ nodes.buffered(), contention.time / 1_000_000, contention.time / 1000 % 1000 });
 }
 
@@ -765,14 +778,14 @@ fn logWaiting(chip: Chip) void {
         const number = chip.layout.nodeNumber(@intCast(i));
         const status = n.status();
         switch (status) {
-            .running => std.log.info("node {d:0>3} running", .{number}),
+            .running => std.log.info("node {f} running", .{Chip.nodeName(number)}),
             inline .code, .reading, .writing => |address, waiting| {
                 const ports = gasim.port.select(address) orelse gasim.port.Select.empty;
                 if (ports.count() > 1 and (waiting == .code or n.word_address.rom)) {
                     idle += 1;
                     continue;
                 }
-                std.log.info("node {d:0>3} waiting {s} {s}", .{ number, switch (waiting) {
+                std.log.info("node {f} waiting {s} {s}", .{ Chip.nodeName(number), switch (waiting) {
                     .code => "for code from",
                     .reading => "to read",
                     .writing => "to write",

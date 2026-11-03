@@ -55,7 +55,7 @@ pub const Descriptor = struct {
     ///       stack 08a00
     ///       P 017
     pub fn format(self: Descriptor, writer: *Io.Writer) Io.Writer.Error!void {
-        try writer.print("boot node {d:0>3}\n", .{self.node});
+        try writer.print("boot node {f}\n", .{Chip.nodeName(self.node)});
         for (self.loads[0..self.load_count]) |load| if (load.len == 64) {
             try writer.print("  load bin {d}\n", .{load.bin});
         } else {
