@@ -71,12 +71,65 @@ next_event: ?u64 = null,
 wiring: *gpio.Wiring,
 /// links between SERDES nodes of different chips (see `attachSerdes`)
 serdes: *SerdesLinks,
+/// chips' RESET- pins on the nets of pins that drive them (see
+/// `attachReset`)
+resets: *ResetLines,
+/// the chips held in reset, a bit each
+held: u8 = 0,
+/// where each node starts after reset, as `init`, `loadRom` and
+/// `attachFeeder` leave it, for a chip that is reset again
+reset_address: []Address,
 
 const Chip = @This();
 
 pub const max_breakpoints = 32;
 pub const max_watches = 32;
 pub const max_serdes = 4;
+
+pub const max_resets = 4;
+
+/// A chip's RESET- pin, which holds the chip in reset while it is low, as a
+/// device listening on the net of a pin that drives it. The changes it is
+/// told of are acted on after the step that made them (`resetLines`).
+pub const ResetLine = struct {
+    chip: u8 = 0,
+    /// as last told
+    high: bool = true,
+    /// changes not yet acted on, the earliest first. More in one step than
+    /// this keep the latest in the last.
+    edges: [4]Edge = @splat(.{}),
+    edges_len: u8 = 0,
+
+    pub const Edge = struct {
+        time: u64 = 0,
+        high: bool = false,
+    };
+
+    pub fn device(self: *ResetLine) gpio.Device {
+        return .{ .context = self, .changed = changed };
+    }
+
+    fn changed(context: *anyopaque, time: u64, high: bool) void {
+        const self: *ResetLine = @ptrCast(@alignCast(context));
+        if (high == self.high) return;
+        self.high = high;
+        if (self.edges_len < self.edges.len) self.edges_len += 1;
+        self.edges[self.edges_len - 1] = .{ .time = time, .high = high };
+    }
+};
+
+pub const ResetLines = struct {
+    items: [max_resets]ResetLine = @splat(.{}),
+    len: u8 = 0,
+
+    pub fn slice(self: *ResetLines) []ResetLine {
+        return self.items[0..self.len];
+    }
+};
+
+/// where a chip held in reset waits, an io address that is not a port, so
+/// that fetching from it waits forever and nothing wakes it
+const held_address: Address = Address.fromWord(0x1ff);
 
 pub const SerdesLinks = struct {
     items: [max_serdes]Serdes = @splat(.init(0, 0)),
@@ -225,6 +278,8 @@ pub const Snapshot = struct {
     feeder_port: Port = .{},
     feeder_next: usize = 0,
     serdes: SerdesLinks = .{},
+    resets: ResetLines = .{},
+    held: u8 = 0,
 
     /// Allocates a snapshot of a chip with `layout`
     pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Snapshot {
@@ -479,8 +534,24 @@ pub fn initChips(gpa: Allocator, spec: Spec, chips: u8) Allocator.Error!Chip {
     const serdes = try gpa.create(SerdesLinks);
     errdefer gpa.destroy(serdes);
     serdes.* = .{};
+    const resets = try gpa.create(ResetLines);
+    errdefer gpa.destroy(resets);
+    resets.* = .{};
+    const reset_address = try gpa.alloc(Address, count);
+    errdefer gpa.free(reset_address);
 
-    var chip: Chip = .{ .layout = layout, .spec = spec, .nodes = nodes, .ports = ports, .queue = queue, .queued = queued, .wiring = undefined, .serdes = serdes };
+    var chip: Chip = .{
+        .layout = layout,
+        .spec = spec,
+        .nodes = nodes,
+        .ports = ports,
+        .queue = queue,
+        .queued = queued,
+        .wiring = undefined,
+        .serdes = serdes,
+        .resets = resets,
+        .reset_address = reset_address,
+    };
     @memset(ports, .{});
     @memset(queued, false);
     for (nodes, 0..) |*n, i| {
@@ -491,6 +562,7 @@ pub fn initChips(gpa: Allocator, spec: Spec, chips: u8) Allocator.Error!Chip {
         n.wake_port = wakePort(layout, @intCast(i), n.pins);
         if (spec.hasData(number)) n.data = 0;
         n.p.address = Address.fromWord(port.multiport(layout.neighbourPorts(@intCast(i))));
+        reset_address[i] = n.p.address;
         chip.wake(@intCast(i));
     }
 
@@ -521,6 +593,8 @@ pub fn deinit(self: *Chip, gpa: Allocator) void {
     gpa.free(self.queued);
     self.wiring.destroy(gpa);
     gpa.destroy(self.serdes);
+    gpa.destroy(self.resets);
+    gpa.free(self.reset_address);
     self.* = undefined;
 }
 
@@ -534,6 +608,8 @@ pub fn save(self: Chip, snapshot: *Snapshot) void {
     snapshot.steps = self.steps;
     snapshot.started = self.started;
     snapshot.serdes = self.serdes.*;
+    snapshot.resets = self.resets.*;
+    snapshot.held = self.held;
     if (self.console) |console| snapshot.console_port = console.device.port;
     if (self.feeder) |feeder| {
         snapshot.feeder_port = feeder.device.port;
@@ -553,6 +629,8 @@ pub fn restore(self: *Chip, snapshot: *const Snapshot) void {
     self.hit = null;
     self.next_event = null;
     self.serdes.* = snapshot.serdes;
+    self.resets.* = snapshot.resets;
+    self.held = snapshot.held;
     // the pins' histories are of the future the chip went back from
     self.wiring.reset();
     if (self.console) |console| console.device.port = snapshot.console_port;
@@ -572,7 +650,9 @@ pub fn matches(self: *const Chip, snapshot: *const Snapshot) bool {
         !eql(u8, bytes(self.queue), bytes(snapshot.queue)) or
         !eql(bool, self.queued, snapshot.queued) or
         self.queue_len != snapshot.queue_len or
-        !std.meta.eql(self.serdes.*, snapshot.serdes)) return false;
+        !std.meta.eql(self.serdes.*, snapshot.serdes) or
+        !std.meta.eql(self.resets.*, snapshot.resets) or
+        self.held != snapshot.held) return false;
     if (self.console) |console| if (!std.meta.eql(console.device.port, snapshot.console_port)) return false;
     if (self.feeder) |feeder| if (!std.meta.eql(feeder.device.port, snapshot.feeder_port) or feeder.device.next != snapshot.feeder_next) return false;
     return true;
@@ -615,6 +695,7 @@ pub fn loadRom(self: *Chip, roms: []const ga144.NodeRom) error{MissingRom}!void 
         // cold and warm are where they are only in a ROM of the node's type
         if (own != null) if (self.spec.resetAddress(number)) |address| {
             n.p.address = Address.fromWord(address);
+            self.reset_address[i] = n.p.address;
         };
     }
 }
@@ -637,7 +718,11 @@ fn findRom(roms: []const ga144.NodeRom, number: u16) ?*const ga144.NodeRom {
 
 /// Loads a program into its node. Load programs before stepping the chip.
 pub fn load(self: *Chip, program: assembler.Program) error{NoSuchNode}!void {
-    program.load(self.node(program.node) orelse return error.NoSuchNode);
+    const n = self.node(program.node) orelse return error.NoSuchNode;
+    // a chip held in reset takes only the RAM, and stays held
+    if (self.isHeld(@intCast(program.node / Layout.chip_numbers))) {
+        @memcpy(n.mem[0..64], &program.ram);
+    } else program.load(n);
 }
 
 /// Sets up a node as a boot descriptor says, without a boot stream: loads
@@ -649,6 +734,8 @@ pub fn setUp(self: *Chip, descriptor: boot.Descriptor, programs: []const assembl
         const program = boot.findBin(programs, part.bin) orelse return error.NoSuchBin;
         @memcpy(n.mem[part.destination..][0..part.len], program.ram[part.source..][0..part.len]);
     }
+    // a chip held in reset takes only the RAM, and stays held
+    if (self.isHeld(@intCast(descriptor.node / Layout.chip_numbers))) return;
     if (descriptor.io) |io| {
         n.io = io;
         if (n.pin_device) |device| device.written(device.context, n);
@@ -730,6 +817,8 @@ pub fn attachFeeder(self: *Chip, feeder: *Feeder, number: u16, direction: Direct
     const ports = self.layout.neighbourPorts(i);
     if (n.p.address == Address.fromWord(port.multiport(ports)))
         n.p.address = Address.fromWord(port.multiport(ports.unionWith(.initOne(direction))));
+    if (self.reset_address[i] == Address.fromWord(port.multiport(ports)))
+        self.reset_address[i] = Address.fromWord(port.multiport(ports.unionWith(.initOne(direction))));
     self.feeder = .{ .device = feeder, .index = i };
 }
 
@@ -788,6 +877,31 @@ pub fn attachSerdes(self: *Chip, a: u16, b: u16) error{ NoSuchNode, NotSerdes, P
         n.ports[@backingInt(Direction.up)] = .{ .port = &end.port, .side = Serdes.side.other() };
         n.pin_device = Serdes.pinDevice(end);
         end.written(n);
+    }
+}
+
+/// Wires chip `chip`'s RESET- pin to the net of pin `by`, which holds the
+/// chip in reset while it is low, pulled up if `pulled`, as by a board's
+/// reset circuit. RESET- has no pulldown of its own (DB002 5.5.2). Attach
+/// before stepping the chip.
+pub fn attachReset(self: *Chip, chip: u8, by: PinRef, pulled: bool) error{ NoSuchChip, NoSuchPin, TwoDevices, ConflictingPulls, Full }!void {
+    if (chip >= self.layout.chips) return error.NoSuchChip;
+    const p = try self.pinOf(by);
+    const net = &self.wiring.nets[p.net];
+    if (net.device != null) return error.TwoDevices;
+    if (pulled) if (net.pull) |high| if (!high) return error.ConflictingPulls;
+    if (self.resets.len == max_resets) return error.Full;
+    const line = &self.resets.items[self.resets.len];
+    self.resets.len += 1;
+    line.* = .{ .chip = chip };
+    if (pulled) net.pull = true;
+    net.device = line.device();
+    var it = self.wiring.members(p.net);
+    while (it.next()) |q| self.wiring.hook(q.node);
+    // held from the start if it starts low
+    if (!self.wiring.level(p.net, 0)) {
+        line.high = false;
+        self.holdChip(chip, 0);
     }
 }
 
@@ -1029,6 +1143,9 @@ fn stepQueued(self: *Chip, i: u16) void {
         if (n.waitsOnPin()) self.wakeOnNet(i);
         // a word a SERDES node started to send, setting io bit 17
         if (self.serdes.len > 0) self.serdesSent(i);
+        // a chip's RESET- it changed. A node that resets its own chip is
+        // traced as reset.
+        if (self.resets.len > 0) self.resetLines();
     }
     // a read of the wakeup pin, not a device on its port, that did not have
     // to wait for it
@@ -1051,6 +1168,99 @@ fn stepQueued(self: *Chip, i: u16) void {
         if (std.meta.eql(state, p.state)) continue;
         self.portChanged(i, @fromBackingInt(@intCast(d)), state);
     }
+}
+
+/// Acts on the changes of chips' RESET- pins: a chip is held in reset from
+/// a fall, and starts again as after reset from a rise. A node of the chip
+/// that ran past the time keeps what it did, such as a byte it sent.
+noinline fn resetLines(self: *Chip) void {
+    // resetting moves the chip's pins, which can change any line again
+    var acted = true;
+    while (acted) {
+        acted = false;
+        for (self.resets.slice()) |*line| {
+            const edges = line.edges;
+            const len = line.edges_len;
+            line.edges_len = 0;
+            for (edges[0..len]) |edge| {
+                acted = true;
+                if (edge.high) self.releaseChip(line.chip, edge.time) else self.holdChip(line.chip, edge.time);
+            }
+        }
+    }
+}
+
+fn holdChip(self: *Chip, chip: u8, time: u64) void {
+    const bit = @as(u8, 1) << @intCast(chip);
+    if (self.held & bit != 0) return;
+    self.held |= bit;
+    self.resetChip(chip, time, true);
+}
+
+fn releaseChip(self: *Chip, chip: u8, time: u64) void {
+    const bit = @as(u8, 1) << @intCast(chip);
+    if (self.held & bit == 0) return;
+    self.held &= ~bit;
+    self.resetChip(chip, time, false);
+}
+
+/// whether chip `chip` is held in reset
+pub fn isHeld(self: *const Chip, chip: u8) bool {
+    return self.held & @as(u8, 1) << @intCast(chip) != 0;
+}
+
+/// Puts a chip's nodes as after reset at `time`, keeping their memory, and
+/// the ports between them and off the chip idle: starting where they start
+/// after reset, or, if `hold`, waiting until released
+fn resetChip(self: *Chip, chip: u8, time: u64, hold: bool) void {
+    const per = self.layout.chipCount();
+    const first = chip * per;
+    const ports = self.layout.portCount() / self.layout.chips;
+    @memset(self.ports[chip * ports ..][0..ports], .{});
+    // words already sent go on their way
+    for (self.serdes.slice()) |*link| for (&link.ends) |*end| if (end.index >= first and end.index < first + per) {
+        end.port = .{};
+        end.sending = false;
+        end.latch = null;
+        end.free = @max(end.free, time);
+    };
+    for (first..first + per) |index| {
+        const i: u16 = @intCast(index);
+        const n = &self.nodes[i];
+        // a device's port off the chip
+        for (n.ports, 0..) |link, d| if (link.port) |p| if (self.layout.neighbour(i, @fromBackingInt(@intCast(d))) == null) {
+            p.* = .{};
+        };
+        const before = n.*;
+        n.* = .reset;
+        n.mem = before.mem;
+        n.ports = before.ports;
+        n.pins = before.pins;
+        n.wake_port = before.wake_port;
+        n.pin_device = before.pin_device;
+        n.shared_pins = before.shared_pins;
+        if (before.data != null) n.data = 0;
+        n.p.address = if (hold) held_address else self.reset_address[i];
+        n.suspended = hold;
+        n.time = time;
+        // what its pins did after the time is undone
+        for (self.wiring.pinsOf(i)) |*p| p.history.truncate(time);
+        // its pins as after reset, and a SERDES node not sending
+        if (n.pin_device) |device| device.written(device.context, n);
+    }
+    // the queue in order of the nodes' new times. A node held in reset that
+    // is queued waits at once when stepped.
+    var k = self.queue_len / 2;
+    while (k > 0) {
+        k -= 1;
+        self.siftDown(k);
+    }
+    if (!hold) for (first..first + per) |i| {
+        self.wake(@intCast(i));
+        // a breakpoint on where it starts, as `step` checks at the start
+        if (self.hit == null) self.hit = self.breakpointAt(@intCast(i));
+    };
+    for (first..first + per) |i| if (self.nodes[i].shared_pins != 0) self.wakeOnNets(@intCast(i));
 }
 
 /// notes when the word a SERDES node is sending arrives
@@ -1466,6 +1676,95 @@ test "a SERDES node stepped by hand, out of turn, sends every word" {
     const n = chip.node(10000).?;
     try expectEqual(4, n.data_stack.t);
     try expectEqual(3, n.data_stack.s);
+}
+
+/// two chips of two nodes, 000 and 001, with 000.17 on chip 1's RESET-,
+/// pulled up if `pulled`, and `source` loaded
+fn resetPair(source: []const u8, pulled: bool) !Chip {
+    const spec: Spec = .{ .rows = 1, .columns = 2, .nodes = &.{.{ .node = 0, .pins = &.{17} }} };
+    var chip: Chip = try .initChips(std.testing.allocator, spec, 2);
+    errdefer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    var programs: [2]assembler.Program = undefined;
+    for (try assembler.assembleNodes(source, &programs, &diagnostic)) |program| try chip.load(program);
+    try chip.attachReset(1, .{ .node = 0, .pin = 17 }, pulled);
+    return chip;
+}
+
+test "a chip reset by its RESET- starts again as after reset when it is released" {
+    // 000 drives its pin low at about 2.4 us and high at about 4.8 us,
+    // while 1.000 pushes 7 and waits on right
+    var chip = try resetPair(
+        \\ io b! 999 for unext 0x20000 !b 999 for unext 0x30000 !b right b! @b
+        \\ node 1.000 7 right b! @b
+    , true);
+    defer chip.deinit(std.testing.allocator);
+    const code = chip.node(10000).?.mem[0];
+    try chip.run();
+    try expect(!chip.isHeld(1));
+    const n = chip.node(10000).?;
+    // as after reset, waiting for code from its neighbour, at the release
+    try expectEqual(0, n.data_stack.t);
+    try expect(waitsForCode(n));
+    try expect(n.time >= 4_800_000 and n.time < 4_900_000);
+    // with its RAM as it was
+    try expectEqual(code, n.mem[0]);
+}
+
+test "a chip whose RESET- stays low is held in reset" {
+    var chip = try resetPair(
+        \\ io b! 999 for unext 0x20000 !b right b! @b
+        \\ node 1.000 7 right b! @b
+    , true);
+    defer chip.deinit(std.testing.allocator);
+    try chip.run();
+    try expect(chip.isHeld(1));
+    const n = chip.node(10000).?;
+    try expect(n.suspended and n.p.address == held_address);
+    try expectEqual(0, n.data_stack.t);
+    try expect(n.time >= 2_400_000 and n.time < 2_500_000);
+}
+
+test "a breakpoint where a released chip's node starts stops it" {
+    var chip = try resetPair(
+        \\ io b! 999 for unext 0x20000 !b 999 for unext 0x30000 !b right b! @b
+        \\ node 1.000 7 right b! @b
+    , true);
+    defer chip.deinit(std.testing.allocator);
+    const i = chip.layout.index(10000).?;
+    _ = try chip.breakpoints.toggle(.init(i, @bitCast(chip.reset_address[i])));
+    try chip.run();
+    try expectEqual(Stop{ .breakpoint = .init(i, @bitCast(chip.reset_address[i])) }, chip.hit.?);
+}
+
+test "a chip held in reset takes a program's RAM, and stays held" {
+    var chip = try resetPair("", false);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    const program = try assembler.assemble("node 1.000 7 right b! @b", &diagnostic);
+    try chip.setUp(.ofProgram(program), &.{program});
+    try chip.load(program);
+    try chip.run();
+    const n = chip.node(10000).?;
+    try expect(chip.isHeld(1) and n.p.address == held_address);
+    try expectEqual(0, n.data_stack.t);
+    try expectEqual(program.ram[0], n.mem[0]);
+}
+
+test "a chip whose RESET- only a pin's pulldown drives is held from the start" {
+    var chip = try resetPair("node 1.000 7 right b! @b", false);
+    defer chip.deinit(std.testing.allocator);
+    try expect(chip.isHeld(1));
+    try chip.run();
+    try expectEqual(0, chip.node(10000).?.data_stack.t);
+    // until the pin drives it high
+    var released = try resetPair(
+        \\ io b! 0x30000 !b right b! @b
+        \\ node 1.000 7 right b! @b
+    , false);
+    defer released.deinit(std.testing.allocator);
+    try released.run();
+    try expect(!released.isHeld(1));
 }
 
 test attachSerdes {

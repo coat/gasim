@@ -1,7 +1,8 @@
 // GreenArrays' EVB002 evaluation board, from its data book (DB014) and the
 // jumper settings it ships with (AN021 1.2): the host chip, chip 0, and the
-// target, chip 1, whose nodes are numbered 1.yxx. The target's reset lines
-// (J22) are not modelled yet.
+// target, chip 1, whose nodes are numbered 1.yxx. Port C's RTS, which J22
+// 3-4 can wire to the target's RESET-, and the reset button are not
+// modelled.
 //
 // jumpers: on as shipped
 // serial: the FT232R USB serial chips, sending to the chip on rx and
@@ -9,6 +10,7 @@
 // pulls: resistors to high or low
 // wires: between pins, through a jumper
 // serdes: SERDES links between nodes
+// resets: pins wired to chips' RESET- pins
 .{
     .name = "EVB002",
     .chip = "ga144",
@@ -28,6 +30,10 @@
         // (DB014 5.5, 6.3)
         .{ .name = "J34", .on = true },
         .{ .name = "J35", .on = true },
+        // J22: the target's reset sources (DB014 6.1)
+        .{ .name = "J22.1-2", .on = true }, // host 500.17
+        .{ .name = "J22.3-4", .on = true }, // port C's RTS, not modelled
+        .{ .name = "J22.5-6", .on = true }, // the target's reset circuit
     },
     .serial = .{
         // for the arrayForth 3 IDE, and async boot through 708's ROM
@@ -67,5 +73,10 @@
     .serdes = .{
         // hardwired, with probe points S1 and S17 (DB014 5.5)
         .{ .a = .{ .node = 701 }, .b = .{ .chip = 1, .node = 1 } },
+    },
+    .resets = .{
+        // host 500 resets the target by driving 500.17 low, against the
+        // target's reset circuit, which holds RESET- high (DB014 5.5, 6.1)
+        .{ .chip = 1, .by = .{ .node = 500, .pin = 17, .jumper = "J22.1-2" }, .circuit = "J22.5-6" },
     },
 }

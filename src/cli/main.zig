@@ -774,8 +774,10 @@ fn logContention(chip: Chip, contention: gasim.pins.Contention) void {
 /// after reset, are counted rather than listed.
 fn logWaiting(chip: Chip) void {
     var idle: usize = 0;
+    for (0..chip.layout.chips) |k| if (chip.isHeld(@intCast(k))) std.log.info("chip {d} held in reset", .{k});
     for (chip.nodes, 0..) |n, i| {
         const number = chip.layout.nodeNumber(@intCast(i));
+        if (chip.isHeld(@intCast(number / Chip.Layout.chip_numbers))) continue;
         const status = n.status();
         switch (status) {
             .running => std.log.info("node {f} running", .{Chip.nodeName(number)}),

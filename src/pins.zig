@@ -106,6 +106,11 @@ pub const History = struct {
         return self.before;
     }
 
+    /// Forgets the changes after `time`, as of a node that goes back to it
+    pub fn truncate(self: *History, time: u64) void {
+        while (self.len > 0 and self.times[(self.start + self.len - 1) % capacity] > time) self.len -= 1;
+    }
+
     /// the time of the first change kept after `time`
     pub fn nextChange(self: *const History, time: u64) ?u64 {
         for (0..self.len) |n| {
@@ -362,6 +367,16 @@ test Resolver {
     try expect(!r.level(true) and !r.contention);
     r.add(.{ .strength = .strong, .high = true });
     try expect(r.contention and !r.level(true));
+}
+
+test "History.truncate forgets later changes" {
+    var history: History = .{};
+    history.set(10, .{ .strength = .strong, .high = true });
+    history.set(20, .{ .strength = .strong });
+    history.truncate(15);
+    try std.testing.expectEqual(1, history.len);
+    try std.testing.expectEqual(null, history.nextChange(10));
+    try std.testing.expect(history.at(30).high);
 }
 
 test History {
