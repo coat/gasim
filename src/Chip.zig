@@ -91,8 +91,16 @@ pub const max_uarts = 4;
 
 /// A UART on a node's pins. `index` is the node of its rx pin, the one it
 /// drives, or of its tx pin if rx is unconnected; `rx_pin` is the rx pin's
-/// index in `wiring.pins`, if it is connected.
-pub const UartLink = struct { device: *Uart, index: u16, rx_pin: ?u16 };
+/// index in `wiring.pins`, if it is connected. `rts_chip` is the chip whose
+/// RESET- its RTS holds low while clear, if it drives one (see
+/// `attachRts`), and `rts_low` whether it does now.
+pub const UartLink = struct {
+    device: *Uart,
+    index: u16,
+    rx_pin: ?u16,
+    rts_chip: ?u8 = null,
+    rts_low: bool = false,
+};
 
 pub const UartLinks = struct {
     items: [max_uarts]UartLink = undefined,
@@ -876,6 +884,20 @@ pub fn attachUartPins(self: *Chip, uart: *Uart, rx: ?PinRef, tx: ?PinRef) error{
     }
 }
 
+/// Wires the RTS of `uart`, attached already, to chip `chip`'s RESET-,
+/// which it holds low while RTS is clear, as an FTDI chip's RTS- line is
+/// low while RTS is (DB014 6.1), alongside any pin wired to it
+/// (`attachReset`): RESET- is low while any of them holds it low.
+pub fn attachRts(self: *Chip, uart: *Uart, chip: u8) error{ NoSuchChip, NoSuchUart }!void {
+    if (chip >= self.layout.chips) return error.NoSuchChip;
+    for (self.uarts.slice()) |*link| if (link.device == uart) {
+        link.rts_chip = chip;
+        if (uart.lines) |lines| lines.wired = true;
+        return;
+    };
+    return error.NoSuchUart;
+}
+
 /// Links two SERDES nodes, as the EVB002 links host node 701 to target
 /// node 001: each node's up port, which faces off its chip, sends to the
 /// other's. Link nodes before stepping the chip.
@@ -1204,10 +1226,35 @@ noinline fn resetLines(self: *Chip) void {
             line.edges_len = 0;
             for (edges[0..len]) |edge| {
                 acted = true;
-                if (edge.high) self.releaseChip(line.chip, edge.time) else self.holdChip(line.chip, edge.time);
+                if (!edge.high) {
+                    self.holdChip(line.chip, edge.time);
+                } else if (!self.resetHeldElsewhere(line.chip, line, null)) self.releaseChip(line.chip, edge.time);
             }
         }
     }
+}
+
+/// Acts on changes of a UART's RTS, which holds chip `rts_chip`'s RESET-
+/// low while clear, at the time of the UART's node, as its input arrives
+noinline fn rtsChanged(self: *Chip, uart: *UartLink) void {
+    const chip = uart.rts_chip.?;
+    while (uart.device.takeRts()) |set| {
+        uart.rts_low = !set;
+        const time = self.nodes[uart.index].time;
+        if (!set) {
+            self.holdChip(chip, time);
+        } else if (!self.resetHeldElsewhere(chip, null, uart)) self.releaseChip(chip, time);
+    }
+    // resetting moves the chip's pins, which can change a RESET- line
+    if (self.resets.len > 0) self.resetLines();
+}
+
+/// whether something other than `line` or `uart` holds chip `chip`'s
+/// RESET- low
+fn resetHeldElsewhere(self: *Chip, chip: u8, line: ?*const ResetLine, uart: ?*const UartLink) bool {
+    for (self.resets.slice()) |*other| if (other != line and other.chip == chip and !other.high) return true;
+    for (self.uarts.slice()) |*other| if (other != uart and other.rts_chip == chip and other.rts_low) return true;
+    return false;
 }
 
 fn holdChip(self: *Chip, chip: u8, time: u64) void {
@@ -1438,9 +1485,14 @@ pub inline fn service(self: *Chip) !bool {
         self.wake(console.index);
         serviced = true;
     };
-    for (self.uarts.slice()) |uart| if (try uart.device.service(self.nodes[uart.index].time)) {
-        serviced = true;
-    };
+    for (self.uarts.slice()) |*uart| {
+        // before its input, which the program may have sent after
+        if (uart.rts_chip != null) if (uart.device.lines) |lines| if (lines.changed.load(.monotonic)) {
+            self.rtsChanged(uart);
+            serviced = true;
+        };
+        if (try uart.device.service(self.nodes[uart.index].time)) serviced = true;
+    }
     if (self.feed()) serviced = true;
     return serviced;
 }

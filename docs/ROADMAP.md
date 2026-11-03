@@ -144,8 +144,13 @@ done.
      J22, against the target's reset circuit: a chip held in reset while
      RESET- is low, and starting again as after reset, with its RAM, when
      it rises.
-   - RTS and DTR, which ptys don't carry, as reset sources: port A's for
-     the host (J20) and port C's for the target (J22.3-4).
+   - ✓ RTS as a reset source, which ptys don't carry: port A's for the
+     host (J20.1-3) and port C's for the target (J22.3-4), set by a
+     program started with `libgasim-pty.so` in `LD_PRELOAD`, which answers
+     the modem-line ioctls on gasim's ptys by asking gasim. Under Wine, a
+     test program making arrayForth 3's `EscapeCommFunction` calls gets
+     through, and ga-tools, unmodified, boots a chip twice through one
+     port.
    - Chips after the first in arrayForth 3 programs and the IDE's words.
 2. **A shared clock.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
@@ -178,7 +183,7 @@ done.
    - ✓ A board's serial ports on ptys, several at once (`--pty`), each a
      UART on its node's pins, with a doorbell that the readers ring so a
      run waits for input on any; ga-tools boots node 708 of either chip
-     through one, its RTS calls stubbed out.
+     through one.
    - The UART on TCP or the TUI; SPI flash backed by a file; the 2 MB SRAM
      on 007, 008 and 009; the analog nodes' outputs.
    - Pin activity dumped as VCD files for GTKWave.
@@ -195,10 +200,9 @@ done.
      SERDES and 300↔300 with GreenArrays' own code.
 5. **arrayForth 3 under Wine, driving gasim.** The board's USB ports A, B and
    C as ptys, mapped to Wine COM ports, so that the unmodified
-   `sF5b2-af3.exe` boots the chip, runs its IDE and burns flash. Risk:
-   arrayForth 3 resets the chip with RTS on port A, which ptys don't carry,
-   so that needs a workaround (tty0tty, a reset command, or a break). This
-   proves the board model against the real tools.
+   `sF5b2-af3.exe` boots the chip, runs its IDE and burns flash, resetting
+   the chip with RTS through `libgasim-pty.so` (Linux only). This proves
+   the board model against the real tools.
 6. **pF/144 in the simulator.** Its nucleus in the simulated SRAM, booted by
    the streamer in block 1665 (run by gasim's arrayForth, or captured from
    step 5), with `pFDISK.blk` served as the serial disk its terminal emulator

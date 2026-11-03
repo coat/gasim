@@ -57,12 +57,22 @@ fn number(chip: u8, node: u16) u16 {
 }
 
 /// A serial port, such as a USB serial chip's, which sends on `rx`, the
-/// chip's pin that receives, and listens on `tx`, the one that sends
+/// chip's pin that receives, and listens on `tx`, the one that sends. Its
+/// RTS can reset a chip (`rts`).
 pub const Serial = struct {
     name: []const u8,
     rx: Terminal,
     tx: Terminal,
     baud: u32 = 921600,
+    rts: ?Rts = null,
+};
+
+/// A serial port's RTS wired to chip `chip`'s RESET-, through `jumper` if it
+/// names one, which holds the chip in reset while RTS is clear, as the
+/// program on the other end of the port sets it
+pub const Rts = struct {
+    chip: u8,
+    jumper: ?[]const u8 = null,
 };
 
 /// A resistor from a pin to high or low
@@ -184,6 +194,11 @@ pub fn check(self: Board, spec: Spec, fault: *Fault) Error!void {
         try self.checkTerminal(spec, s.rx, fault);
         try self.checkTerminal(spec, s.tx, fault);
         if (std.meta.eql(s.rx.ref(), s.tx.ref())) return error.SerialPinsTheSame;
+        if (s.rts) |rts| {
+            try self.checkJumper(rts.jumper, fault);
+            fault.* = .{ .name = s.name };
+            if (rts.chip >= self.chips) return error.NoSuchChip;
+        }
     }
     for (self.pulls, 0..) |p, k| {
         try self.checkTerminal(spec, p.terminal(), fault);
@@ -250,11 +265,11 @@ pub const Attachment = struct {
 
 /// Puts the board around `chip`, made with its chips of the spec it was
 /// checked against (`Chip.initChips`): its SERDES links, pulls, wires and
-/// resets, and the UARTs on their serial ports, each through jumpers as
-/// `settings` set them. The other serial ports are left unconnected, as
+/// resets, and the UARTs on their serial ports, with their RTS, each through
+/// jumpers as `settings` set them. The other serial ports are left unconnected, as
 /// their lines idle: low on a line inverted as a USB serial chip's is,
 /// which a pin's pulldown reads as. What fails is reported in `fault`.
-pub fn apply(self: Board, chip: *Chip, ports: []const Attachment, settings: []const Setting, fault: *Fault) error{ NoSuchPin, TwoDevices, ConflictingPulls, NoSuchNode, NotSerdes, PortConnected, Full, NoSuchChip }!void {
+pub fn apply(self: Board, chip: *Chip, ports: []const Attachment, settings: []const Setting, fault: *Fault) error{ NoSuchPin, TwoDevices, ConflictingPulls, NoSuchNode, NotSerdes, PortConnected, Full, NoSuchChip, NoSuchUart }!void {
     for (self.serdes) |link| {
         fault.* = .{ .link = .{ link.a.number(), link.b.number() } };
         try chip.attachSerdes(link.a.number(), link.b.number());
@@ -279,6 +294,11 @@ pub fn apply(self: Board, chip: *Chip, ports: []const Attachment, settings: []co
             if (self.jumperOn(s.rx.jumper, settings)) s.rx.ref() else null,
             if (self.jumperOn(s.tx.jumper, settings)) s.tx.ref() else null,
         );
+        // a port with neither line connected is not attached
+        if (s.rts) |rts| if (self.jumperOn(rts.jumper, settings)) chip.attachRts(attachment.uart, rts.chip) catch |err| switch (err) {
+            error.NoSuchUart => {},
+            else => |e| return e,
+        };
     }
 }
 
@@ -499,6 +519,45 @@ test "the EVB002's host 500 resets the target through J22" {
     }
 }
 
+test "the EVB002's port C resets the target with RTS, alongside its other resets" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const rom = try testRom(&roms);
+    for ([_]bool{ true, false }) |circuit| {
+        var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
+        defer chip.deinit(std.testing.allocator);
+        try chip.loadRom(rom);
+        var programs: [1]assembler.Program = undefined;
+        var diagnostic: assembler.Diagnostic = .{};
+        for (try assembler.assembleNodes("node 1.708 7 right b! @b", &programs, &diagnostic)) |program| try chip.load(program);
+        var output: std.Io.Writer = .fixed(&.{});
+        var uart: Uart = .init(921600, &output);
+        var buffers: [2][1]u8 = undefined;
+        var lines: Uart.Lines = .init(std.testing.io, &buffers);
+        uart.lines = &lines;
+        var fault: Fault = .none;
+        try evb002.apply(&chip, &.{.{ .uart = &uart, .port = evb002.serialPort("C").? }}, &.{.{ .name = "J22.5-6", .on = circuit }}, &fault);
+        try chip.run();
+        // without the reset circuit, 500.17's pulldown holds RESET- low
+        try std.testing.expectEqual(!circuit, chip.isHeld(1));
+        // RTS clear holds it, whatever the circuit
+        try std.testing.expect(lines.wired);
+        try std.testing.expect(try lines.change(Uart.Lines.dtr));
+        try chip.run();
+        try std.testing.expect(chip.isHeld(1));
+        try std.testing.expect(!chip.isHeld(0));
+        // and set releases it only with the circuit
+        try std.testing.expect(try lines.change(Uart.Lines.rts | Uart.Lines.dtr));
+        try chip.run();
+        try std.testing.expectEqual(!circuit, chip.isHeld(1));
+        if (circuit) {
+            // back in its ROM, waiting at cold for a boot stream on its pin
+            const n = chip.node(10708).?;
+            try std.testing.expect(n.waitsOnPin() and n.word_address.rom);
+            try std.testing.expectEqual(0, n.data_stack.t);
+        }
+    }
+}
+
 test "a reset is checked" {
     var fault: Fault = .none;
     const no_chip: Board = .{ .resets = &.{.{ .chip = 1, .by = .{ .node = 500, .pin = 17 } }} };
@@ -515,6 +574,9 @@ test "a reset is checked" {
         .resets = &.{.{ .chip = 1, .by = .{ .node = 708, .pin = 1 } }},
     };
     try std.testing.expectError(error.SerialPinWired, serial.check(.ga144, &fault));
+    const rts: Board = .{ .serial = &.{.{ .name = "A", .rx = .{ .node = 708, .pin = 17 }, .tx = .{ .node = 708, .pin = 1 }, .rts = .{ .chip = 1 } }} };
+    try std.testing.expectError(error.NoSuchChip, rts.check(.ga144, &fault));
+    try std.testing.expectEqual(Fault{ .name = "A" }, fault);
     const many: Board = .{ .chips = 6, .resets = &.{
         .{ .chip = 1, .by = .{ .node = 100, .pin = 17 } }, .{ .chip = 2, .by = .{ .node = 200, .pin = 17 } },
         .{ .chip = 3, .by = .{ .node = 500, .pin = 17 } }, .{ .chip = 4, .by = .{ .node = 600, .pin = 17 } },

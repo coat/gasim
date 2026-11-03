@@ -1,12 +1,12 @@
 // GreenArrays' EVB002 evaluation board, from its data book (DB014) and the
 // jumper settings it ships with (AN021 1.2): the host chip, chip 0, and the
-// target, chip 1, whose nodes are numbered 1.yxx. Port C's RTS, which J22
-// 3-4 can wire to the target's RESET-, and the reset button are not
-// modelled.
+// target, chip 1, whose nodes are numbered 1.yxx. The reset button, and the
+// host's reset circuit, are not modelled.
 //
 // jumpers: on as shipped
 // serial: the FT232R USB serial chips, sending to the chip on rx and
-//   listening on tx, at 921600 baud, through J23 (DB014 5.2)
+//   listening on tx, at 921600 baud, through J23 (DB014 5.2), with the RTS
+//   of ports A and C on the chips' RESET- (DB014 5.1, 6.1)
 // pulls: resistors to high or low
 // wires: between pins, through a jumper
 // serdes: SERDES links between nodes
@@ -32,8 +32,11 @@
         .{ .name = "J35", .on = true },
         // J22: the target's reset sources (DB014 6.1)
         .{ .name = "J22.1-2", .on = true }, // host 500.17
-        .{ .name = "J22.3-4", .on = true }, // port C's RTS, not modelled
+        .{ .name = "J22.3-4", .on = true }, // port C's RTS
         .{ .name = "J22.5-6", .on = true }, // the target's reset circuit
+        // J20: the host's reset sources (DB014 5.1)
+        .{ .name = "J20.1-3", .on = true }, // port A's RTS
+        .{ .name = "J20.2-4", .on = true }, // J25's, not modelled
     },
     .serial = .{
         // for the arrayForth 3 IDE, and async boot through 708's ROM
@@ -41,6 +44,7 @@
             .name = "A",
             .rx = .{ .node = 708, .pin = 17, .jumper = "J23.1-2" },
             .tx = .{ .node = 708, .pin = 1, .jumper = "J23.3-4" },
+            .rts = .{ .chip = 0, .jumper = "J20.1-3" },
         },
         // for polyFORTH's or eForth's serial console
         .{
@@ -53,6 +57,7 @@
             .name = "C",
             .rx = .{ .chip = 1, .node = 708, .pin = 17, .jumper = "J23.9-10" },
             .tx = .{ .chip = 1, .node = 708, .pin = 1, .jumper = "J23.11-12" },
+            .rts = .{ .chip = 1, .jumper = "J22.3-4" },
         },
     },
     .pulls = .{

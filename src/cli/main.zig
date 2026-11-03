@@ -42,7 +42,10 @@ const usage =
     \\                             such as ~/.wine/dosdevices/com3. Can be
     \\                             given more than once. stdin and stdout
     \\                             are then on --usb's port, or none, and
-    \\                             the run goes on until ctrl+c.
+    \\                             the run goes on until ctrl+c. On Linux,
+    \\                             a program started with libgasim-pty.so
+    \\                             in LD_PRELOAD can set its RTS, which can
+    \\                             reset a chip.
     \\  --jumper <name>=on|off     set one of the board's jumpers otherwise
     \\                             than as shipped, such as J26=off. Can be
     \\                             given more than once.
@@ -485,14 +488,30 @@ pub fn main(init: std.process.Init) !void {
     var pty_queue_buffers: [pty_ports.len][4096]u8 = undefined;
     var pty_read_buffers: [pty_ports.len][1024]u8 = undefined;
     var pty_readers: [pty_ports.len]Io.File.Reader = undefined;
+    // their modem lines, which programs loaded with libgasim-pty.so set
+    var pty_lines: [pty_ports.len]gasim.Uart.Lines = undefined;
+    var pty_lines_buffers: [pty_ports.len][2][1]u8 = undefined;
+    // null for a pty whose lines cannot be listened for, such as one whose
+    // socket another program has
+    var pty_servers: [pty_ports.len]?Io.net.Server = @splat(null);
     var doorbell_buffer: [64]u8 = undefined;
     var doorbell: Io.Queue(u8) = .init(&doorbell_buffer);
     for (ptys, 0..) |p, k| {
         pty_devices[k] = Pty.open(io, arena, &pty_output_buffers[k], &pty_queue_buffers[k]) catch |err| fatal("--pty {s}: {t}", .{ p.name, err });
         pty_inputs[k] = .init(&pty_input_buffers[k]);
         pty_readers[k] = .initStreaming(pty_devices[k].master, io, &pty_read_buffers[k]);
+        if (comptime Pty.lines_supported) {
+            pty_lines[k] = .init(io, &pty_lines_buffers[k]);
+            pty_lines[k].doorbell = &doorbell;
+            // before anything can open the pty, which is not said until later
+            pty_servers[k] = pty_devices[k].listenLines(io) catch |err| server: {
+                std.log.warn("port {s}: no RTS or DTR, as gasim cannot listen for them: {t}", .{ p.name, err });
+                break :server null;
+            };
+        }
     }
     defer for (pty_devices[0..pty_len]) |*device| device.close(io);
+    defer if (comptime Pty.lines_supported) for (&pty_servers) |*server| if (server.*) |*s| s.deinit(io);
     var feeder: Chip.Feeder = .{ .words = &.{} };
     if (boot and uart_node != null) {
         const root = uart_node.?;
@@ -557,6 +576,9 @@ pub fn main(init: std.process.Init) !void {
             const s = b.serialPort(p.name).?;
             pty_uarts[k] = .init(s.baud, &pty_devices[k].writer);
             pty_uarts[k].input = .{ .io = io, .queue = &pty_inputs[k] };
+            if (comptime Pty.lines_supported) if (pty_servers[k] != null) {
+                pty_uarts[k].lines = &pty_lines[k];
+            };
             attachments[count] = .{ .uart = &pty_uarts[k], .port = s };
             count += 1;
         }
@@ -631,15 +653,23 @@ pub fn main(init: std.process.Init) !void {
     errdefer if (reading) |*r| r.cancel(io) catch {};
     var pty_reading: [pty_ports.len]Io.Future((error{ReadFailed} || Io.Cancelable)!void) = undefined;
     var pty_writing: [pty_ports.len]Io.Future((Io.File.Writer.Error || Io.QueueClosedError)!void) = undefined;
+    var pty_serving: [pty_ports.len]?Io.Future(Io.Cancelable!void) = @splat(null);
     for (ptys, 0..) |p, k| {
         pty_reading[k] = io.concurrent(readRinging, .{ io, &pty_readers[k].interface, &pty_inputs[k], &doorbell }) catch |err|
             fatal("cannot read input concurrently: {t}", .{err});
         pty_writing[k] = io.concurrent(Pty.writeOut, .{&pty_devices[k]}) catch |err|
             fatal("cannot write output concurrently: {t}", .{err});
+        if (comptime Pty.lines_supported) if (pty_servers[k]) |*server| {
+            pty_serving[k] = io.concurrent(Pty.serveLines, .{ server, io, &pty_lines[k] }) catch |err|
+                fatal("cannot answer for the lines concurrently: {t}", .{err});
+        };
         std.log.info("port {s}: {s}", .{ p.name, pty_devices[k].path });
     }
     defer for (pty_reading[0..pty_len]) |*future| future.cancel(io) catch {};
     defer for (pty_writing[0..pty_len]) |*future| future.cancel(io) catch {};
+    defer for (&pty_serving) |*future| if (future.*) |*f| f.cancel(io) catch {};
+    if (comptime Pty.lines_supported) if (pty_len > 0) if (preloadPath(io, arena)) |preload|
+        std.log.info("for RTS and DTR, start the program on a pty with LD_PRELOAD={s}", .{preload});
     // ctrl+c, as the run waits on the doorbell, rings it through a pipe,
     // so that the run ends as it would otherwise
     var watching: ?Io.Future((error{ReadFailed} || Io.Cancelable)!void) = null;
@@ -738,6 +768,14 @@ fn readRinging(io: Io, reader: *Io.Reader, input: *Io.Queue(u8), doorbell: ?*Io.
             else => |e| return e,
         };
     }
+}
+
+/// libgasim-pty.so, in lib beside the bin gasim is in, if it is there
+fn preloadPath(io: Io, arena: Allocator) ?[:0]const u8 {
+    const dir = std.process.executableDirPathAlloc(io, arena) catch return null;
+    const path = std.fs.path.joinZ(arena, &.{ dir, "..", "lib", "libgasim-pty.so" }) catch return null;
+    const real = arena.alloc(u8, std.fs.max_path_bytes) catch return null;
+    return std.mem.span(std.c.realpath(path, real.ptr) orelse return null);
 }
 
 /// Rings the doorbell once ctrl+c writes to the pipe
@@ -1254,6 +1292,7 @@ test {
     _ = aforth;
     _ = tui;
     _ = Pty;
+    _ = @import("lines.zig");
 }
 
 test "the terminal user interface and the prompt start without a program" {

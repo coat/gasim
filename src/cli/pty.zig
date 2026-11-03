@@ -24,6 +24,66 @@ const Pty = @This();
 /// with libc, which the pseudo-terminal calls are in
 pub const supported = builtin.link_libc and (builtin.os.tag == .linux or builtin.os.tag.isDarwin() or builtin.os.tag.isBSD());
 
+/// The modem lines a program on the terminal side sets, RTS and DTR, which
+/// a pty does not carry: a program loaded with libgasim-pty.so
+/// (`preload.zig`), such as Wine, gets and sets them through a socket named
+/// after the terminal side's path (see `lines.zig`). Only on Linux, which
+/// has abstract sockets.
+pub const lines_supported = supported and builtin.os.tag == .linux;
+
+comptime {
+    std.debug.assert(lines.rts == Uart.Lines.rts and lines.dtr == Uart.Lines.dtr);
+}
+
+/// Listens for programs getting and setting the pty's lines (see
+/// `lines_supported`), before anything can open the pty
+pub fn listenLines(self: *const Pty, io: Io) (net.UnixAddress.ListenError || error{NameTooLong})!net.Server {
+    var buffer: [lines.max_name]u8 = undefined;
+    const address: net.UnixAddress = try .init(try lines.name(&buffer, self.path));
+    return address.listen(io, .{});
+}
+
+/// Answers programs getting and setting `state`, on `server`, one at a
+/// time, until canceled. Programs of other users are refused, and those
+/// that send nothing for a second are dropped.
+pub fn serveLines(server: *net.Server, io: Io, state: *Uart.Lines) Io.Cancelable!void {
+    while (true) {
+        const stream = server.accept(io) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            else => continue,
+        };
+        defer stream.close(io);
+        if (!sameUser(stream.socket.handle) or !setTimeout(stream.socket.handle, 1)) continue;
+        var in_buffer: [1]u8 = undefined;
+        var reader = stream.reader(io, &in_buffer);
+        const request = reader.interface.takeByte() catch continue;
+        if (lines.operation(request) != .get) try state.set(lines.apply(state.state.load(.acquire), request));
+        var out_buffer: [1]u8 = undefined;
+        var writer = stream.writer(io, &out_buffer);
+        writer.interface.writeByte(state.state.load(.acquire)) catch continue;
+        writer.interface.flush() catch continue;
+    }
+}
+
+/// whether the program on the other end of `socket` is this user's
+pub fn sameUser(socket: posix.socket_t) bool {
+    if (comptime !lines_supported) return false;
+    var credentials: extern struct { pid: i32, uid: u32, gid: u32 } = undefined;
+    var len: posix.socklen_t = @sizeOf(@TypeOf(credentials));
+    if (std.c.getsockopt(socket, posix.SOL.SOCKET, posix.SO.PEERCRED, &credentials, &len) != 0) return false;
+    return credentials.uid == std.c.getuid();
+}
+
+/// Has reads and writes on `socket` fail after `seconds`. Returns false if
+/// they cannot.
+pub fn setTimeout(socket: posix.socket_t, seconds: i32) bool {
+    if (comptime !lines_supported) return false;
+    const timeout: posix.timeval = .{ .sec = seconds, .usec = 0 };
+    for ([_]u32{ posix.SO.RCVTIMEO, posix.SO.SNDTIMEO }) |option|
+        if (std.c.setsockopt(socket, posix.SOL.SOCKET, option, &timeout, @sizeOf(posix.timeval)) != 0) return false;
+    return true;
+}
+
 /// whether `path` is a pseudo-terminal's terminal side, as Linux and the
 /// BSDs, or macOS, name them
 pub fn isPtyPath(path: []const u8) bool {
@@ -169,6 +229,44 @@ test "bytes pass both ways through a pseudo-terminal" {
     try std.testing.expectEqual(0, pty.dropped);
 }
 
+test "a program gets and sets the lines through the socket named after the pty" {
+    if (!lines_supported) return error.SkipZigTest;
+    const io = std.testing.io;
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    var buffer: [16]u8 = undefined;
+    var queue: [16]u8 = undefined;
+    var pty = try open(io, arena_state.allocator(), &buffer, &queue);
+    defer pty.close(io);
+    var server = try pty.listenLines(io);
+    defer server.deinit(io);
+    var buffers: [2][1]u8 = undefined;
+    // not wired, so that a change is not waited on
+    var state: Uart.Lines = .init(io, &buffers);
+    var serving = try io.concurrent(serveLines, .{ &server, io, &state });
+    defer serving.cancel(io) catch {};
+
+    var name: [lines.max_name]u8 = undefined;
+    const address: net.UnixAddress = try .init(try lines.name(&name, pty.path));
+    for ([_][2]u8{
+        .{ lines.request(.get, 0), lines.rts | lines.dtr },
+        .{ lines.request(.bic, lines.rts), lines.dtr },
+        .{ lines.request(.bis, lines.rts), lines.rts | lines.dtr },
+        .{ lines.request(.set, lines.dtr), lines.dtr },
+        .{ lines.request(.get, 0), lines.dtr },
+    }) |exchange| {
+        const stream = try address.connect(io);
+        defer stream.close(io);
+        var out: [1]u8 = undefined;
+        var writer = stream.writer(io, &out);
+        try writer.interface.writeByte(exchange[0]);
+        try writer.interface.flush();
+        var in: [1]u8 = undefined;
+        var reader = stream.reader(io, &in);
+        try std.testing.expectEqual(exchange[1], try reader.interface.takeByte());
+    }
+}
+
 test "bytes no one reads are dropped" {
     if (!supported) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -185,8 +283,13 @@ test "bytes no one reads are dropped" {
     try std.testing.expect(pty.dropped > 0);
 }
 
+const lines = @import("lines.zig");
+const gasim = @import("gasim");
+const Uart = gasim.Uart;
+
 const builtin = @import("builtin");
 const std = @import("std");
+const net = std.Io.net;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

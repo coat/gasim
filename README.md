@@ -289,7 +289,9 @@ with (AN021):
   300.1 and 300.17;
 - J22's host 500.17 on the target's RESET-, which the target's reset
   circuit holds high through J22.5-6: host 500 resets the target by
-  driving 500.17 low.
+  driving 500.17 low;
+- the RTS of port A on the host's RESET- (J20.1-3), and of port C on the
+  target's (J22.3-4), which hold the chip in reset while RTS is clear.
 
 ```
 $ gasim run --board evb002 examples/uart.ga
@@ -322,8 +324,9 @@ which a word's `unext` loop can take it far past, keeps what it did, such
 as a byte or a SERDES word it sent. RESET- has no pulldown, so with
 J22.1-2 on and J22.5-6 off, 500.17's pulldown holds the target in reset
 until host 500 drives it high; with J22.1-2 off, the target is not reset.
-Port C's RTS (J22.3-4, listed for `--jumper`) and the reset button are not
-modelled, as stdin has no RTS.
+RESET- is low while any of what is wired to it holds it low, such as a
+port's RTS, which only a port on a pty has (see below). The reset button
+is not modelled.
 
 ```
 $ gasim run --board evb002 --usb C --jumper J22.5-6=off --why target.ga
@@ -342,9 +345,9 @@ removes the links it made. A link is made in place of one to another pty,
 such as one left by an earlier run, or to nothing, but not of one to
 anything else, such as a serial port Wine found. Without `--usb`, stdin is
 not read. A pty keeps what a port sends before a program opens it, up to
-its buffer, about 19 KB on Linux, for the program to read; past that, and
-whenever nothing reads it, bytes are dropped rather than holding up the
-chip, and the run says how many. Linux, macOS and the BSDs have ptys, in
+its buffer and gasim's, about 23 KB on Linux, for the program to read;
+past that, and whenever nothing reads it, bytes are dropped rather than
+holding up the chip, and the run says how many. Linux, macOS and the BSDs have ptys, in
 builds with libc.
 
 ```
@@ -354,8 +357,29 @@ info: port C: /dev/pts/5
 ```
 
 A pty carries no RTS or DTR, which hosts such as arrayForth 3 and
-ga-tools set to reset the chip, and their serial libraries can refuse the
-port for it: pyserial's `rts` raises "Inappropriate ioctl for device".
+ga-tools set to reset the chip, and refuses the ioctls that set them:
+arrayForth 3 under Wine stops with an error, and pyserial raises
+"Inappropriate ioctl for device". On Linux, `libgasim-pty.so`, in `lib`
+beside the `bin` gasim is in, answers those ioctls on gasim's ptys for a
+program started with it in `LD_PRELOAD`, which the run says, by asking
+gasim through a socket named after the pty, so that the program resets the
+chip with RTS as on the board. gasim answers a change of RTS once the chip
+has taken it, so that what the program sends after it reaches the chip
+after it. RTS and DTR start set, as a program that opens a port sets them,
+and stay as the last program left them. DTR is not wired to anything, and
+RTS only resets a chip while one of its port's J23 jumpers is on.
+
+The socket is abstract, so the program has to be this user's, in the same
+network namespace as gasim: not one in a sandbox with a network of its own.
+A 32-bit program, such as a Wine that isn't WoW64, needs the library built
+for it, with `-Dtarget=x86-linux-gnu`.
+
+```
+$ gasim run --board evb002 --pty A=$HOME/.wine/dosdevices/com3
+info: port A: /dev/pts/4
+info: for RTS and DTR, start the program on a pty with LD_PRELOAD=/usr/lib/libgasim-pty.so
+$ LD_PRELOAD=/usr/lib/libgasim-pty.so wine sF5b2-af3.exe
+```
 
 ### ROM
 

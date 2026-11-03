@@ -48,6 +48,9 @@ waiting: std.atomic.Value(bool) = .init(false),
 /// true once the node has sent a byte, or woken on the pin the device
 /// drives (see `Chip.wakeOnPin`)
 used: bool = false,
+/// the modem lines the program on the other end of the port sets, if they
+/// reach the UART (see `takeRts`)
+lines: ?*Lines = null,
 
 const Uart = @This();
 
@@ -61,6 +64,74 @@ const frame_bits = 10;
 
 pub fn init(baud: u32, output: *Io.Writer) Uart {
     return .{ .bit_time = 1_000_000_000_000 / @as(u64, baud), .output = output };
+}
+
+/// The modem lines that the program on the other end of a port sets, RTS
+/// and DTR, set from one other thread (`set`), and RTS taken by the chip
+/// (`Uart.takeRts`) if a chip acts on it (`wired`). They start set, as a
+/// program that opens a port sets them.
+pub const Lines = struct {
+    /// as last set, a bit each
+    state: std.atomic.Value(u8) = .init(rts | dtr),
+    /// whether a chip acts on RTS (see `Chip.attachRts`), set before the
+    /// lines are
+    wired: bool = false,
+    /// RTS as it changed, 1 for set, the change the chip has not taken
+    changes: Io.Queue(u8),
+    /// whether `changes` may have one, so that the chip looks only then
+    changed: std.atomic.Value(bool) = .init(false),
+    /// a byte for each change the chip has taken, for `set` to wait on
+    taken: Io.Queue(u8),
+    /// rung as RTS changes, for a run waiting for input
+    doorbell: ?*Io.Queue(u8) = null,
+    io: Io,
+
+    pub const rts: u8 = 1;
+    pub const dtr: u8 = 2;
+
+    pub fn init(io: Io, buffers: *[2][1]u8) Lines {
+        return .{ .changes = .init(&buffers[0]), .taken = .init(&buffers[1]), .io = io };
+    }
+
+    /// Sets the lines to `state`, as the program sets them, waiting until
+    /// the chip has taken a change of RTS, so that what the program sends
+    /// after it reaches the chip after it
+    pub fn set(self: *Lines, state: u8) Io.Cancelable!void {
+        if (!try self.change(state)) return;
+        if (self.doorbell) |bell| _ = bell.put(self.io, &.{0}, 0) catch {};
+        _ = self.taken.getOne(self.io) catch |err| switch (err) {
+            error.Closed => {},
+            else => |e| return e,
+        };
+    }
+
+    /// Sets the lines to `state`, as `set` does without waiting. Returns
+    /// whether the chip is to take a change of RTS, which waits while it
+    /// has not taken the one before.
+    pub fn change(self: *Lines, state: u8) Io.Cancelable!bool {
+        const before = self.state.swap(state, .acq_rel);
+        if ((before ^ state) & rts == 0 or !self.wired) return false;
+        self.changes.putOne(self.io, state & rts) catch |err| switch (err) {
+            error.Closed => return false,
+            else => |e| return e,
+        };
+        self.changed.store(true, .release);
+        return true;
+    }
+};
+
+/// the next change of RTS that the chip has not taken, true for set
+pub fn takeRts(self: *Uart) ?bool {
+    const lines = self.lines orelse return null;
+    if (!lines.changed.load(.acquire)) return null;
+    var change: [1]u8 = undefined;
+    // cleared first, so that a change put after the queue is found empty
+    // sets it again
+    lines.changed.store(false, .release);
+    const got = lines.changes.getUncancelable(lines.io, &change, 0) catch 0;
+    if (got == 0) return null;
+    _ = lines.taken.putUncancelable(lines.io, &.{0}, 0) catch {};
+    return change[0] != 0;
 }
 
 /// The UART as the device driving the net of the pin it sends on
@@ -285,6 +356,27 @@ test "input arriving on an idle line is sent from when it arrived" {
     try expectEqual(540, uart.nextRxEdge(505));
     // the end of input
     try expect(!try uart.waitForInput(2000));
+}
+
+test "a change of RTS is taken, and set waits for it" {
+    const io = std.testing.io;
+    var buffers: [2][1]u8 = undefined;
+    var lines: Lines = .init(io, &buffers);
+    var writer: Io.Writer = .fixed(&.{});
+    var uart: Uart = .{ .bit_time = 10, .output = &writer, .lines = &lines };
+    // not wired, so nothing to take, however many changes
+    for (0..4) |k| try lines.set(if (k % 2 == 0) Lines.dtr else Lines.rts);
+    try expectEqual(null, uart.takeRts());
+    lines.wired = true;
+    // DTR alone is not taken
+    try expect(!try lines.change(Lines.rts | Lines.dtr));
+    try expectEqual(null, uart.takeRts());
+    var setting = try io.concurrent(Lines.set, .{ &lines, 0 });
+    var taken: ?bool = null;
+    while (taken == null) taken = uart.takeRts();
+    try setting.await(io);
+    try expectEqual(false, taken.?);
+    try expectEqual(null, uart.takeRts());
 }
 
 const pins = @import("pins.zig");

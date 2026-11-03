@@ -49,6 +49,27 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // libgasim-pty.so, which a program on one of gasim's ptys is started
+    // with, LD_PRELOAD, for the modem lines a pty does not carry, in lib
+    // beside bin. Linux only, which has the abstract sockets it asks through,
+    // and only with libc, without which gasim has no ptys.
+    if (target.result.os.tag == .linux and isocline) {
+        const preload = b.addLibrary(.{
+            .name = "gasim-pty",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/cli/preload.zig"),
+                .target = target,
+                .optimize = optimize,
+                .strip = strip,
+                .link_libc = true,
+                // whose runtime it would otherwise export into the program
+                .sanitize_c = .off,
+            }),
+        });
+        b.installArtifact(preload);
+    }
+
     // the examples, to try gasim on, in share/gasim beside bin, where the
     // GUI looks for them for its Examples menu
     b.installDirectory(.{
