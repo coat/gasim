@@ -140,8 +140,12 @@ done.
      describes it, with no flow control) and through J34 and J35 by node
      300, and its USB port C. Within 1% of the instructions before on the
      benchmarks.
-   - The EVB002's reset lines: host 500.17 and port C's RTS resetting the
-     target through J22.
+   - ✓ The EVB002's reset line from host 500.17 to the target through
+     J22, against the target's reset circuit: a chip held in reset while
+     RESET- is low, and starting again as after reset, with its RAM, when
+     it rises.
+   - Port C's RTS as a reset source (J22.3-4), with the serial ports on
+     ptys.
    - Chips after the first in arrayForth 3 programs and the IDE's words.
 2. **A shared clock.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
