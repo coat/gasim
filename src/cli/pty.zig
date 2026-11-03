@@ -35,7 +35,7 @@ extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]const u8;
 
-pub const OpenError = error{ OpenFailed, NotATerminal, Unexpected, ProcessOrphaned, OutOfMemory };
+pub const OpenError = error{ OpenFailed, NotATerminal, OutOfMemory };
 
 /// Opens a pseudo-terminal, with its path allocated in `arena`, an output
 /// buffer of `buffer`, and `queue` for what is waiting to be written
@@ -71,9 +71,25 @@ pub fn close(self: *Pty, io: Io) void {
     self.terminal.close(io);
 }
 
+/// libc's struct termios, for its tcgetattr and tcsetattr: the flags, which
+/// every libc puts first, and room for the rest. Zig's `posix.termios` is
+/// Linux's, which is smaller than glibc's, 44 bytes to 60, so glibc's
+/// tcgetattr writes past its end.
+const Termios = extern struct {
+    iflag: posix.tc_iflag_t,
+    oflag: posix.tc_oflag_t,
+    cflag: posix.tc_cflag_t,
+    lflag: posix.tc_lflag_t,
+    rest: [128]u8,
+};
+
+extern "c" fn tcgetattr(fd: posix.fd_t, termios: *Termios) c_int;
+extern "c" fn tcsetattr(fd: posix.fd_t, action: c_int, termios: *const Termios) c_int;
+
 /// as cfmakeraw does: bytes in and out as they are, 8 bits, no echo
-fn makeRaw(fd: posix.fd_t) !void {
-    var t = try posix.tcgetattr(fd);
+fn makeRaw(fd: posix.fd_t) error{NotATerminal}!void {
+    var t: Termios = undefined;
+    if (tcgetattr(fd, &t) != 0) return error.NotATerminal;
     t.iflag.IGNBRK = false;
     t.iflag.BRKINT = false;
     t.iflag.PARMRK = false;
@@ -90,7 +106,7 @@ fn makeRaw(fd: posix.fd_t) !void {
     t.lflag.IEXTEN = false;
     t.cflag.CSIZE = .CS8;
     t.cflag.PARENB = false;
-    try posix.tcsetattr(fd, .NOW, t);
+    if (tcsetattr(fd, @backingInt(posix.TCSA.NOW), &t) != 0) return error.NotATerminal;
 }
 
 fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
