@@ -144,8 +144,8 @@ done.
      J22, against the target's reset circuit: a chip held in reset while
      RESET- is low, and starting again as after reset, with its RAM, when
      it rises.
-   - Port C's RTS as a reset source (J22.3-4), with the serial ports on
-     ptys.
+   - RTS and DTR, which ptys don't carry, as reset sources: port A's for
+     the host (J20) and port C's for the target (J22.3-4).
    - Chips after the first in arrayForth 3 programs and the IDE's words.
 2. **A shared clock.**
    - ✓ Each node's time in integer picoseconds, and neighbours taking the
@@ -175,8 +175,12 @@ done.
      io, as after reset) or not at all; contention is reported; and nodes
      read a net as it was at their own time (`pins.zig`, `Chip.wire`,
      `Chip.pull`). The UART is a device on two nets.
-   - The UART on a pty, TCP or the TUI; SPI flash backed by a file; the 2 MB
-     SRAM on 007, 008 and 009; reset lines; the analog nodes' outputs.
+   - ✓ A board's serial ports on ptys, several at once (`--pty`), each a
+     UART on its node's pins, with a doorbell that the readers ring so a
+     run waits for input on any; ga-tools boots node 708 of either chip
+     through one, its RTS calls stubbed out.
+   - The UART on TCP or the TUI; SPI flash backed by a file; the 2 MB SRAM
+     on 007, 008 and 009; the analog nodes' outputs.
    - Pin activity dumped as VCD files for GTKWave.
    - The console stays, for playing and debugging.
    - The UART's state in snapshots, and a UART in the TUI, GUI and web.
