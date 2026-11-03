@@ -1,6 +1,7 @@
 //! What a board puts around its chips: serial ports wired to the chips'
 //! pins, pull resistors, wires between pins, SERDES links between chips,
-//! and the jumpers that connect some of them. The EVB002's is
+//! pins wired to chips' RESET- pins, and the jumpers that connect some of
+//! them. The EVB002's is
 //! `boards/evb002.zon`; other boards are described the same way, in a board
 //! file read on the host side (see `parse`). A board's chips are alike, and
 //! chip k's nodes are numbered k.yxx, as in `Chip.Layout`.
@@ -16,6 +17,7 @@ serial: []const Serial = &.{},
 pulls: []const Pull = &.{},
 wires: []const Wire = &.{},
 serdes: []const Link = &.{},
+resets: []const Reset = &.{},
 
 const Board = @This();
 
@@ -89,6 +91,16 @@ pub const Link = struct {
     b: Node,
 };
 
+/// A pin wired to chip `chip`'s RESET- pin, which holds the chip in reset
+/// while it is low, and the board's reset circuit, which holds it high
+/// through a resistor while `circuit` is on, if it names a jumper. RESET-
+/// has no pulldown, so without the circuit a pin's pulldown holds it low.
+pub const Reset = struct {
+    chip: u8,
+    by: Terminal,
+    circuit: ?[]const u8 = null,
+};
+
 pub const evb002: Board = @import("boards/evb002.zon");
 
 /// A jumper set otherwise than as the board is shipped
@@ -138,6 +150,12 @@ pub const Error = error{
     /// a node on two SERDES links, or a link to itself
     SerdesListedTwice,
     TooManySerdes,
+    NoSuchChip,
+    /// a chip's RESET- wired to two pins
+    ResetListedTwice,
+    /// a pin wired to two chips' RESET-
+    ResetPinShared,
+    TooManyResets,
 };
 
 /// what `check` found at fault, for messages
@@ -190,6 +208,16 @@ pub fn check(self: Board, spec: Spec, fault: *Fault) Error!void {
         if (link.a.number() == link.b.number()) return error.SerdesListedTwice;
         for (self.serdes[0..k]) |other| if (other.a.number() == n.number() or other.b.number() == n.number()) return error.SerdesListedTwice;
     };
+    if (self.resets.len > Chip.max_resets) return error.TooManyResets;
+    for (self.resets, 0..) |r, k| {
+        try self.checkTerminal(spec, r.by, fault);
+        try self.checkJumper(r.circuit, fault);
+        if (r.chip >= self.chips) return error.NoSuchChip;
+        for (self.resets[0..k]) |other| if (other.chip == r.chip) return error.ResetListedTwice;
+        // a net has one device, one chip's RESET-
+        for (self.resets[0..k]) |other| if (std.meta.eql(other.by.ref(), r.by.ref())) return error.ResetPinShared;
+        for (self.serial) |port| if (std.meta.eql(r.by.ref(), port.rx.ref()) or std.meta.eql(r.by.ref(), port.tx.ref())) return error.SerialPinWired;
+    }
     fault.* = .none;
 }
 
@@ -220,7 +248,7 @@ fn checkJumper(self: Board, name: ?[]const u8, fault: *Fault) Error!void {
 /// them. The other serial ports are left unconnected, as their lines idle:
 /// low on a line inverted as a USB serial chip's is, which a pin's pulldown
 /// reads as. What fails is reported in `fault`.
-pub fn apply(self: Board, chip: *Chip, uart: ?*Uart, port: ?Serial, settings: []const Setting, fault: *Fault) error{ NoSuchPin, TwoDevices, ConflictingPulls, NoSuchNode, NotSerdes, PortConnected, Full }!void {
+pub fn apply(self: Board, chip: *Chip, uart: ?*Uart, port: ?Serial, settings: []const Setting, fault: *Fault) error{ NoSuchPin, TwoDevices, ConflictingPulls, NoSuchNode, NotSerdes, PortConnected, Full, NoSuchChip }!void {
     for (self.serdes) |link| {
         fault.* = .{ .link = .{ link.a.number(), link.b.number() } };
         try chip.attachSerdes(link.a.number(), link.b.number());
@@ -232,6 +260,10 @@ pub fn apply(self: Board, chip: *Chip, uart: ?*Uart, port: ?Serial, settings: []
     for (self.wires) |w| if (self.jumperOn(w.jumper, settings) and self.jumperOn(w.a.jumper, settings) and self.jumperOn(w.b.jumper, settings)) {
         fault.* = .{ .pin = w.b.ref() };
         try chip.wire(w.a.ref(), w.b.ref());
+    };
+    for (self.resets) |r| if (self.jumperOn(r.by.jumper, settings)) {
+        fault.* = .{ .pin = r.by.ref() };
+        try chip.attachReset(r.chip, r.by.ref(), self.jumperOn(r.circuit, settings));
     };
     const u = uart orelse return;
     const s = port orelse return;
@@ -404,6 +436,67 @@ test "the EVB002's J35 joins the chips' 300.17, and SERDES their 701 and 001" {
     }
 }
 
+test "the EVB002's host 500 resets the target through J22" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const rom = try testRom(&roms);
+    {
+        var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
+        defer chip.deinit(std.testing.allocator);
+        try chip.loadRom(rom);
+        // 1.708 runs a program until 500 drives 500.17 low at about 2.4 us,
+        // and high at about 4.8 us
+        var programs: [2]assembler.Program = undefined;
+        var diagnostic: assembler.Diagnostic = .{};
+        for (try assembler.assembleNodes(
+            \\node 500 io b! 999 for unext 0x20000 !b 999 for unext 0x30000 !b right b! @b
+            \\node 1.708 7 right b! @b
+        , &programs, &diagnostic)) |program| try chip.load(program);
+        var fault: Fault = .none;
+        try evb002.apply(&chip, null, null, &.{}, &fault);
+        try chip.run();
+        try std.testing.expect(!chip.isHeld(1));
+        // back in its ROM, waiting at cold for a boot stream on its pin
+        const n = chip.node(10708).?;
+        try std.testing.expect(n.waitsOnPin() and n.word_address.rom);
+        try std.testing.expectEqual(0, n.data_stack.t);
+        try std.testing.expect(n.time >= 4_800_000);
+    }
+    {
+        // without the reset circuit, 500.17's pulldown holds RESET- low
+        var chip: Chip = try .initChips(std.testing.allocator, .ga144, evb002.chips);
+        defer chip.deinit(std.testing.allocator);
+        try chip.loadRom(rom);
+        var fault: Fault = .none;
+        try evb002.apply(&chip, null, null, &.{.{ .name = "J22.5-6", .on = false }}, &fault);
+        try chip.run();
+        try std.testing.expect(chip.isHeld(1));
+    }
+}
+
+test "a reset is checked" {
+    var fault: Fault = .none;
+    const no_chip: Board = .{ .resets = &.{.{ .chip = 1, .by = .{ .node = 500, .pin = 17 } }} };
+    try std.testing.expectError(error.NoSuchChip, no_chip.check(.ga144, &fault));
+    const twice: Board = .{ .chips = 2, .resets = &.{ .{ .chip = 1, .by = .{ .node = 500, .pin = 17 } }, .{ .chip = 1, .by = .{ .node = 600, .pin = 17 } } } };
+    try std.testing.expectError(error.ResetListedTwice, twice.check(.ga144, &fault));
+    const no_pin: Board = .{ .chips = 2, .resets = &.{.{ .chip = 1, .by = .{ .node = 404, .pin = 17 } }} };
+    try std.testing.expectError(error.NoSuchPin, no_pin.check(.ga144, &fault));
+    const shared: Board = .{ .chips = 3, .resets = &.{ .{ .chip = 1, .by = .{ .node = 500, .pin = 17 } }, .{ .chip = 2, .by = .{ .node = 500, .pin = 17 } } } };
+    try std.testing.expectError(error.ResetPinShared, shared.check(.ga144, &fault));
+    const serial: Board = .{
+        .chips = 2,
+        .serial = &.{.{ .name = "A", .rx = .{ .node = 708, .pin = 17 }, .tx = .{ .node = 708, .pin = 1 } }},
+        .resets = &.{.{ .chip = 1, .by = .{ .node = 708, .pin = 1 } }},
+    };
+    try std.testing.expectError(error.SerialPinWired, serial.check(.ga144, &fault));
+    const many: Board = .{ .chips = 6, .resets = &.{
+        .{ .chip = 1, .by = .{ .node = 100, .pin = 17 } }, .{ .chip = 2, .by = .{ .node = 200, .pin = 17 } },
+        .{ .chip = 3, .by = .{ .node = 500, .pin = 17 } }, .{ .chip = 4, .by = .{ .node = 600, .pin = 17 } },
+        .{ .chip = 5, .by = .{ .node = 715, .pin = 17 } },
+    } };
+    try std.testing.expectError(error.TooManyResets, many.check(.ga144, &fault));
+}
+
 /// prints Hi on node 708's pins 17 and 1, as examples/uart.ga does
 const test_uart =
     \\node 708
@@ -414,6 +507,8 @@ const test_uart =
 ;
 
 const assembler = @import("assembler.zig");
+const ga144 = @import("ga144.zig");
+const testRom = @import("rom.zig").testRom;
 const Chip = @import("Chip.zig");
 const Spec = @import("Spec.zig");
 const Uart = @import("Uart.zig");

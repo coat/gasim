@@ -262,12 +262,13 @@ for a node whose ROM type differs from the GA144's node of its number.
 A board file says what a board puts around its chips, in ZON: their chip
 file (`ga144` for the GA144, or a path relative to the board file), how
 many chips there are of it, serial ports wired to the chips' pins, pull
-resistors, wires between pins, SERDES links between nodes, and named
-jumpers that connect some of them, on or off as the board is shipped. The
-nodes of chips after the first are numbered with the chip before them, such
-as `1.708`, in a board file as `.chip = 1, .node = 708`, and in programs
-(`node 1.708`) and options (`--break 1.708:004`) as `1.708`. The nodes of
-all the chips run as one, the furthest behind in time first.
+resistors, wires between pins, SERDES links between nodes, pins wired to
+chips' RESET- pins, and named jumpers that connect some of them, on or off
+as the board is shipped. The nodes of chips after the first are numbered
+with the chip before them, such as `1.708`, in a board file as `.chip = 1,
+.node = 708`, and in programs (`node 1.708`) and options (`--break
+1.708:004`) as `1.708`. The nodes of all the chips run as one, the
+furthest behind in time first.
 
 The EVB002's, [`src/boards/evb002.zon`](src/boards/evb002.zon), is built
 in as `evb002`, from its data book (DB014) and the jumper settings it ships
@@ -279,7 +280,10 @@ with (AN021):
 - the target chip, chip 1, with USB port C (1.708's pins 17 and 1) and a
   pull-up on 1.705.17;
 - SERDES from host 701 to target 001, and J34 and J35 joining the chips'
-  300.1 and 300.17.
+  300.1 and 300.17;
+- J22's host 500.17 on the target's RESET-, which the target's reset
+  circuit holds high through J22.5-6: host 500 resets the target by
+  driving 500.17 low.
 
 ```
 $ gasim run --board evb002 examples/uart.ga
@@ -302,10 +306,24 @@ Serial ports other than the one on stdin and stdout are left unconnected,
 which their nodes' pulldowns read as an idle, inverted line. A board with
 no serial ports has the console instead (`--console`). A wire can't go to a
 serial port's pin yet, as the port's input would not wake the other pin's
-node. `--boot` through a serial port boots the chip it is wired to. The
-EVB002's reset lines, from host 500.17 and port C's RTS to the target
-through J22, are not modelled yet, and arrayForth 3 programs (`.af`,
-`.blk`) only reach the first chip.
+node. `--boot` through a serial port boots the chip it is wired to, and
+arrayForth 3 programs (`.af`, `.blk`) only reach the first chip.
+
+A chip is held in reset while its RESET- is low, its nodes as after reset
+and waiting, and starts again as after reset when RESET- rises, at that
+time, with its RAM as it was. A node of it that had run past the time,
+which a word's `unext` loop can take it far past, keeps what it did, such
+as a byte or a SERDES word it sent. RESET- has no pulldown, so with
+J22.1-2 on and J22.5-6 off, 500.17's pulldown holds the target in reset
+until host 500 drives it high; with J22.1-2 off, the target is not reset.
+Port C's RTS (J22.3-4, listed for `--jumper`) and the reset button are not
+modelled, as stdin has no RTS.
+
+```
+$ gasim run --board evb002 --usb C --jumper J22.5-6=off --why target.ga
+info: chip 1 held in reset
+...
+```
 
 ### ROM
 
