@@ -141,7 +141,13 @@ more info.
   board file (see [Board files](#board-files)), or `evb002` for
   GreenArrays' EVB002, with stdin and stdout on one of its serial ports
 - `--usb <port>`: the board's serial port on stdin and stdout (default its
-  first, such as `A`; `C` is the EVB002's target chip's)
+  first, such as `A`, unless `--pty` is given; `C` is the EVB002's target
+  chip's)
+- `--pty <port>[=<link>]`: put one of the board's serial ports on a
+  pseudo-terminal, as a USB serial port's device, such as for arrayForth 3
+  under Wine, saying its path, and making a symbolic link to it at `<link>`
+  if given. Can be given more than once (see [Serial ports on
+  ptys](#serial-ports-on-ptys)).
 - `--jumper <name>=on|off`: set one of the board's jumpers otherwise than
   as it is shipped, such as `J26=off`. Can be given more than once.
 - `--chip <file>`: the chip, described in a chip file (see [Chip
@@ -324,6 +330,32 @@ $ gasim run --board evb002 --usb C --jumper J22.5-6=off --why target.ga
 info: chip 1 held in reset
 ...
 ```
+
+### Serial ports on ptys
+
+`--pty` puts a board's serial ports on pseudo-terminals, which programs
+open as they would a USB serial port's device, at the same time as each
+other and as stdin and stdout, which carry the port `--usb` names, or none.
+Each port runs at its board file's baud. A run with ports on ptys goes on,
+waiting for input, until ctrl+c, as a board does, even once stdin ends, and
+removes the links it made. A link is made in place of one to another pty,
+such as one left by an earlier run, or to nothing, but not of one to
+anything else, such as a serial port Wine found. Without `--usb`, stdin is
+not read. A pty keeps what a port sends before a program opens it, up to
+its buffer, about 19 KB on Linux, for the program to read; past that, and
+whenever nothing reads it, bytes are dropped rather than holding up the
+chip, and the run says how many. Linux, macOS and the BSDs have ptys, in
+builds with libc.
+
+```
+$ gasim run --board evb002 --pty A=$HOME/.wine/dosdevices/com3 --pty C
+info: port A: /dev/pts/4
+info: port C: /dev/pts/5
+```
+
+A pty carries no RTS or DTR, which hosts such as arrayForth 3 and
+ga-tools set to reset the chip, and their serial libraries can refuse the
+port for it: pyserial's `rts` raises "Inappropriate ioctl for device".
 
 ### ROM
 
