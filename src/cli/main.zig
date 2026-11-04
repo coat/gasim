@@ -370,7 +370,8 @@ pub fn main(init: std.process.Init) !void {
         fatal("--uart without a program needs a ROM, for node {f} to boot from its input (see --rom)", .{Chip.nodeName(uart_node.?)});
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
-    const descriptor_buffer = try arena.alloc(gasim.boot.Descriptor, layout.count());
+    // each frame of a stream has descriptors of its own
+    const descriptor_buffer = try arena.alloc(gasim.boot.Descriptor, layout.count() * gasim.arrayforth.Stream.max_frames);
     var diagnostic: assembler.Diagnostic = .{};
     // the prompt, and the console with it, write here
     var aforth_buffer: [4096]u8 = undefined;
@@ -437,6 +438,10 @@ pub fn main(init: std.process.Init) !void {
     // as a stream's frame does even if it describes no node. Without them,
     // each program in its node's own bin is loaded and started at its
     // entry, and code saved in other bins is not loaded.
+    // the frames of a stream set nodes up one after another, which only
+    // the STREAMER's stream does
+    if (assembled.stream) |*s| if (s.frame_count > 1 and !(boot and uart_node != null))
+        fatal("{s}'s stream has {d} frames, which only --uart 708 --boot sends one after another", .{ source_path, s.frame_count });
     const descriptors = if (assembled.descriptors.len > 0 or assembled.stream != null) assembled.descriptors else own: {
         var count: usize = 0;
         for (programs) |program| if (program.bin == null) {
@@ -507,15 +512,17 @@ pub fn main(init: std.process.Init) !void {
             fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {f}", .{ uart_option, Chip.nodeName(root) });
         if (roms == null) fatal("--boot needs a ROM, for node {f} to boot from (see --rom)", .{Chip.nodeName(root)});
         // laid out as arrayForth 3's STREAMER does, for a STREAM[ ]STREAM
-        const words = if (assembled.stream) |*s| streamer: {
-            const course = s.path();
-            // ]FRAME has made sure it starts at 708
-            if (course[0] != root) fatal("--boot: {s}'s stream is for node {f}, the only root gasim has of the STREAMER's, not the --uart node {f}", .{ source_path, Chip.nodeName(course[0]), Chip.nodeName(root) });
-            const buffer = try arena.alloc(gasim.Word, gasim.streamer.maxLen(course.len, descriptors));
-            break :streamer gasim.streamer.stream(layout, course, descriptors, programs, buffer) catch |err| switch (err) {
+        const words = if (assembled.stream != null) streamer: {
+            var frame_buffer: [gasim.arrayforth.Stream.max_frames]gasim.streamer.Frame = undefined;
+            const frames = assembled.frames(&frame_buffer);
+            // ]FRAME has made sure each starts at 708
+            if (root != 708) fatal("--boot: {s}'s stream is for node 708, the only root gasim has of the STREAMER's, not the --uart node {f}", .{ source_path, Chip.nodeName(root) });
+            const buffer = try arena.alloc(gasim.Word, gasim.streamer.maxLen(frames));
+            break :streamer gasim.streamer.stream(layout, frames, programs, buffer) catch |err| switch (err) {
                 error.NoSuchNode, error.NotNeighbours, error.RepeatedNode => fatal("--boot: {s}'s COURSE is not a path of neighbours in {f}, each once ({t})", .{ source_path, layout, err }),
                 error.NotOnPath => fatal("--boot: {s} describes a node off its frame's COURSE", .{source_path}),
                 error.RootTooManyLoads, error.RootNotInPlace => fatal("--boot: node {f} can only be loaded with one part of a bin, to the addresses it comes from ({t})", .{ Chip.nodeName(root), err }),
+                error.RootStopsReading => fatal("--boot: a frame of {s} before the last leaves node {f} at warm, not reading the next (see ser-exec /P)", .{ source_path, Chip.nodeName(root) }),
                 error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
                 error.UnknownRoot, error.PathTooShort, error.NoSuchBin => unreachable,
             };

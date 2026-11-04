@@ -108,15 +108,19 @@
 //! lays them out, which gasim has built in, so that `STREAMER LOAD` loads
 //! nothing:
 //!
-//!     nn STREAM[ FRAME[ ... ]FRAME ]STREAM
-//!                       a stream from root nn, which must be 708, of one
-//!                       frame, whose boot descriptors FRAME[ begins afresh
-//!                       and ]FRAME ends, in place of any stream before
+//!     nn STREAM[ FRAME[ ... ]FRAME ... ]STREAM
+//!                       a stream from root nn, which must be 708, of up to
+//!                       8 frames, in place of any stream before. FRAME[
+//!                       begins a frame's boot descriptors afresh, so that
+//!                       a later frame sets a node up again, and ]FRAME
+//!                       ends them. Each frame but the last has to leave
+//!                       708 reading the next, at ser-exec.
 //!     nn ORGN  nn TO    a path, in host memory: its first node, and a line
 //!                       along a row or a column to another
 //!     ' name  a COURSE  the address of a name's memory, and the path the
 //!                       frame takes from its root, ending with -1, or by
 //!                       default the chip (`streamer.entire`)
+//!     ENTIRE COURSE     that default again, for a later frame
 
 pub const Error = assembler.Error || error{
     StackUnderflow,
@@ -178,8 +182,12 @@ pub const Error = assembler.Error || error{
     NoFrame,
     /// ]STREAM or FRAME[ before ]FRAME, or a source that ends before it
     UnclosedFrame,
-    /// a second FRAME[ in a stream, as gasim keeps one frame
+    /// a FRAME[ after the 8 frames of a stream that gasim keeps
     TooManyFrames,
+    /// a bin saved again, before ]STREAM, that a frame ended before loads:
+    /// the STREAMER lays a frame out at its ]FRAME, with the code saved
+    /// then, where gasim lays out the stream at the end
+    FrameLoadsBin,
     /// STREAM[ before the ]STREAM of the one before, or a source that ends
     /// before it
     UnclosedStream,
@@ -315,8 +323,17 @@ pub const Session = struct {
         }
         it.compiling = null;
         it.loop_len = 0;
-        // a stream left open, whose frame is not kept
-        if (it.stream_root != null) it.stream = null;
+        // a stream left open, whose frames are not kept, nor the
+        // descriptors its FRAME[ began, which dropped those before
+        if (it.stream_root != null) {
+            if (it.framing or it.stream != null) {
+                it.descriptor_count = 0;
+                it.boot_node = null;
+                it.unsaved_count = 0;
+            }
+            it.stream = null;
+            it.descriptor_start = 0;
+        }
         it.stream_root = null;
         it.framing = false;
         it.course = null;
@@ -369,21 +386,44 @@ pub const Assembled = struct {
     /// to, and the first of them
     feedback_differs: usize = 0,
     first_difference: ?Feedback = null,
-    /// the path of a stream's frame, from STREAM[ ... ]STREAM, for
-    /// `streamer.stream` to lay out the descriptors along, which are
-    /// then the frame's
+    /// the frames of a stream, from STREAM[ ... ]STREAM, for
+    /// `streamer.stream` to lay out, whose descriptors are then all of
+    /// `descriptors`
     stream: ?Stream = null,
+
+    /// the stream's frames, into `buffer`, or none without a stream. Their
+    /// paths are in `self`, and their descriptors in `descriptors`.
+    pub fn frames(self: *const Assembled, buffer: *[Stream.max_frames]streamer.Frame) []const streamer.Frame {
+        const s = if (self.stream) |*stream| stream else return buffer[0..0];
+        var path_start: usize = 0;
+        var descriptor_start: usize = 0;
+        for (s.ends[0..s.frame_count], buffer[0..s.frame_count]) |end, *f| {
+            f.* = .{ .path = s.nodes[path_start..end.path], .descriptors = self.descriptors[descriptor_start..end.descriptors] };
+            path_start = end.path;
+            descriptor_start = end.descriptors;
+        }
+        return buffer[0..s.frame_count];
+    }
 };
 
-/// the path a stream's frame takes, from its root, as ]FRAME found it
+/// the frames of a stream from its root, each with the path ]FRAME found
 pub const Stream = struct {
-    nodes: [2 * 144]u16 = undefined,
-    len: u16 = 0,
-    /// how many of the descriptors are the frame's
-    descriptor_count: usize = 0,
+    pub const max_frames = 8;
 
-    pub fn path(self: *const Stream) []const u16 {
-        return self.nodes[0..self.len];
+    /// the frames' paths, one after another
+    nodes: [max_frames * max_path]u16 = undefined,
+    /// where each frame's path ends in `nodes`, and its descriptors in
+    /// `Assembled.descriptors`
+    ends: [max_frames]End = undefined,
+    frame_count: u8 = 0,
+
+    /// a path of two chips
+    const max_path = 2 * 144;
+
+    const End = struct { path: u16, descriptors: usize };
+
+    fn end(self: *const Stream) End {
+        return if (self.frame_count == 0) .{ .path = 0, .descriptors = 0 } else self.ends[self.frame_count - 1];
     }
 };
 
@@ -534,6 +574,9 @@ const max_labels = 64;
 
 /// arrayForth 3's STREAMER, block 42 FH of its environment, block 1560
 const streamer_block = 1602;
+/// what ENTIRE gives COURSE for the default path, which is not in host
+/// memory as the STREAMER's is
+const entire_course = -1;
 
 const Label = struct {
     name: []const u8,
@@ -691,8 +734,10 @@ const Interpreter = struct {
     count: usize = 0,
     descriptors: []boot.Descriptor,
     descriptor_count: usize = 0,
-    /// the descriptor that +NODE selected
+    /// the descriptor that +NODE selected, and where the descriptors it
+    /// selects from begin, after those of a stream's frames
     boot_node: ?usize = null,
+    descriptor_start: usize = 0,
     /// where words such as . and UPD write, if anywhere
     out: ?*Io.Writer = null,
     /// the chip that IDE words act on, and the node they target
@@ -791,7 +836,7 @@ const Interpreter = struct {
     fn assembled(self: Interpreter) Assembled {
         return .{
             .programs = self.programs[0..self.count],
-            .descriptors = self.descriptors[0..if (self.stream) |frame| frame.descriptor_count else self.descriptor_count],
+            .descriptors = self.descriptors[0..self.descriptorEnd()],
             .feedback_differs = self.feedback_differs,
             .first_difference = self.first_difference,
             .stream = self.stream,
@@ -836,10 +881,15 @@ const Interpreter = struct {
         if (self.stream_root != null) return error.UnclosedStream;
     }
 
+    /// the descriptors that are the program's: with a stream, its frames'
+    fn descriptorEnd(self: *const Interpreter) usize {
+        return if (self.stream) |*s| s.end().descriptors else self.descriptor_count;
+    }
+
     /// fails, at the end of a program, if a boot descriptor loads a bin
     /// that was never saved, at where it was loaded if that is known
     fn checkLoads(self: *Interpreter) Error!void {
-        for (self.descriptors[0..self.descriptor_count], 0..) |d, i| for (d.loads[0..d.load_count]) |part| {
+        for (self.descriptors[0..self.descriptorEnd()], 0..) |d, i| for (d.loads[0..d.load_count]) |part| {
             for (self.saved[0..self.saved_count]) |saved| {
                 if (saved.number == part.bin) break;
             } else {
@@ -1770,6 +1820,11 @@ const Interpreter = struct {
         const again = for (self.saved[0..self.saved_count], 0..) |*saved, i| {
             if (saved.number == bin.number) break i;
         } else null;
+        if (again != null and self.stream_root != null) if (self.stream) |*s| {
+            for (self.descriptors[0..s.end().descriptors]) |d| for (d.loads[0..d.load_count]) |part| {
+                if (part.bin == bin.number) return error.FrameLoadsBin;
+            };
+        };
         if (again) |i| self.saved[i].labels = &.{};
 
         // keeps the bin's own labels, sharing them with a bin that has the
@@ -2133,43 +2188,65 @@ const Interpreter = struct {
                 self.stream_root = 708;
                 self.course = null;
                 self.stream = null;
+                self.descriptor_start = 0;
             },
+            .ENTIRE => try self.push(entire_course),
             .COURSE => {
                 const address = try self.pop();
                 if (self.stream_root == null) return error.NoStream;
-                _ = try self.cell(address);
-                self.course = address;
+                if (address == entire_course) self.course = null else {
+                    _ = try self.cell(address);
+                    self.course = address;
+                }
             },
             .@"FRAME[" => {
                 if (self.stream_root == null) return error.NoStream;
                 if (self.framing) return error.UnclosedFrame;
-                if (self.stream != null) return error.TooManyFrames;
-                // which leaves every node as it starts by default
-                self.descriptor_count = 0;
+                const kept = if (self.stream) |*s| kept: {
+                    if (s.frame_count == Stream.max_frames) return error.TooManyFrames;
+                    break :kept s.end().descriptors;
+                } else 0;
+                // which leaves every node as it starts by default, after
+                // the descriptors of the frames before
+                self.descriptor_start = kept;
+                self.descriptor_count = kept;
                 self.boot_node = null;
-                self.unsaved_count = 0;
+                var unsaved_count: u8 = 0;
+                for (self.unsaved_loads[0..self.unsaved_count]) |unsaved| if (unsaved.descriptor < kept) {
+                    self.unsaved_loads[unsaved_count] = unsaved;
+                    unsaved_count += 1;
+                };
+                self.unsaved_count = unsaved_count;
                 self.framing = true;
             },
             .@"]FRAME" => {
                 if (!self.framing) return error.NoFrame;
                 self.framing = false;
-                var frame: Stream = .{};
+                if (self.stream == null) self.stream = .{};
+                const s = &self.stream.?;
+                const start = s.end().path;
+                const nodes = s.nodes[start..][0..Stream.max_path];
+                var len: usize = 0;
                 if (self.course) |course| {
                     var address = course;
                     while (true) : (address += 1) {
                         const entry = (try self.cell(address)).*;
                         if (entry < 0) break;
-                        if (frame.len == frame.nodes.len) return error.PathTooLong;
-                        frame.nodes[frame.len] = std.math.cast(u16, entry) orelse return error.InvalidNode;
-                        frame.len += 1;
+                        if (len == nodes.len) return error.PathTooLong;
+                        nodes[len] = std.math.cast(u16, entry) orelse return error.InvalidNode;
+                        len += 1;
                     }
-                } else frame.len = @intCast((streamer.draw(&streamer.entire, &frame.nodes) catch unreachable).len);
+                } else len = (streamer.draw(&streamer.entire, nodes) catch unreachable).len;
                 // #FRAME: from the root, to one node or more
-                if (frame.len < 2) return error.PathTooShort;
-                if (frame.nodes[0] != self.stream_root.?) return error.NotFromRoot;
+                if (len < 2) return error.PathTooShort;
+                if (nodes[0] != self.stream_root.?) return error.NotFromRoot;
                 // the descriptors given after it are not in the frame
-                frame.descriptor_count = self.descriptor_count;
-                self.stream = frame;
+                s.ends[s.frame_count] = .{ .path = @intCast(start + len), .descriptors = self.descriptor_count };
+                s.frame_count += 1;
+                self.descriptor_start = self.descriptor_count;
+                // with no node selected, so that a /P now does not change
+                // the frame, as it cannot the STREAMER's, built by now
+                self.boot_node = null;
             },
             .@"]STREAM" => {
                 if (self.stream_root == null) return error.NoStream;
@@ -2304,7 +2381,7 @@ const Interpreter = struct {
     fn bootNode(self: *Interpreter, number_of_node: i32) Error!void {
         if (number_of_node < 0 or number_of_node > 999999) return error.InvalidNode;
         const node_number: u16 = @intCast(@rem(number_of_node, 10000));
-        for (self.descriptors[0..self.descriptor_count], 0..) |d, i| if (d.node == node_number) {
+        for (self.descriptors[self.descriptor_start..self.descriptor_count], self.descriptor_start..) |d, i| if (d.node == node_number) {
             self.boot_node = i;
             return;
         };
@@ -2771,6 +2848,7 @@ const ForthWord = enum {
     @"+ND",
     @"+wire",
     STREAMER,
+    ENTIRE,
     @"STREAM[",
     @"FRAME[",
     @"]FRAME",
@@ -3481,7 +3559,8 @@ test "a stream's frame, as the STREAMER builds it" {
         \\       708 +NODE xAA /P
         \\    ]FRAME  ]STREAM
     , &programs, &descriptors, &diagnostic);
-    try expectEqualSlices(u16, &.{ 708, 709, 710, 711, 712, 713, 714, 715 }, assembled.stream.?.path());
+    var frames: [Stream.max_frames]streamer.Frame = undefined;
+    try expectEqualSlices(u16, &.{ 708, 709, 710, 711, 712, 713, 714, 715 }, assembled.frames(&frames)[0].path);
     // FRAME[ began the descriptors afresh, without node 009's
     try expectEqual(2, assembled.descriptors.len);
     try expectEqual(715, assembled.descriptors[0].node);
@@ -3489,8 +3568,10 @@ test "a stream's frame, as the STREAMER builds it" {
 
     // without a COURSE, the path covers the chip
     const entire = try assembleNodes("708 STREAM[ FRAME[ ]FRAME ]STREAM", &programs, &descriptors, &diagnostic);
-    try expectEqual(144, entire.stream.?.path().len);
-    try expectEqual(null, (try assembleNodes("1 1 +", &programs, &descriptors, &diagnostic)).stream);
+    try expectEqual(144, entire.frames(&frames)[0].path.len);
+    const none = try assembleNodes("1 1 +", &programs, &descriptors, &diagnostic);
+    try expectEqual(null, none.stream);
+    try expectEqual(0, none.frames(&frames).len);
 
     // descriptors after ]FRAME are not the frame's, as the STREAMER builds
     // it there, and STREAMER LOAD leaves the base in DECIMAL, as its block
@@ -3498,6 +3579,74 @@ test "a stream's frame, as the STREAMER builds it" {
     const after = try assembleNodes("HEX STREAMER LOAD  708 STREAM[ FRAME[ 708 +NODE ]FRAME ]STREAM  9 +NODE", &programs, &descriptors, &diagnostic);
     try expectEqual(1, after.descriptors.len);
     try expectEqual(708, after.descriptors[0].node);
+}
+
+test "a stream of several frames, each with its own path and descriptors" {
+    var programs: [1]Program = undefined;
+    var descriptors: [5]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleNodes(
+        \\ STREAMER LOAD
+        \\ ASM[ # 715 NODE ERS # 0 org  begin begin !b unext unext  >BIN ]ASM
+        \\ 0 ARRAY FAR  708 ORGN 715 TO -1 ,
+        \\ 0 ARRAY NEAR  708 ORGN 608 TO -1 ,
+        \\ 708 STREAM[   ' FAR COURSE
+        \\    FRAME[   715 +NODE  715 /RAM  0 /P  708 +NODE xAE /P   ]FRAME
+        \\    9 +NODE  ' NEAR COURSE
+        \\    FRAME[   608 +NODE  715 /RAM  708 +NODE  608 +NODE 0 /P  ]FRAME
+        \\ ]STREAM
+    , &programs, &descriptors, &diagnostic);
+    var frames: [Stream.max_frames]streamer.Frame = undefined;
+    const both = assembled.frames(&frames);
+    try expectEqual(2, both.len);
+    try expectEqualSlices(u16, &.{ 708, 709, 710, 711, 712, 713, 714, 715 }, both[0].path);
+    try expectEqualSlices(u16, &.{ 708, 608 }, both[1].path);
+    // the second FRAME[ dropped node 009's descriptor, given between the
+    // frames, but not the first frame's
+    try expectEqual(4, assembled.descriptors.len);
+    try expectEqual(715, both[0].descriptors[0].node);
+    try expectEqual(0xae, both[0].descriptors[1].p);
+    // and began 708's afresh, at warm, and found 608's again
+    try expectEqual(2, both[1].descriptors.len);
+    try expectEqual(0, both[1].descriptors[0].p);
+    try expectEqual(1, both[1].descriptors[0].load_count);
+    try expectEqual(708, both[1].descriptors[1].node);
+    try expectEqual(0xa9, both[1].descriptors[1].p);
+
+    // a load of a bin never saved, in a frame before the last, is still an
+    // error, where it was loaded
+    try expectError(error.NoSuchBin, assembleNodes("708 STREAM[ FRAME[ 709 +NODE 5 /RAM ]FRAME FRAME[ ]FRAME ]STREAM", &programs, &descriptors, &diagnostic));
+    try expectEqualStrings("/RAM", diagnostic.token);
+    // but not in descriptors that a FRAME[ dropped, or that are in no frame
+    _ = try assembleNodes("708 STREAM[ FRAME[ ]FRAME 709 +NODE 5 /RAM FRAME[ ]FRAME ]STREAM", &programs, &descriptors, &diagnostic);
+    _ = try assembleNodes("708 STREAM[ FRAME[ ]FRAME 709 +NODE 5 /RAM ]STREAM", &programs, &descriptors, &diagnostic);
+
+    // ENTIRE gives a later frame the default path again
+    const entire = try assembleNodes(
+        \\ CREATE P  708 ORGN 709 TO -1 ,
+        \\ 708 STREAM[  ' P COURSE  FRAME[ 708 +NODE xAE /P ]FRAME
+        \\    ENTIRE COURSE  FRAME[ ]FRAME
+        \\ ]STREAM
+    , &programs, &descriptors, &diagnostic);
+    const two = entire.frames(&frames);
+    try expectEqual(2, two[0].path.len);
+    try expectEqual(144, two[1].path.len);
+    // and after ]FRAME no node is selected, so the frame is as it ended
+    try expectError(error.NoBootNode, assembleNodes("708 STREAM[ FRAME[ 708 +NODE xAE /P ]FRAME 0 /P", &programs, &descriptors, &diagnostic));
+
+    // a frame is laid out with the code its bins had at its ]FRAME, so a
+    // bin it loads cannot be saved again until ]STREAM
+    const again =
+        \\ ASM[ # 9 NODE ERS # 0 org dup >BIN ]ASM
+        \\ 708 STREAM[ FRAME[ 709 +NODE 9 /RAM ]FRAME
+        \\ ASM[ # 9 NODE ERS # 0 org drop >BIN ]ASM
+    ;
+    try expectError(error.FrameLoadsBin, assembleNodes(again, &programs, &descriptors, &diagnostic));
+    _ = try assembleNodes(
+        \\ ASM[ # 9 NODE ERS # 0 org dup >BIN ]ASM
+        \\ 708 STREAM[ FRAME[ 709 +NODE 9 /RAM ]FRAME ]STREAM
+        \\ ASM[ # 9 NODE ERS # 0 org drop >BIN ]ASM
+    , &programs, &descriptors, &diagnostic);
 }
 
 test "a session builds a stream again, and drops one left open by an error" {
@@ -3512,13 +3661,19 @@ test "a session builds a stream again, and drops one left open by an error" {
     try session.interpret("708 STREAM[ ' P COURSE FRAME[ 709 +NODE ]FRAME ]STREAM");
     try session.interpret("708 STREAM[ ' P COURSE FRAME[ ]FRAME ]STREAM");
     try expectEqual(0, session.assembled().descriptors.len);
-    try expectEqual(2, session.assembled().stream.?.path().len);
+    var frames: [Stream.max_frames]streamer.Frame = undefined;
+    try expectEqual(2, session.assembled().frames(&frames)[0].path.len);
 
     try expectError(error.UnknownWord, session.interpret("708 STREAM[ FRAME[ 709 +NODE NOTHING"));
     try expectEqual(null, session.assembled().stream);
+    // nor its descriptors, in a frame or not
+    try expectError(error.UnknownWord, session.interpret("708 STREAM[ FRAME[ 709 +NODE ]FRAME FRAME[ 708 +NODE NOTHING"));
+    try session.interpret("708 +NODE 2 /P");
+    try expectEqual(1, session.assembled().descriptors.len);
+    try expectEqual(2, session.assembled().descriptors[0].p);
     try session.interpret("708 STREAM[ FRAME[ ]FRAME ]STREAM");
     try session.finish();
-    try expectEqual(144, session.assembled().stream.?.path().len);
+    try expectEqual(144, session.assembled().frames(&frames)[0].path.len);
     try session.interpret("708 STREAM[");
     try expectError(error.UnclosedStream, session.finish());
 }
@@ -3532,7 +3687,12 @@ test "stream errors" {
     try expectAssembleError(error.UnclosedFrame, "708 STREAM[ FRAME[ ]STREAM");
     try expectAssembleError(error.UnclosedFrame, "708 STREAM[ FRAME[ FRAME[");
     try expectAssembleError(error.UnclosedFrame, "708 STREAM[ FRAME[");
-    try expectAssembleError(error.TooManyFrames, "708 STREAM[ FRAME[ ]FRAME FRAME[");
+    const frames = comptime frames: {
+        var source: []const u8 = "708 STREAM[";
+        for (0..Stream.max_frames) |_| source = source ++ " FRAME[ ]FRAME";
+        break :frames source;
+    };
+    try expectAssembleError(error.TooManyFrames, frames ++ " FRAME[");
     try expectAssembleError(error.UnclosedStream, "708 STREAM[ 708 STREAM[");
     try expectAssembleError(error.UnclosedStream, "708 STREAM[");
     try expectAssembleError(error.PathTooShort, "CREATE P  708 ORGN -1 ,  708 STREAM[ ' P COURSE FRAME[ ]FRAME");

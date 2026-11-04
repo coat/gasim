@@ -637,12 +637,14 @@ test "arrayForth 3's applications boot through the EVB002's USB port A as their 
         const descriptors = assembled.descriptors;
         const ours = try gpa.alloc(Word, maxLen(.ga144, descriptors) + 3 * (descriptors.len + 2));
         defer gpa.free(ours);
-        const path = assembled.stream.?.path();
-        const theirs = try gpa.alloc(Word, streamer.maxLen(path.len, descriptors));
+        var frame_buffer: [arrayforth.Stream.max_frames]streamer.Frame = undefined;
+        const frames = assembled.frames(&frame_buffer);
+        try expectEqual(1, frames.len);
+        const theirs = try gpa.alloc(Word, streamer.maxLen(frames));
         defer gpa.free(theirs);
         const streams = [_]struct { []const u8, []const Word }{
             .{ "gasim's", try asyncStream(gpa, .ga144, 708, descriptors, assembled.programs, ours) },
-            .{ "the STREAMER's", try streamer.stream(.ga144, path, descriptors, assembled.programs, theirs) },
+            .{ "the STREAMER's", try streamer.stream(.ga144, frames, assembled.programs, theirs) },
         };
         // but for 708, which reads frames at ser-exec and starts at cold
         // from reset, so that being at either says nothing of its boot
@@ -667,6 +669,40 @@ test "arrayForth 3's applications boot through the EVB002's USB port A as their 
             }
         }
     }
+}
+
+test "a stream of several frames boots each along its own path, and sets a node up again" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    var programs: [4]Program = undefined;
+    var descriptor_buffer: [8]Descriptor = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    // the first frame starts 508, and 608 on code that goes back to warm,
+    // and leaves 708 reading the next; along a path of its own, through
+    // 608 again, the second frame starts 608 on its own code, and 707
+    const assembled = try arrayforth.assembleScript(
+        \\ STREAMER LOAD
+        \\ ASM[ # 508 NODE ERS # 0 org : main 5. main ; >BIN
+        \\      # 608 NODE # 1608 BIN ERS # 0 org : main 1. warm ; >BIN
+        \\      # 608 NODE ERS # 0 org : main 6. main ; >BIN
+        \\      # 707 NODE ERS # 0 org : main 7. main ; >BIN ]ASM
+        \\ 0 ARRAY DOWNWARD  708 ORGN 508 TO -1 ,
+        \\ 0 ARRAY ACROSS  708 ORGN 608 TO 607 TO 707 TO -1 ,
+        \\ 708 STREAM[   ' DOWNWARD COURSE
+        \\    FRAME[  508 +NODE 508 /RAM 0 /P  608 +NODE 1608 /RAM 0 /P  708 +NODE 708 ITS ser-exec /P  ]FRAME
+        \\    ' ACROSS COURSE
+        \\    FRAME[  608 +NODE 608 /RAM 0 /P  707 +NODE 707 /RAM 0 /P  ]FRAME
+        \\ ]STREAM
+    , null, &programs, &descriptor_buffer, &diagnostic);
+    var frame_buffer: [arrayforth.Stream.max_frames]streamer.Frame = undefined;
+    const frames = assembled.frames(&frame_buffer);
+    try expectEqual(2, frames.len);
+    var buffer: [512]Word = undefined;
+    const words = try streamer.stream(.ga144, frames, assembled.programs, &buffer);
+    // 608 is at 0 with its first frame's code before it is with its own
+    const checked = [_]Descriptor{ frames[0].descriptors[0], frames[1].descriptors[0], frames[1].descriptors[1] };
+    try expectEqual(608, checked[1].node);
+    try expectBootsAsDescribed(parsed, &checked, words, assembled.programs);
 }
 
 /// Boots node 708 with `words`, through the EVB002's USB port A, and

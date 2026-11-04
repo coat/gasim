@@ -9,6 +9,9 @@
 //! end of the path back, and every node on it is: those without a
 //! descriptor have B addressing IO and start at warm, as FRAME[ leaves
 //! them. A second frame then loads the root and jumps to where it starts.
+//! A stream of several frames has them one after another, each with its
+//! own path and descriptors: every frame but the last has to leave the
+//! root at ser-exec, where it reads the next.
 
 /// node 708's default path (df708, block 1612), the ENTIRE chip, as its
 /// corners
@@ -52,24 +55,52 @@ pub const Error = error{
     /// the root's ROM can store one part of RAM, in place
     RootTooManyLoads,
     RootNotInPlace,
+    /// a frame before the last leaves the root at warm, FRAME['s default,
+    /// where it no longer reads the stream, as the STREAMER would let it
+    RootStopsReading,
     NoSuchBin,
     StreamTooLong,
 };
 
-/// The most words `stream` can take for a path of `path_len` nodes, to size
-/// its buffer
-pub fn maxLen(path_len: usize, descriptors: []const Descriptor) usize {
-    // the frame's header and its first call, a pump and a default set up
-    // for each node, and the root's frame
-    var len = 4 + path_len * (5 + 3) + 3 + 64;
-    for (descriptors) |d| {
-        for (d.loads[0..d.load_count]) |load| len += 5 + load.len;
-        len += psiz(d);
+/// A frame of a stream, from one FRAME[ to its ]FRAME: the path it takes
+/// from the root, and the descriptors of the nodes it sets up
+pub const Frame = struct {
+    path: []const u16,
+    descriptors: []const Descriptor,
+};
+
+/// The most words `stream` can take for `frames`, to size its buffer
+pub fn maxLen(frames: []const Frame) usize {
+    var len: usize = 0;
+    for (frames) |f| {
+        // the frame's header and its first call, a pump and a default set
+        // up for each node, and the root's frame
+        len += 4 + f.path.len * (5 + 3) + 3 + 64;
+        for (f.descriptors) |d| {
+            for (d.loads[0..d.load_count]) |load| len += 5 + load.len;
+            len += psiz(d);
+        }
     }
     return len;
 }
 
-/// Builds a stream into `buffer` that sets up the nodes on `path` as
+/// Builds a stream into `buffer` of `frames` one after another, from the
+/// bins of `programs`, as the STREAMER does for root 708
+pub fn stream(
+    layout: Chip.Layout,
+    frames: []const Frame,
+    programs: []const Program,
+    buffer: []Word,
+) Error![]Word {
+    var len: usize = 0;
+    for (frames, 0..) |f, i| {
+        len += (try frame(layout, f.path, f.descriptors, programs, buffer[len..])).len;
+        if (i + 1 < frames.len and descriptorOf(f.descriptors, 708).p == warm) return error.RootStopsReading;
+    }
+    return buffer[0..len];
+}
+
+/// Builds a frame into `buffer` that sets up the nodes on `path` as
 /// `descriptors` say, from the bins of `programs`, as one FRAME[ and
 /// ]FRAME of the STREAMER do for root 708.
 ///
@@ -82,7 +113,7 @@ pub fn maxLen(path_len: usize, descriptors: []const Descriptor) usize {
 /// carry FRAME['s defaults, as those of gasim's arrayForth do: one without
 /// a B, as from `Descriptor.ofProgram`, leaves B as it is, where the
 /// STREAMER sets it to IO.
-pub fn stream(
+fn frame(
     layout: Chip.Layout,
     path: []const u16,
     descriptors: []const Descriptor,
@@ -168,8 +199,10 @@ pub fn stream(
 /// the descriptor of a node, or what FRAME[ leaves it with
 fn descriptorOf(descriptors: []const Descriptor, node: u16) Descriptor {
     for (descriptors) |d| if (d.node == node) return d;
-    return .{ .node = node, .b = Computer.io_address, .p = ga144.romWordOf(.basic, "warm").? };
+    return .{ .node = node, .b = Computer.io_address, .p = warm };
 }
+
+const warm = ga144.romWordOf(.basic, "warm").?;
 
 /// INITS: the words that load a node and set it up, LSIZ and PSIZ
 fn init(d: Descriptor) usize {
@@ -241,7 +274,7 @@ test draw {
     try expectError(error.PathTooLong, draw(&.{ 708, 717 }, buffer[0..5]));
 }
 
-test stream {
+test frame {
     const source =
         \\ node 608 : main dup ;
     ;
@@ -253,7 +286,7 @@ test stream {
 
     // as block 1584's stream to node 715, but to 608 along a path from 708
     // through its down port, and on to 508 through 608's up port
-    const words = try stream(.ga144, &.{ 708, 608, 508 }, &descriptors, assembled, &buffer);
+    const words = try frame(.ga144, &.{ 708, 608, 508 }, &descriptors, assembled, &buffer);
     const down: Word = port.multiport(.initOne(.down));
     const up: Word = port.multiport(.initOne(.up));
     const len = 1 + 5 + 3 + (5 + @as(Word, assembled[0].len) + 1);
@@ -272,11 +305,46 @@ test stream {
     // the frame is as long as its header says
     try expectEqual(end - 2, @as(usize, @intCast(len)));
 
-    try expectError(error.NotOnPath, stream(.ga144, &.{ 708, 708 - 1 }, &descriptors, assembled, &buffer));
-    try expectError(error.NotNeighbours, stream(.ga144, &.{ 708, 508 }, &descriptors, assembled, &buffer));
-    try expectError(error.RepeatedNode, stream(.ga144, &.{ 708, 608, 708 }, &descriptors, assembled, &buffer));
-    try expectError(error.UnknownRoot, stream(.ga144, &.{ 608, 708 }, &descriptors, assembled, &buffer));
-    try expectError(error.StreamTooLong, stream(.ga144, &.{ 708, 608 }, &descriptors, assembled, buffer[0..10]));
+    try expectError(error.NotOnPath, frame(.ga144, &.{ 708, 708 - 1 }, &descriptors, assembled, &buffer));
+    try expectError(error.NotNeighbours, frame(.ga144, &.{ 708, 508 }, &descriptors, assembled, &buffer));
+    try expectError(error.RepeatedNode, frame(.ga144, &.{ 708, 608, 708 }, &descriptors, assembled, &buffer));
+    try expectError(error.UnknownRoot, frame(.ga144, &.{ 608, 708 }, &descriptors, assembled, &buffer));
+    try expectError(error.StreamTooLong, frame(.ga144, &.{ 708, 608 }, &descriptors, assembled, buffer[0..10]));
+}
+
+test stream {
+    const source =
+        \\ node 608 : main dup ;
+    ;
+    var programs: [1]Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try assembler.assembleNodes(source, &programs, &diagnostic);
+    var buffer: [512]Word = undefined;
+    var single: [256]Word = undefined;
+
+    // a frame that leaves 708 reading the next, which boots 608 along
+    // another path
+    const reading: [1]Descriptor = .{.{ .node = 708, .p = boot.read_frame }};
+    const loading: [1]Descriptor = .{.ofProgram(assembled[0])};
+    const frames = [_]Frame{
+        .{ .path = &.{ 708, 707 }, .descriptors = &reading },
+        .{ .path = &.{ 708, 608, 508 }, .descriptors = &loading },
+    };
+    const words = try stream(.ga144, &frames, assembled, &buffer);
+    try expect(words.len <= maxLen(&frames));
+    // the frames one after another, each as it is alone
+    const first = try frame(.ga144, frames[0].path, frames[0].descriptors, assembled, &single);
+    try expectEqualSlices(Word, first, words[0..first.len]);
+    try expectEqualSlices(Word, &.{ 0x100ae, 0, 1, 0 }, first[first.len - 4 ..]);
+    try expectEqualSlices(Word, try frame(.ga144, frames[1].path, frames[1].descriptors, assembled, &single), words[first.len..]);
+    try expectEqual(0, (try stream(.ga144, &.{}, assembled, &buffer)).len);
+
+    // but for the last, a frame that leaves the root at warm would leave
+    // the rest unread
+    try expectError(error.RootStopsReading, stream(.ga144, &.{ frames[1], frames[1] }, assembled, &buffer));
+    try expectError(error.RootStopsReading, stream(.ga144, &.{ .{ .path = &.{ 708, 707 }, .descriptors = &.{} }, frames[0] }, assembled, &buffer));
+    try expectError(error.NotNeighbours, stream(.ga144, &.{ frames[0], .{ .path = &.{ 708, 508 }, .descriptors = &loading } }, assembled, &buffer));
+    try expectError(error.StreamTooLong, stream(.ga144, &frames, assembled, buffer[0 .. first.len + 3]));
 }
 
 test "the root's frame loads its RAM in place and jumps to where it starts" {
@@ -295,7 +363,7 @@ test "the root's frame loads its RAM in place and jumps to where it starts" {
     // of the descriptor do not reach
     descriptors[0].loads[0].len = 64;
     descriptors[0].a = 5;
-    var words = try stream(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer);
+    var words = try frame(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer);
     const entry = 0x10000 | assembled[0].entry.toWord();
     try expectEqualSlices(Word, &.{ entry, 0, 64 }, words[words.len - 67 ..][0..3]);
     try expectEqualSlices(Word, &assembled[0].ram, words[words.len - 64 ..]);
@@ -305,22 +373,22 @@ test "the root's frame loads its RAM in place and jumps to where it starts" {
 
     // a part of it, to the addresses it comes from
     descriptors[0].loads[0] = .{ .bin = 608, .source = 1, .destination = 1, .len = len - 1 };
-    words = try stream(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer);
+    words = try frame(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer);
     try expectEqualSlices(Word, &.{ entry, 1, len - 1 }, words[7..10]);
     try expectEqualSlices(Word, assembled[0].ram[1..len], words[10..]);
 
     // no load, to read another frame, as block 1897's 708 ser-exec /P
     descriptors[0].load_count = 0;
     descriptors[0].p = boot.read_frame;
-    words = try stream(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer);
+    words = try frame(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer);
     try expectEqualSlices(Word, &.{ 0x100ae, 0, 1, 0 }, words[7..]);
 
     descriptors[0].load_count = 2;
     descriptors[0].loads[1] = descriptors[0].loads[0];
-    try expectError(error.RootTooManyLoads, stream(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer));
+    try expectError(error.RootTooManyLoads, frame(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer));
     descriptors[0].load_count = 1;
     descriptors[0].loads[0].destination = 0;
-    try expectError(error.RootNotInPlace, stream(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer));
+    try expectError(error.RootNotInPlace, frame(.ga144, &.{ 708, 608 }, &descriptors, assembled, &buffer));
 }
 
 const assembler = @import("assembler.zig");
