@@ -1,5 +1,7 @@
 //! Boot streams laid out as arrayForth 3's STREAMER (blocks 1602 to 1618 of
-//! its disk) lays them out for node 708's ROM, rather than as `boot` does.
+//! its disk) lays them out for the ROM of node 708, which reads them from
+//! its pins as a UART sends them, or node 705, which reads them from an SPI
+//! flash (`Flash`), rather than as `boot` does.
 //!
 //! The STREAMER boots nodes along a path, a line of neighbours from the
 //! root, instead of a tree. A frame for the root's ROM writes the rest of
@@ -11,11 +13,27 @@
 //! them. A second frame then loads the root and jumps to where it starts.
 //! A stream of several frames has them one after another, each with its
 //! own path and descriptors: every frame but the last has to leave the
-//! root at ser-exec, where it reads the next.
+//! root reading the next, at ser-exec or spi-exec, or at code of its own.
+//! Between them can be frames for the root's ROM alone (/ROOT), and, in a
+//! stream for flash, FORWARD, which tells the root's code where the next
+//! frame starts in the flash.
 
-/// node 708's default path (df708, block 1612), the ENTIRE chip, as its
-/// corners
-pub const entire: [18]u16 = .{ 708, 717, 17, 0, 100, 116, 216, 200, 300, 316, 416, 400, 500, 516, 616, 600, 700, 707 };
+/// The roots the STREAMER builds streams for here (ROOTS, block 1602, also
+/// has 300 and 207): where the root's ROM reads a frame (asyORG, spiORG),
+/// and its default path, the ENTIRE chip, as its corners (df708, df705)
+pub const roots = [_]struct { node: u16, exec: u10, entire: []const u16 }{
+    .{ .node = 708, .exec = boot.read_frame, .entire = &.{ 708, 717, 17, 0, 100, 116, 216, 200, 300, 316, 416, 400, 500, 516, 616, 600, 700, 707 } },
+    .{ .node = 705, .exec = spi_exec, .entire = &.{ 705, 700, 0, 17, 117, 101, 201, 217, 317, 301, 401, 417, 517, 501, 601, 617, 717, 706 } },
+};
+
+/// where node 705's ROM reads a frame from the flash
+pub const spi_exec: u10 = 0xb6;
+
+/// the default path of the root `node`, if it is one
+pub fn entire(node: u16) ?[]const u16 {
+    for (roots) |r| if (r.node == node) return r.entire;
+    return null;
+}
 
 /// Draws a path into `buffer` as arrayForth 3's ORGN and TO do: from the
 /// first of `corners`, a line along a row or a column to each next one
@@ -43,7 +61,7 @@ pub fn draw(corners: []const u16, buffer: []u16) error{ NotInLine, PathTooLong }
 }
 
 pub const Error = error{
-    /// the path does not start at node 708, the only root built here
+    /// the path does not start at a root of `roots`
     UnknownRoot,
     PathTooShort,
     NoSuchNode,
@@ -60,6 +78,18 @@ pub const Error = error{
     RootStopsReading,
     NoSuchBin,
     StreamTooLong,
+    /// frames from different roots
+    MixedRoots,
+    /// FORWARD in a stream that is not for flash, from 705
+    ForwardNotFlash,
+    /// FORWARD after no frame whose root's frame loads x32 words or more,
+    /// the last of which it patches with the address
+    ForwardNoRoot,
+    /// FORWARD to past where 16 bits of an address shifted up 2 reach,
+    /// 16 KB of flash, which the STREAMER would cut short
+    ForwardTooFar,
+    /// /ROOT of words past the end of RAM
+    RootPastRam,
 };
 
 /// A frame of a stream, from one FRAME[ to its ]FRAME: the path it takes
@@ -69,40 +99,133 @@ pub const Frame = struct {
     descriptors: []const Descriptor,
 };
 
-/// The most words `stream` can take for `frames`, to size its buffer
-pub fn maxLen(frames: []const Frame) usize {
+/// /ROOT: a frame for the root's ROM alone, which loads `count` words, at
+/// least 1, from address `address` of a bin to the same addresses of the
+/// root's RAM, and jumps to `jump`, such as the speed-up of the disk's
+/// streams for flash (`0 0 3 1608 /ROOT`)
+pub const RootFrame = struct {
+    jump: u10,
+    address: u6 = 0,
+    count: u7 = 0,
+    bin: u32,
+};
+
+/// What a stream is made of, one after another
+pub const Part = union(enum) {
+    frame: Frame,
+    root: RootFrame,
+    /// FORWARD (block 1613), in a stream for flash: pads the stream with
+    /// zero words to a whole number of 8, so that the next part starts on
+    /// a byte of flash once packed, and patches words x23 and x31 of what
+    /// the last frame's root frame loads, with that byte's address shifted
+    /// up 2, as spi-boot takes it. Those are RAM x23 and x31 when the load
+    /// is all of RAM, as the disk's `1710 /RAM` is, whose fwd is there. A
+    /// root left at spi-exec would read the padding as a frame and stop,
+    /// so the root's own code, such as bin 1710's /frm, reads on from the
+    /// address.
+    forward,
+};
+
+/// The most words `stream` can take for `parts`, to size its buffer
+pub fn maxLen(parts: []const Part) usize {
     var len: usize = 0;
-    for (frames) |f| {
-        // the frame's header and its first call, a pump and a default set
-        // up for each node, and the root's frame
-        len += 4 + f.path.len * (5 + 3) + 3 + 64;
-        for (f.descriptors) |d| {
-            for (d.loads[0..d.load_count]) |load| len += 5 + load.len;
-            len += psiz(d);
-        }
-    }
+    for (parts) |part| switch (part) {
+        .frame => |f| {
+            // the frame's header and its first call, a pump and a default
+            // set up for each node, and the root's frame
+            len += 4 + f.path.len * (5 + 3) + 3 + 64;
+            for (f.descriptors) |d| {
+                for (d.loads[0..d.load_count]) |load| len += 5 + load.len;
+                len += psiz(d);
+            }
+        },
+        .root => len += 3 + 64,
+        .forward => len += 7,
+    };
     return len;
 }
 
-/// Builds a stream into `buffer` of `frames` one after another, from the
-/// bins of `programs`, as the STREAMER does for root 708
+/// Builds a stream into `buffer` of `parts` one after another, from the
+/// bins of `programs`, as the STREAMER does. A stream for root 705 then
+/// goes to flash through `pack`.
 pub fn stream(
     layout: Chip.Layout,
-    frames: []const Frame,
+    parts: []const Part,
     programs: []const Program,
     buffer: []Word,
 ) Error![]Word {
+    var root: ?u16 = null;
+    for (parts) |part| if (part == .frame) {
+        const node = if (part.frame.path.len > 0) part.frame.path[0] else return error.PathTooShort;
+        if (root != null and root != node) return error.MixedRoots;
+        root = node;
+    };
     var len: usize = 0;
-    for (frames, 0..) |f, i| {
-        len += (try frame(layout, f.path, f.descriptors, programs, buffer[len..])).len;
-        if (i + 1 < frames.len and descriptorOf(f.descriptors, 708).p == warm) return error.RootStopsReading;
+    // the root's RAM in the last frame's root frame, which FORWARD patches
+    var root_ram: ?struct { at: usize, address: u6, count: u7 } = null;
+    for (parts, 0..) |part, i| {
+        // the root, which goes on to `jump`, reads what follows
+        const goes_to: ?u10 = switch (part) {
+            .frame => |f| jump: {
+                const words = try frame(layout, f.path, f.descriptors, programs, buffer[len..]);
+                const load = rootLoad(descriptorOf(f.descriptors, f.path[0]));
+                root_ram = .{ .at = len + words.len - load.count, .address = load.address, .count = load.count };
+                len += words.len;
+                break :jump descriptorOf(f.descriptors, f.path[0]).p;
+            },
+            .root => |r| jump: {
+                var builder: Builder = .{ .buffer = buffer[len..] };
+                try builder.rootFrame(r, programs);
+                len += builder.len;
+                break :jump r.jump;
+            },
+            .forward => {
+                if (root) |r| if (r != 705) return error.ForwardNotFlash;
+                const ram = root_ram orelse return error.ForwardNoRoot;
+                if (ram.count <= 0x31) return error.ForwardNoRoot;
+                while (len % 8 != 0) : (len += 1) {
+                    if (len == buffer.len) return error.StreamTooLong;
+                    buffer[len] = 0;
+                }
+                // S-LNG D2/ 9 8 M*/ D2* D2*: the bytes so far, once packed,
+                // shifted up 2, of which the STREAMER keeps 16 bits
+                const address = len * 18 / 8 * 4;
+                if (address > 0xffff) return error.ForwardTooFar;
+                // PAT: words of the root frame's payload, from BORG
+                for ([_]usize{ 0x23, 0x31 }) |k| buffer[ram.at + k] = @intCast(address);
+                continue;
+            },
+        };
+        const later = for (parts[i + 1 ..]) |after| {
+            if (after != .forward) break true;
+        } else false;
+        if (later and goes_to == warm) return error.RootStopsReading;
     }
+    return buffer[0..len];
+}
+
+/// Packs a stream for flash as the STREAMER's PACK does (block 1614), into
+/// `buffer`: the words' 18 bits one after another, high bits first, in
+/// 16-bit cells of two bytes, high byte first, the last padded with zeros.
+/// What follows in the flash is the caller's: PACK leaves zeros, to the end
+/// of the 1024-byte block WRITE-FLASH writes, where `Flash` reads as erased,
+/// which 705's ROM takes no differently.
+pub fn pack(words: []const Word, buffer: []u8) error{StreamTooLong}![]u8 {
+    // PACK's "too long!", for a length of 16 bits
+    if (words.len + 7 > 0xffff) return error.StreamTooLong;
+    const len = (words.len * 18 + 15) / 16 * 2;
+    if (buffer.len < len) return error.StreamTooLong;
+    const bits = Flash.pack(words, buffer[0..len]);
+    // which pads with ones, as erased flash reads
+    const used = words.len * 18;
+    if (used % 8 != 0) bits[bits.len - 1] &= @as(u8, 0xff) << @intCast(8 - used % 8);
+    if (bits.len < len) buffer[len - 1] = 0;
     return buffer[0..len];
 }
 
 /// Builds a frame into `buffer` that sets up the nodes on `path` as
 /// `descriptors` say, from the bins of `programs`, as one FRAME[ and
-/// ]FRAME of the STREAMER do for root 708.
+/// ]FRAME of the STREAMER do, for the root that starts the path.
 ///
 /// As the STREAMER does, the root's descriptor only says what to load into
 /// its RAM, from one bin to the same addresses, and where it starts: its
@@ -121,7 +244,9 @@ fn frame(
     buffer: []Word,
 ) Error![]Word {
     if (path.len < 2) return error.PathTooShort;
-    if (path[0] != 708) return error.UnknownRoot;
+    const exec = for (roots) |r| {
+        if (r.node == path[0]) break r.exec;
+    } else return error.UnknownRoot;
     for (path, 0..) |node, i| {
         _ = layout.index(node) orelse return error.NoSuchNode;
         if (std.mem.indexOfScalar(u16, path[0..i], node) != null) return error.RepeatedNode;
@@ -139,9 +264,9 @@ fn frame(
     for (path[1..]) |node| len += init(descriptorOf(descriptors, node));
     if (len > std.math.maxInt(u18)) return error.StreamTooLong;
 
-    // asyORG: the root writes the frame to the path's next node, which
-    // executes from that port, and then reads another frame
-    try builder.word(boot.read_frame | jump);
+    // asyORG, spiORG: the root writes the frame to the path's next node,
+    // which executes from that port, and then reads another frame
+    try builder.word(jump | @as(Word, exec));
     try builder.word(try wall(layout, path[0], path[1]));
     try builder.word(@bitCast(@as(u18, @intCast(len))));
     try builder.word(call | try wall(layout, path[0], path[1]));
@@ -182,18 +307,21 @@ fn frame(
         try builder.word(jump | @as(Word, d.p));
     }
 
-    // serEND and +ROOT: the root's frame
+    // serEND, spiEND and +ROOT: the root's frame
     const root = descriptorOf(descriptors, path[0]);
     if (root.load_count > 1) return error.RootTooManyLoads;
-    const load: Descriptor.Load = if (root.load_count == 1) root.loads[0] else .{ .bin = 0, .len = 0 };
-    if (load.source != load.destination) return error.RootNotInPlace;
-    const count = @max(load.len, 1);
-    try builder.word(jump | @as(Word, root.p));
-    try builder.word(load.destination);
-    try builder.word(count);
-    const bin: ?[]const Word = if (boot.findBin(programs, load.bin)) |program| &program.ram else null;
-    for (@as(usize, load.destination)..@as(usize, load.destination) + count) |address| try builder.word(if (bin) |ram| ram[address] else 0);
+    if (root.load_count == 1 and root.loads[0].source != root.loads[0].destination) return error.RootNotInPlace;
+    const load = rootLoad(root);
+    try builder.rootFrame(.{ .jump = root.p, .address = load.address, .count = load.count, .bin = load.bin }, programs);
     return buffer[0..builder.len];
+}
+
+/// what +ROOT loads into the root's RAM: its one load, or else a word of
+/// bin 0 at address 0
+fn rootLoad(root: Descriptor) struct { bin: u32, address: u6, count: u7 } {
+    if (root.load_count == 0) return .{ .bin = 0, .address = 0, .count = 1 };
+    const load = root.loads[0];
+    return .{ .bin = load.bin, .address = @intCast(load.destination), .count = @max(load.len, 1) };
 }
 
 /// the descriptor of a node, or what FRAME[ leaves it with
@@ -259,15 +387,32 @@ const Builder = struct {
         try self.instruction(.{ .slot_0 = .@"@p", .slot_1 = opcode, .slot_2 = .@".", .slot_3 = nop });
         try self.word(value);
     }
+
+    /// /ROOT: a frame for the root's ROM that loads its RAM from a bin, or
+    /// with zeros when the bin, which can only be +ROOT's bin 0, was not
+    /// saved, and jumps
+    fn rootFrame(self: *Builder, r: RootFrame, programs: []const Program) Error!void {
+        const count = @max(r.count, 1);
+        if (@as(usize, r.address) + count > 64) return error.RootPastRam;
+        const bin: ?[]const Word = if (boot.findBin(programs, r.bin)) |program| &program.ram else null;
+        try self.word(jump | @as(Word, r.jump));
+        try self.word(r.address);
+        try self.word(count);
+        for (@as(usize, r.address)..@as(usize, r.address) + count) |address| try self.word(if (bin) |ram| ram[address] else 0);
+    }
 };
 
 test draw {
     var buffer: [Chip.Layout.chip_numbers]u16 = undefined;
     try expectEqualSlices(u16, &.{ 708, 608, 508, 408, 308, 208, 108, 107, 7, 8, 9 }, try draw(&.{ 708, 108, 107, 7, 9 }, &buffer));
-    // the default path covers the chip
-    const all = try draw(&entire, &buffer);
-    try expectEqual(144, all.len);
-    for (all, 0..) |node, i| try expect(std.mem.indexOfScalar(u16, all[0..i], node) == null);
+    // each root's default path covers the chip
+    for (roots) |r| {
+        const all = try draw(r.entire, &buffer);
+        try expectEqual(144, all.len);
+        try expectEqual(r.node, all[0]);
+        for (all, 0..) |node, i| try expect(std.mem.indexOfScalar(u16, all[0..i], node) == null);
+    }
+    try expectEqual(null, entire(300));
 
     try expectError(error.NotInLine, draw(&.{ 708, 607 }, &buffer));
     try expectError(error.NotInLine, draw(&.{ 708, 708 }, &buffer));
@@ -330,8 +475,9 @@ test stream {
         .{ .path = &.{ 708, 707 }, .descriptors = &reading },
         .{ .path = &.{ 708, 608, 508 }, .descriptors = &loading },
     };
-    const words = try stream(.ga144, &frames, assembled, &buffer);
-    try expect(words.len <= maxLen(&frames));
+    const parts = [_]Part{ .{ .frame = frames[0] }, .{ .frame = frames[1] } };
+    const words = try stream(.ga144, &parts, assembled, &buffer);
+    try expect(words.len <= maxLen(&parts));
     // the frames one after another, each as it is alone
     const first = try frame(.ga144, frames[0].path, frames[0].descriptors, assembled, &single);
     try expectEqualSlices(Word, first, words[0..first.len]);
@@ -341,10 +487,95 @@ test stream {
 
     // but for the last, a frame that leaves the root at warm would leave
     // the rest unread
-    try expectError(error.RootStopsReading, stream(.ga144, &.{ frames[1], frames[1] }, assembled, &buffer));
-    try expectError(error.RootStopsReading, stream(.ga144, &.{ .{ .path = &.{ 708, 707 }, .descriptors = &.{} }, frames[0] }, assembled, &buffer));
-    try expectError(error.NotNeighbours, stream(.ga144, &.{ frames[0], .{ .path = &.{ 708, 508 }, .descriptors = &loading } }, assembled, &buffer));
-    try expectError(error.StreamTooLong, stream(.ga144, &frames, assembled, buffer[0 .. first.len + 3]));
+    const warm_frame: Part = .{ .frame = .{ .path = &.{ 708, 707 }, .descriptors = &.{} } };
+    try expectError(error.RootStopsReading, stream(.ga144, &.{ parts[1], parts[1] }, assembled, &buffer));
+    try expectError(error.RootStopsReading, stream(.ga144, &.{ warm_frame, parts[0] }, assembled, &buffer));
+    try expectError(error.RootStopsReading, stream(.ga144, &.{ .{ .root = .{ .jump = warm, .bin = 608 } }, parts[0] }, assembled, &buffer));
+    try expectError(error.NotNeighbours, stream(.ga144, &.{ parts[0], .{ .frame = .{ .path = &.{ 708, 508 }, .descriptors = &loading } } }, assembled, &buffer));
+    try expectError(error.StreamTooLong, stream(.ga144, &parts, assembled, buffer[0 .. first.len + 3]));
+    try expectError(error.MixedRoots, stream(.ga144, &.{ parts[0], .{ .frame = .{ .path = &.{ 705, 706 }, .descriptors = &.{} } } }, assembled, &buffer));
+}
+
+test "a stream for flash, from root 705, with a frame of its own for the root and FORWARD" {
+    const source =
+        \\ node 606 : main dup ;
+        \\ node 705 : main over ;
+    ;
+    var programs: [2]Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try assembler.assembleNodes(source, &programs, &diagnostic);
+    var buffer: [512]Word = undefined;
+
+    // a speed-up for the root alone, which loads 3 words of 705's bin at 0
+    // and jumps to 0, as the disk's `0 0 3 1608 /ROOT`, and a frame whose
+    // root starts at spi-exec, which spiORG's header jumps to too: laid
+    // out, if not a stream 705 would read past FORWARD's padding
+    var root: Descriptor = .ofProgram(assembled[1]);
+    root.p = spi_exec;
+    // all of its RAM, as the disk's `705 +NODE 1710 /RAM`
+    root.loads[0].len = 64;
+    const descriptors = [_]Descriptor{ .ofProgram(assembled[0]), root };
+    var parts = [_]Part{
+        .{ .root = .{ .jump = 0, .count = 3, .bin = 705 } },
+        .{ .frame = .{ .path = &.{ 705, 706, 606 }, .descriptors = &descriptors } },
+        .forward,
+        .{ .frame = .{ .path = &.{ 705, 704 }, .descriptors = &.{} } },
+    };
+    const words = try stream(.ga144, &parts, assembled, &buffer);
+    try expect(words.len <= maxLen(&parts));
+    try expectEqualSlices(Word, &.{ 0x10000, 0, 3 }, words[0..3]);
+    try expectEqualSlices(Word, assembled[1].ram[0..3], words[3..6]);
+    // east of an odd column is left
+    const left: Word = port.multiport(.initOne(.left));
+    try expectEqualSlices(Word, &.{ 0x100b6, left }, words[6..8]);
+    // the root's frame loads all of its RAM, in which FORWARD patched x23
+    // and x31 with where the next frame starts: after the padding, a whole
+    // number of 8 words, as bytes once packed, shifted up 2
+    const next = std.mem.lastIndexOfScalar(Word, words, 0x100b6).?;
+    try expectEqual(0, next % 8);
+    const header = std.mem.lastIndexOf(Word, words[0..next], &.{ 0x100b6, 0, 64 }).?;
+    const ram = words[header + 3 ..][0..64];
+    try expectEqual(@as(Word, @intCast(next * 18 / 8 * 4)), ram[0x23]);
+    try expectEqual(ram[0x23], ram[0x31]);
+    try expectEqualSlices(Word, assembled[1].ram[0..0x23], ram[0..0x23]);
+    for (words[header + 3 + 64 .. next]) |w| try expectEqual(0, w);
+
+    // FORWARD needs a frame for flash before it, whose root's frame loads
+    // its RAM through x31
+    try expectError(error.ForwardNoRoot, stream(.ga144, &.{ parts[0], .forward, parts[1] }, assembled, &buffer));
+    root.loads[0].len = 0x31;
+    const short = [_]Descriptor{ descriptors[0], root };
+    try expectError(error.ForwardNoRoot, stream(.ga144, &.{ .{ .frame = .{ .path = &.{ 705, 706, 606 }, .descriptors = &short } }, .forward }, assembled, &buffer));
+    // with no frame at all, from either root
+    try expectError(error.ForwardNoRoot, stream(.ga144, &.{.forward}, assembled, &buffer));
+    // as PAT does, the words of the root frame's payload, which for a load
+    // from 2 are RAM x25 and x33
+    root.loads[0] = .{ .bin = 705, .source = 2, .destination = 2, .len = 62 };
+    const from_2 = [_]Descriptor{ descriptors[0], root };
+    const patched = try stream(.ga144, &.{ .{ .frame = .{ .path = &.{ 705, 706, 606 }, .descriptors = &from_2 } }, .forward }, assembled, &buffer);
+    const payload = std.mem.lastIndexOf(Word, patched, &.{ 0x100b6, 2, 62 }).? + 3;
+    try expectEqual(@as(Word, @intCast(patched.len * 18 / 8 * 4)), patched[payload + 0x23]);
+    try expectEqual(assembled[1].ram[0x23], patched[payload + 0x23 - 2]);
+    try expectError(error.ForwardNotFlash, stream(.ga144, &.{ .{ .frame = .{ .path = &.{ 708, 707 }, .descriptors = &.{.{ .node = 708, .p = boot.read_frame }} } }, .forward }, assembled, &buffer));
+    try expectError(error.RootPastRam, stream(.ga144, &.{.{ .root = .{ .jump = 0, .address = 62, .count = 3, .bin = 705 } }}, assembled, &buffer));
+    // and to reach the next frame with 16 bits
+    var far: [8 * 1024]Word = undefined;
+    parts[0] = .{ .root = .{ .jump = spi_exec, .count = 64, .bin = 705 } };
+    var many: [120]Part = undefined;
+    for (&many) |*part| part.* = parts[0];
+    many[many.len - 2] = parts[1];
+    many[many.len - 1] = .forward;
+    try expectError(error.ForwardTooFar, stream(.ga144, &many, assembled, &far));
+}
+
+test pack {
+    var buffer: [16]u8 = undefined;
+    // 18 bits of 1, then 18 of 0: 36 bits, in 3 cells of 16, padded with 0
+    try expectEqualSlices(u8, &.{ 0xff, 0xff, 0xc0, 0x00, 0x00, 0x00 }, try pack(&.{ -1, 0 }, &buffer));
+    // 8 words fill 9 cells
+    var nine: [18]u8 = undefined;
+    try expectEqual(18, (try pack(&@as([8]Word, @splat(-1)), &nine)).len);
+    try expectError(error.StreamTooLong, pack(&.{ -1, 0 }, buffer[0..5]));
 }
 
 test "the root's frame loads its RAM in place and jumps to where it starts" {
@@ -404,6 +635,7 @@ const Word = f18.Word;
 const Opcode = @import("opcodes.zig").Opcode;
 const port = @import("port.zig");
 const Direction = port.Direction;
+const Flash = @import("Flash.zig");
 
 const std = @import("std");
 const expect = std.testing.expect;
