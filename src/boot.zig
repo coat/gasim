@@ -595,27 +595,34 @@ test "arrayForth 3's applications boot through the EVB002's USB port A as their 
     const disk = try Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(disk);
 
-    // each loaded as arrayForth 3 loads it into a frame of a stream, its
-    // code and then its descriptors, with the path its STREAMER takes.
-    // Only the application's own descriptors: the blocks that boot them
-    // describe 708 too, and others, such as 108 in block 1897, which here
-    // start at warm.
-    const applications = [_]struct { []const u8, []const u16 }{
-        // the SRAM cluster, along sr708 (block 1897)
-        .{ "2331 LOAD  2332 LOAD", &.{ 708, 108, 107, 7, 9 } },
-        // the Ethernet NIC with its clock monitor, after the configuration
-        // that says where its modules are, along s708 (block 2333), the
-        // chip but for the SRAM cluster's nodes, the path block 1665 boots
-        // it on with pF/144. Block 1583 adds it to pF/144 with the crystal
-        // oscillator too (?CLK 2), whose descriptors load a bin 516 that
-        // nothing builds.
-        .{
-            "1562 LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD  2002 LOAD",
-            &.{ 708, 700, 0, 6, 106, 101, 201, 208, 108, 109, 209, 210, 10, 17, 117, 111, 211, 217, 317, 301, 401, 417, 517, 501, 601, 617, 717, 709 },
-        },
+    // the stream arrayForth 3 builds to install the SRAM cluster, block
+    // 1897 up to its ]STREAM, after the configuration that says where its
+    // modules are and the bins it loads, the cluster's and 108's (block
+    // 2298)
+    var sram: Io.Writer.Allocating = .init(gpa);
+    defer sram.deinit();
+    try sram.writer.writeAll("1562 LOAD  2331 LOAD  2298 LOAD\n");
+    const install = disk[1897 * 1024 ..][0..1024];
+    for (0..16) |line| try sram.writer.print("{s}\n", .{install[line * 64 ..][0..64]});
+    const install_end = std.mem.indexOf(u8, sram.written(), "]STREAM").? + "]STREAM".len;
+
+    const applications = [_][]const u8{
+        sram.written()[0..install_end],
+        // the Ethernet NIC with its clock monitor, as block 1665 adds it to
+        // pF/144's stream, without the polyFORTH VM, which gasim's
+        // arrayForth cannot describe as its ?RAM is the IDE's. Block 1583
+        // adds it to pF/144 with the crystal oscillator too (?CLK 2), whose
+        // descriptors load a bin 516 that nothing builds.
+        \\1562 LOAD  STREAMER LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD
+        \\708 STREAM[
+        \\   FRAME[  ( Residual) SRAM 2 + LOAD  ' s708 COURSE
+        \\      ( Async bootable)  708 +NODE xAA /P
+        \\      ( Clock/Ether)  ENIC 1+ LOAD
+        \\   ]FRAME
+        \\]STREAM
+        ,
     };
-    for (applications) |application| {
-        const source, const corners = application;
+    for (applications) |source| {
         var programs: [Chip.Layout.chip_numbers]Program = undefined;
         var descriptor_buffer: [Chip.Layout.chip_numbers]Descriptor = undefined;
         var diagnostic: assembler.Diagnostic = .{};
@@ -625,25 +632,34 @@ test "arrayForth 3's applications boot through the EVB002's USB port A as their 
         };
         try expect(assembled.descriptors.len > 0);
 
-        // as gasim lays out the stream, and as the STREAMER does
+        // as gasim lays out the stream, and as the STREAMER does along the
+        // frame's path
         const descriptors = assembled.descriptors;
         const ours = try gpa.alloc(Word, maxLen(.ga144, descriptors) + 3 * (descriptors.len + 2));
         defer gpa.free(ours);
-        var path_buffer: [Chip.Layout.chip_numbers]u16 = undefined;
-        const path = try streamer.draw(corners, &path_buffer);
+        const path = assembled.stream.?.path();
         const theirs = try gpa.alloc(Word, streamer.maxLen(path.len, descriptors));
         defer gpa.free(theirs);
         const streams = [_]struct { []const u8, []const Word }{
             .{ "gasim's", try asyncStream(gpa, .ga144, 708, descriptors, assembled.programs, ours) },
             .{ "the STREAMER's", try streamer.stream(.ga144, path, descriptors, assembled.programs, theirs) },
         };
+        // but for 708, which reads frames at ser-exec and starts at cold
+        // from reset, so that being at either says nothing of its boot
+        var checked_buffer: [Chip.Layout.chip_numbers]Descriptor = undefined;
+        var checked_len: usize = 0;
+        for (descriptors) |d| if (d.node != 708) {
+            checked_buffer[checked_len] = d;
+            checked_len += 1;
+        };
+        const checked = checked_buffer[0..checked_len];
         for (streams) |s| {
             const name, const words = s;
             // as many at a time as there can be breakpoints, which stop
             // each node where it starts
             var first: usize = 0;
-            while (first < descriptors.len) : (first += Chip.max_breakpoints) {
-                const batch = descriptors[first..@min(first + Chip.max_breakpoints, descriptors.len)];
+            while (first < checked.len) : (first += Chip.max_breakpoints) {
+                const batch = checked[first..@min(first + Chip.max_breakpoints, checked.len)];
                 expectBootsAsDescribed(parsed, batch, words, assembled.programs) catch |err| {
                     std.debug.print("{s} with {s} stream\n", .{ source, name });
                     return err;
