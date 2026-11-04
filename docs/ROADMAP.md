@@ -207,10 +207,13 @@ done.
      `]FRAME`, `]STREAM`, `ORGN`, `TO`, `COURSE`, `'`), with `STREAMER
      LOAD` loading nothing, so that block 1897 builds its stream as it is,
      up to its `]STREAM`, and `--boot` with `--uart` lays out a stream
-     that has them as the STREAMER does. One frame per stream.
+     that has them as the STREAMER does.
+   - ✓ Streams of several frames, up to 8, each along its own `COURSE`
+     with descriptors of its own, the root reading the next at `ser-exec`,
+     and `ENTIRE` for the default path. The disk's (blocks 1668 and 1671)
+     are for root 705, so the tests are gasim's own.
    - The STREAMER's other roots: 300 (synchronous), 705 (SPI, packed for
-     flash) and 207 (pF/144's snorkel); streams of several frames; and its
-     two-chip paths.
+     flash) and 207 (pF/144's snorkel); and its two-chip paths.
    - A stream captured once from arrayForth 3 under Wine and kept beside
      the ROM, as it is GreenArrays', would check the port byte for byte.
      Capturing needs RTS on a pty, which a preload library gives (branch
