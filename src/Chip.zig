@@ -876,6 +876,22 @@ pub fn attachUartPins(self: *Chip, uart: *Uart, rx: ?PinRef, tx: ?PinRef) error{
     }
 }
 
+/// Puts an SPI flash on four pins, any of which can be left unconnected: it
+/// listens to the clock, chip select and data out, and drives data in
+pub fn attachFlashPins(self: *Chip, flash: *Flash, clock: ?PinRef, select: ?PinRef, data_out: ?PinRef, data_in: ?PinRef) error{ NoSuchPin, TwoDevices }!void {
+    var found: [4]?*gpio.Pin = undefined;
+    for ([_]?PinRef{ clock, select, data_out, data_in }, &found) |ref, *pin| pin.* = if (ref) |r| try self.pinOf(r) else null;
+    const wiring = self.wiring;
+    for (found, 0..) |p, k| if (p) |pin| {
+        if (wiring.nets[pin.net].device != null) return error.TwoDevices;
+        for (found[0..k]) |q| if (q) |other| if (other.net == pin.net) return error.TwoDevices;
+    };
+    for (found, [_]gpio.Device{ flash.clockDevice(), flash.selectDevice(), flash.dataOutDevice(), flash.dataInDevice() }) |p, device| if (p) |pin| {
+        wiring.nets[pin.net].device = device;
+        wiring.hook(pin.node);
+    };
+}
+
 /// Links two SERDES nodes, as the EVB002 links host node 701 to target
 /// node 001: each node's up port, which faces off its chip, sends to the
 /// other's. Link nodes before stepping the chip.
@@ -2695,6 +2711,7 @@ const Spec = @import("Spec.zig");
 const testRom = @import("rom.zig").testRom;
 const Console = @import("Console.zig");
 const Uart = @import("Uart.zig");
+const Flash = @import("Flash.zig");
 const f18 = @import("f18.zig");
 const Address = f18.Address;
 const Computer = f18.Computer;

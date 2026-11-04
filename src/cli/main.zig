@@ -46,6 +46,10 @@ const usage =
     \\  --jumper <name>=on|off     set one of the board's jumpers otherwise
     \\                             than as shipped, such as J26=off. Can be
     \\                             given more than once.
+    \\  --flash <file>             with run, the contents of the board's SPI
+    \\                             flash, up to 16 MB, erased past the end.
+    \\                             The EVB002's host 705 boots from it with
+    \\                             --jumper J26=off (NO BOOT), and the ROM.
     \\  --chip <file>              the chip, described in a chip file, such as
     \\                             src/chips/ga144.zon (default the GA144)
     \\  --layout <rows>x<columns>  a chip of that size, of basic nodes with no
@@ -133,6 +137,7 @@ pub fn main(init: std.process.Init) !void {
     var pty_len: usize = 0;
     var settings: [32]gasim.Board.Setting = undefined;
     var settings_len: usize = 0;
+    var flash_path: ?[]const u8 = null;
     var layout_given: ?Chip.Layout = null;
     var console_node: u16 = 0;
     var console_port: Direction = .up;
@@ -155,7 +160,7 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = if (named(args)) 2 else 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--board") or std.mem.eql(u8, arg, "--usb") or std.mem.eql(u8, arg, "--pty") or std.mem.eql(u8, arg, "--jumper") or std.mem.eql(u8, arg, "--chip") or std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load") or std.mem.eql(u8, arg, "--uart")) {
+        if (std.mem.eql(u8, arg, "--board") or std.mem.eql(u8, arg, "--usb") or std.mem.eql(u8, arg, "--pty") or std.mem.eql(u8, arg, "--jumper") or std.mem.eql(u8, arg, "--flash") or std.mem.eql(u8, arg, "--chip") or std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load") or std.mem.eql(u8, arg, "--uart")) {
             i += 1;
             if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
             const value = args[i];
@@ -223,6 +228,8 @@ pub fn main(init: std.process.Init) !void {
                 if (settings_len == settings.len) fatal("too many --jumper settings, at most {d}", .{settings.len});
                 settings[settings_len] = .{ .name = value[0..equals], .on = on };
                 settings_len += 1;
+            } else if (std.mem.eql(u8, arg, "--flash")) {
+                flash_path = value;
             } else if (std.mem.eql(u8, arg, "--layout")) {
                 layout_given = Chip.Layout.parse(value) catch fatal("invalid layout '{s}', expected for example 8x18", .{value});
             } else {
@@ -254,7 +261,7 @@ pub fn main(init: std.process.Init) !void {
         if (chip_path != null or layout_given != null) fatal("--board gives the chip, so --chip and --layout cannot", .{});
         if (uart_node != null) fatal("--board puts its serial port on stdin and stdout, so --uart cannot", .{});
         if (command == .blocks) fatal("blocks reads a file of blocks, so it has no board for --board", .{});
-    } else if (usb != null or settings_len > 0 or pty_len > 0) fatal("--usb, --pty and --jumper need --board", .{});
+    } else if (usb != null or settings_len > 0 or pty_len > 0 or flash_path != null) fatal("--usb, --pty, --jumper and --flash need --board", .{});
     const board: ?gasim.Board = if (board_path) |p| readBoard(io, arena, init.gpa, p) else null;
     if (board) |b| {
         // the terminal user interface and arrayForth 3 know one chip
@@ -267,7 +274,15 @@ pub fn main(init: std.process.Init) !void {
         // relative to the board file, unless absolute
         chip_path = if (std.mem.eql(u8, b.chip, "ga144")) null else try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(board_path.?) orelse ".", b.chip });
         if (b.serial.len > 0 and console_given) fatal("--board puts its serial port on stdin and stdout, so there is no console for --console", .{});
+        if (flash_path != null and b.flash == null) fatal("--flash: {s} has no SPI flash", .{b.name});
+        // the flash is not in the chip's snapshots, which the interface
+        // restarts from
+        if (flash_path != null and command != .run) fatal("--flash needs run", .{});
     }
+    var flash: gasim.Flash = .init(if (flash_path) |p| Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(gasim.Flash.max_len + 1)) catch |err| switch (err) {
+        error.StreamTooLong => fatal("--flash {s} is larger than a flash's 16 MB", .{p}),
+        else => fatal("--flash {s}: {t}", .{ p, err }),
+    } else &.{});
     // the ports on ptys, and the one on stdin and stdout, if any
     const ptys = pty_ports[0..pty_len];
     for (ptys, 0..) |p, k| {
@@ -368,6 +383,7 @@ pub fn main(init: std.process.Init) !void {
     if (roms) |r| chip.loadRom(r) catch unreachable;
     if (uart_node != null and path == null and roms == null)
         fatal("--uart without a program needs a ROM, for node {f} to boot from its input (see --rom)", .{Chip.nodeName(uart_node.?)});
+    if (flash_path != null and roms == null) std.log.warn("--flash without a ROM: no node boots from the flash (see --rom)", .{});
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     // each frame of a stream has descriptors of its own
@@ -593,6 +609,8 @@ pub fn main(init: std.process.Init) !void {
             .node => |node| fatal("{s}: {f}: {t}", .{ board_path.?, Chip.nodeName(node), err }),
             .link => |link| fatal("{s}: SERDES {f} to {f}: {t}", .{ board_path.?, Chip.nodeName(link[0]), Chip.nodeName(link[1]), err }),
         };
+        if (flash_path != null) b.attachFlash(&chip, &flash, settings[0..settings_len]) catch |err|
+            fatal("{s}: the SPI flash's pins: {t}", .{ board_path.?, err });
     }
     if (uart_node) |node| {
         uart.input = .{ .io = io, .queue = &input };
