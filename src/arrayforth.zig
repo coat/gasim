@@ -250,12 +250,13 @@ pub const Session = struct {
     }
 
     /// Fails, as the end of a program does, if a definition was left
-    /// without its ;
+    /// without its ;, or a boot descriptor loads a bin that was never saved
     pub fn finish(self: *Session) Error!void {
         self.interpreter.checkClosed() catch |err| {
             self.recover();
             return err;
         };
+        try self.interpreter.checkLoads();
     }
 
     /// Empties the stack and goes back to outside ASM[, dropping the
@@ -350,6 +351,7 @@ pub fn assembleScript(source: []const u8, blocks: ?[]const u8, programs: []Progr
     var interpreter: Interpreter = .{ .diagnostic = diagnostic, .programs = programs, .descriptors = descriptors, .blocks = blocks };
     interpreter.frames[0] = .{ .tokens = .{ .source = source } };
     try interpreter.run();
+    try interpreter.checkLoads();
     return interpreter.assembled();
 }
 
@@ -369,6 +371,7 @@ pub fn assembleBlocks(blocks: []const u8, loads: []const u32, programs: []Progra
         interpreter.assembling = false;
         try interpreter.run();
     }
+    try interpreter.checkLoads();
     return interpreter.assembled();
 }
 
@@ -530,6 +533,13 @@ const Bin = struct {
     }
 };
 
+/// a load of a bin that was not saved when a descriptor gave it, and where
+const UnsavedLoad = struct {
+    descriptor: usize,
+    bin: u32,
+    place: Diagnostic,
+};
+
 /// a bin saved with >BIN, whose labels `its` can find: the ROM labels
 /// arrayForth 3 gives its node, if it kept them, followed by its own
 const SavedBin = struct {
@@ -668,6 +678,10 @@ const Interpreter = struct {
     loop_len: u8 = 0,
     saved: [576]SavedBin = undefined,
     saved_count: u16 = 0,
+    /// where descriptors loaded bins not saved then, the first few, to say
+    /// where one is that never is
+    unsaved_loads: [16]UnsavedLoad = undefined,
+    unsaved_count: u8 = 0,
     label_pool: [1024]Label = undefined,
     pool_len: u16 = 0,
 
@@ -745,6 +759,22 @@ const Interpreter = struct {
             self.diagnostic.* = compiling.directive;
             return error.UnclosedDefinition;
         }
+    }
+
+    /// fails, at the end of a program, if a boot descriptor loads a bin
+    /// that was never saved, at where it was loaded if that is known
+    fn checkLoads(self: *Interpreter) Error!void {
+        for (self.descriptors[0..self.descriptor_count], 0..) |d, i| for (d.loads[0..d.load_count]) |part| {
+            for (self.saved[0..self.saved_count]) |saved| {
+                if (saved.number == part.bin) break;
+            } else {
+                self.diagnostic.* = .{};
+                for (self.unsaved_loads[0..self.unsaved_count]) |unsaved| if (unsaved.descriptor == i and unsaved.bin == part.bin) {
+                    self.diagnostic.* = unsaved.place;
+                };
+                return error.NoSuchBin;
+            }
+        };
     }
 
     /// fails if the bin has code or labels that were not saved
@@ -2146,14 +2176,21 @@ const Interpreter = struct {
         return &self.descriptors[self.boot_node orelse return error.NoBootNode];
     }
 
-    /// Adds a load of `len` words from address `source` of a saved bin into
-    /// RAM at `destination`. A load of all of RAM replaces any before it.
+    /// Adds a load of `len` words from address `source` of a bin into RAM
+    /// at `destination`. A load of all of RAM replaces any before it. The
+    /// bin need not be saved yet, as arrayForth 3 only reads it when it
+    /// builds the stream, so a load that a later one replaces, such as
+    /// `216 +ND  116 /RAM` in the NIC's descriptors, can name any bin.
     fn loadRam(self: *Interpreter, source: i32, destination: i32, len: i32, bin: i32) Error!void {
         const d = try self.bootDescriptor();
         if (!inRam(source, len) or !inRam(destination, len)) return error.NumberOutOfRange;
+        if (bin < 0) return error.NoSuchBin;
         for (self.saved[0..self.saved_count]) |saved| {
             if (saved.number == bin) break;
-        } else return error.NoSuchBin;
+        } else if (self.unsaved_count < self.unsaved_loads.len) {
+            self.unsaved_loads[self.unsaved_count] = .{ .descriptor = self.boot_node.?, .bin = @intCast(bin), .place = self.diagnostic.* };
+            self.unsaved_count += 1;
+        }
         if (len == 64) d.load_count = 0;
         if (d.load_count == d.loads.len) return error.TooManyLoads;
         d.loads[d.load_count] = .{ .bin = @intCast(bin), .source = @intCast(source), .destination = @intCast(destination), .len = @intCast(len) };
@@ -3254,6 +3291,13 @@ test "boot descriptor errors" {
     var diagnostic: Diagnostic = .{};
     try expectError(error.NoBootNode, assembleNodes("1 /P", &programs, &descriptors, &diagnostic));
     try expectError(error.NoSuchBin, assembleNodes("1 +NODE 1 /RAM", &programs, &descriptors, &diagnostic));
+    // at the end, pointing at the load
+    try expectEqualStrings("/RAM", diagnostic.token);
+    // a load of a bin never saved is only an error if no load replaces it,
+    // as in the NIC's `216 +ND  116 /RAM`
+    const replaced = try assembleNodes("1 +NODE 2 /RAM  ASM[ # 1 NODE dup >BIN ]ASM  1 /RAM", &programs, &descriptors, &diagnostic);
+    try expectEqual(1, replaced.descriptors[0].load_count);
+    try expectEqual(1, replaced.descriptors[0].loads[0].bin);
     try expectError(error.TooManyDescriptors, assembleNodes("1 +NODE 2 +NODE", &programs, &descriptors, &diagnostic));
     try expectError(error.TooManyLoads, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  0 1 1 /PART 0 1 1 /PART 0 1 1 /PART 0 1 1 /PART", &programs, &descriptors, &diagnostic));
     try expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  60 5 1 /PART", &programs, &descriptors, &diagnostic));
@@ -3392,6 +3436,11 @@ test "host definitions" {
     try session.interpret(": open DUP");
     try expectError(error.UnclosedDefinition, session.finish());
     try expectEqual(defined, session.interpreter.defined_len);
+    try session.finish();
+    // and a load of a bin never saved, until it is
+    try session.interpret("5 +NODE 5 /RAM");
+    try expectError(error.NoSuchBin, session.finish());
+    try session.interpret("ASM[ # 5 NODE dup >BIN ]ASM");
     try session.finish();
 
     // a definition cannot forget the names before it

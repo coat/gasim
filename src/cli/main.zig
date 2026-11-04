@@ -400,6 +400,7 @@ pub fn main(init: std.process.Init) !void {
         switch (err) {
             error.TooManyNodes => fatal("{f}: more nodes than {f} has at '{s}'", .{ where, layout, diagnostic.token }),
             error.NoSuchBlock => if (diagnostic.line == 0) fatal("{s}: has fewer blocks than --load needs", .{source_path}),
+            error.NoSuchBin => if (diagnostic.line == 0) fatal("{s}: a boot descriptor loads a bin that was never saved", .{source_path}),
             else => {},
         }
         fatal("{f}: {t} at '{s}'", .{ where, err, diagnostic.token });
