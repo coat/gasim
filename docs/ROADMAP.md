@@ -193,12 +193,22 @@ done.
    - ✓ Code from the host chip running on the target's SERDES boot ROM.
    - SPI boot through 705's ROM, and the host booting the target over
      SERDES and 300↔300 with GreenArrays' own code.
-5. **arrayForth 3 under Wine, driving gasim.** The board's USB ports A, B and
-   C as ptys, mapped to Wine COM ports, so that the unmodified
-   `sF5b2-af3.exe` boots the chip, runs its IDE and burns flash. Risk:
-   arrayForth 3 resets the chip with RTS on port A, which ptys don't carry,
-   so that needs a workaround (tty0tty, a reset command, or a break). This
-   proves the board model against the real tools.
+5. **arrayForth 3's streams, from files.** Its applications booting 708
+   through the EVB002's USB port A, each node checked as it starts against
+   its descriptor, with no ptys, RTS or Wine in gasim.
+   - ✓ With the streams gasim builds from their descriptors (`--boot`):
+     the SRAM cluster and the NIC, in `zig build test` with the disk.
+   - With the streams arrayForth 3 itself builds. Its STREAMER (block
+     1602, which loads 1603–1618) lays out frames along its own path from
+     708 (`df708`), unlike gasim's, so either gasim builds them as it does,
+     or they are captured once from arrayForth 3 under Wine and kept beside
+     the ROM, as they are GreenArrays', and booted from a file; a capture
+     also checks a STREAMER in gasim byte for byte. Capturing needs RTS on
+     a pty, which a preload library gives (branch `pty-reset`, #55,
+     parked).
+   - Driving gasim from the unmodified `sF5b2-af3.exe` under Wine, its IDE
+     and flash burning, needs that library too, and would come back as a
+     bridge program of its own, not in gasim.
 6. **pF/144 in the simulator.** Its nucleus in the simulated SRAM, booted by
    the streamer in block 1665 (run by gasim's arrayForth, or captured from
    step 5), with `pFDISK.blk` served as the serial disk its terminal emulator

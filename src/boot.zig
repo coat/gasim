@@ -275,7 +275,7 @@ pub fn maxLen(layout: Chip.Layout, descriptors: []const Descriptor) usize {
     var len = layout.count() * (2 + 2 * 5);
     for (descriptors) |descriptor| {
         for (descriptor.loads[0..descriptor.load_count]) |load| len += 5 + load.len;
-        len += 4 + 2 + 2 + 2 * (descriptor.stack_len + descriptor.return_stack_len);
+        len += 4 + 2 + 2 + 2 * (@as(usize, descriptor.stack_len) + descriptor.return_stack_len);
     }
     return len;
 }
@@ -588,6 +588,135 @@ test "node 708 takes another stream once it has booted only its neighbours" {
     try expectEqual(5, chip.node(708).?.data_stack.t);
 }
 
+test "arrayForth 3's applications boot through the EVB002's USB port A as their descriptors say" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    const gpa = std.testing.allocator;
+    const disk = try Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024));
+    defer gpa.free(disk);
+
+    // each loaded as arrayForth 3 loads it into a frame of a stream, its
+    // code and then its descriptors
+    const applications = [_][]const u8{
+        // the SRAM cluster
+        "2331 LOAD  2332 LOAD",
+        // the Ethernet NIC with its clock monitor, after the configuration
+        // that says where its modules are. Block 1583 adds it to pF/144
+        // with the crystal oscillator too (?CLK 2), whose descriptors load
+        // a bin 516 that nothing builds.
+        "1562 LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD  2002 LOAD",
+    };
+    for (applications) |source| {
+        var programs: [Chip.Layout.chip_numbers]Program = undefined;
+        var descriptors: [Chip.Layout.chip_numbers]Descriptor = undefined;
+        var diagnostic: assembler.Diagnostic = .{};
+        const assembled = arrayforth.assembleScript(source, disk, &programs, &descriptors, &diagnostic) catch |err| {
+            std.debug.print("{s}: {t} at block {d} line {d} '{s}'\n", .{ source, err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
+            return err;
+        };
+        try expect(assembled.descriptors.len > 0);
+        // as many at a time as there can be breakpoints, which stop each
+        // node where it starts
+        var first: usize = 0;
+        while (first < assembled.descriptors.len) : (first += Chip.max_breakpoints) {
+            const batch = assembled.descriptors[first..@min(first + Chip.max_breakpoints, assembled.descriptors.len)];
+            expectBootsAsDescribed(parsed, batch, assembled.descriptors, assembled.programs) catch |err| {
+                std.debug.print("{s}\n", .{source});
+                return err;
+            };
+        }
+    }
+}
+
+/// Boots node 708 with a stream of `descriptors`, through the EVB002's USB
+/// port A, and checks that each node of `checked` starts as its descriptor
+/// says
+fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, descriptors: []const Descriptor, programs: []const Program) !void {
+    const gpa = std.testing.allocator;
+    var chip: Chip = try .initChips(gpa, .ga144, Board.evb002.chips);
+    defer chip.deinit(gpa);
+    try chip.loadRom(roms);
+
+    const buffer = try gpa.alloc(Word, maxLen(.ga144, descriptors) + 3 * (descriptors.len + 2));
+    defer gpa.free(buffer);
+    const words = try asyncStream(gpa, .ga144, 708, descriptors, programs, buffer);
+    const bytes = try gpa.alloc(u8, 3 * words.len);
+    defer gpa.free(bytes);
+
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const port_a = Board.evb002.serialPort("A").?;
+    var uart: Uart = .init(port_a.baud, &discarding.writer);
+    uart.preload = asyncBytes(words, bytes);
+    var fault: Board.Fault = .none;
+    try Board.evb002.apply(&chip, &.{.{ .uart = &uart, .port = port_a }}, &.{}, &fault);
+    for (checked) |d| try chip.breakpoints.insert(.init(chip.layout.index(d.node).?, @truncate(d.p)));
+
+    // a node that starts at a port, as the NIC's 616 does at its left
+    // one, may have executed from that port while it booted, so a node has
+    // started once it is at P, set up as its descriptor says. The run is
+    // bounded, as one that never is would loop through P, or never get
+    // there, while the nodes that have started run on.
+    const differences = try gpa.alloc(?[]const u8, checked.len);
+    defer gpa.free(differences);
+    @memset(differences, null);
+    var started: usize = 0;
+    var stops: usize = 0;
+    var rounds: usize = 0;
+    while (started < checked.len) : (stops += 1) {
+        // as `Chip.run` does, without waiting for more input than the
+        // UART's preloaded stream
+        chip.hit = null;
+        while (chip.hit == null and stops < max_stops and rounds < max_rounds) : (rounds += 1) {
+            _ = try chip.service();
+            if (!chip.step()) break;
+        }
+        const stop = chip.hit orelse {
+            for (checked, differences) |d, difference| if (chip.breakpoints.contains(.init(chip.layout.index(d.node).?, @truncate(d.p)))) {
+                if (difference) |what|
+                    std.debug.print("node {f} reached {x:0>3} with its {s} otherwise than as\n{f}", .{ Chip.nodeName(d.node), d.p, what, d })
+                else
+                    std.debug.print("node {f} never reached {x:0>3}\n", .{ Chip.nodeName(d.node), d.p });
+            };
+            return error.NotStarted;
+        };
+        const index = stop.breakpoint.index;
+        const node_number = chip.layout.nodeNumber(index);
+        for (checked, differences) |d, *difference| if (d.node == node_number) {
+            difference.* = startDifference(&chip.nodes[index], d, programs);
+            if (difference.* == null) {
+                _ = try chip.breakpoints.toggle(stop.breakpoint);
+                started += 1;
+            }
+        };
+    }
+}
+
+/// how many times nodes may reach where they start, and rounds of the chip
+/// they may take, before they have all started
+const max_stops = 1000;
+const max_rounds = 30_000_000;
+
+/// what of node `n`, about to fetch its next word, is not as `d` sets it
+/// up, if anything
+fn startDifference(n: *const Computer, d: Descriptor, programs: []const Program) ?[]const u8 {
+    for (d.loads[0..d.load_count]) |load| {
+        const program = findBin(programs, load.bin).?;
+        if (!std.mem.eql(Word, program.ram[load.source..][0..load.len], n.mem[load.destination..][0..load.len])) return "RAM";
+    }
+    if (d.a) |a| if (a != n.a) return "A";
+    if (d.b) |b| if (@as(u9, @truncate(@as(u18, @bitCast(b)))) != n.b) return "B";
+    if (d.io) |io| if (io != n.io) return "IO";
+    // the values pushed, the last on top
+    var data = n.data_stack;
+    var k = d.stack_len;
+    while (k > 0) : (k -= 1) if (d.stack[k - 1] != data.pop()) return "stack";
+    var returns = n.return_stack;
+    k = d.return_stack_len;
+    while (k > 0) : (k -= 1) if (d.return_stack[k - 1] != returns.pop()) return "return stack";
+    if (d.p != @as(u10, @bitCast(n.p))) return "P";
+    return null;
+}
+
 test asyncStream {
     const source =
         \\ node 708 : main dup ;
@@ -727,7 +856,9 @@ fn ofPrograms(programs: []const Program, buffer: []Descriptor) []Descriptor {
     return buffer[0..programs.len];
 }
 
+const arrayforth = @import("arrayforth.zig");
 const assembler = @import("assembler.zig");
+const Board = @import("Board.zig");
 const Program = assembler.Program;
 const Console = @import("Console.zig");
 const Uart = @import("Uart.zig");
