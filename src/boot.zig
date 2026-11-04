@@ -588,6 +588,80 @@ test "node 708 takes another stream once it has booted only its neighbours" {
     try expectEqual(5, chip.node(708).?.data_stack.t);
 }
 
+test "node 705 boots from the EVB002's SPI flash with NO BOOT off" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    var programs: [1]Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try assembler.assembleNodes("node 705 : main 5 right b! @b", &programs, &diagnostic);
+    const program = assembled[0];
+
+    // a frame to RAM at 0 that jumps to main, whose first word passes the
+    // ROM's check of its high 6 bits, from x2 to x21 (BOOT-02 2.1)
+    var words: [3 + 64]Word = undefined;
+    words[0..3].* = .{ 0x10000 | program.entry.toWord(), 0, program.len };
+    @memcpy(words[3..][0..program.len], program.ram[0..program.len]);
+    var bytes: [(words.len * 18 + 7) / 8]u8 = undefined;
+    var flash: Flash = .init(Flash.pack(words[0 .. 3 + program.len], &bytes));
+
+    for ([_]bool{ false, true }) |no_boot| {
+        const gpa = std.testing.allocator;
+        var chip: Chip = try .initChips(gpa, .ga144, Board.evb002.chips);
+        defer chip.deinit(gpa);
+        try chip.loadRom(parsed);
+        const settings = [_]Board.Setting{.{ .name = "J26", .on = no_boot }};
+        var fault: Board.Fault = .none;
+        try Board.evb002.apply(&chip, &.{}, &settings, &fault);
+        flash = .init(flash.contents);
+        try Board.evb002.attachFlash(&chip, &flash, &settings);
+        try chip.run();
+        const n = chip.node(705).?;
+        if (no_boot) {
+            // J26 holds 705.17 high, so 705 does not boot, and the flash is
+            // never selected
+            try expect(n.data_stack.t != 5);
+            try expect(!flash.selected);
+            try expectEqual(0, flash.count);
+        } else {
+            try expectEqual(5, n.data_stack.t);
+            try expectEqualSlices(Word, program.ram[0..program.len], n.mem[0..program.len]);
+        }
+    }
+}
+
+test "node 705 reads another frame from where spi-boot sends it in the flash" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    // frame 1 calls spi-boot (xB0) with 497, the ROM's half bit time, the
+    // address x100 shifted up 2, as spiadr is, and spicmd, the read and
+    // the address's high byte; frame 2, at x100, starts main
+    var bytes: [0x200]u8 = @splat(0xff);
+    for ([_][]const u8{ "node 705 : main 497 0x400 >r 0xc00 0xb0 >r ;", "node 705 : main 7 right b! @b" }, [_]usize{ 0, 0x100 }) |source, at| {
+        var programs: [1]Program = undefined;
+        var diagnostic: assembler.Diagnostic = .{};
+        const program = (try assembler.assembleNodes(source, &programs, &diagnostic))[0];
+        var words: [3 + 64]Word = undefined;
+        words[0..3].* = .{ 0x10000 | program.entry.toWord(), 0, program.len };
+        @memcpy(words[3..][0..program.len], program.ram[0..program.len]);
+        _ = Flash.pack(words[0 .. 3 + program.len], bytes[at..]);
+    }
+    const gpa = std.testing.allocator;
+    var chip: Chip = try .initChips(gpa, .ga144, Board.evb002.chips);
+    defer chip.deinit(gpa);
+    try chip.loadRom(parsed);
+    const settings = [_]Board.Setting{.{ .name = "J26", .on = false }};
+    var fault: Board.Fault = .none;
+    try Board.evb002.apply(&chip, &.{}, &settings, &fault);
+    var flash: Flash = .init(&bytes);
+    try Board.evb002.attachFlash(&chip, &flash, &settings);
+    try chip.run();
+    try expectEqual(7, chip.node(705).?.data_stack.t);
+    try expect(chip.wiring.contention == null);
+    // a flash's nets take one device each
+    var again: Flash = .init(&.{});
+    try expectError(error.TwoDevices, Board.evb002.attachFlash(&chip, &again, &settings));
+}
+
 test "arrayForth 3's applications boot through the EVB002's USB port A as their descriptors say" {
     var roms: [144]ga144.NodeRom = undefined;
     const parsed = try testRom(&roms);
@@ -935,6 +1009,7 @@ const Board = @import("Board.zig");
 const Program = assembler.Program;
 const Console = @import("Console.zig");
 const Uart = @import("Uart.zig");
+const Flash = @import("Flash.zig");
 const ga144 = @import("ga144.zig");
 const testRom = @import("rom.zig").testRom;
 const streamer = @import("streamer.zig");

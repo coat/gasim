@@ -1,7 +1,7 @@
 //! What a board puts around its chips: serial ports wired to the chips'
-//! pins, pull resistors, wires between pins, SERDES links between chips,
-//! pins wired to chips' RESET- pins, and the jumpers that connect some of
-//! them. The EVB002's is
+//! pins, an SPI flash, pull resistors, wires between pins, SERDES links
+//! between chips, pins wired to chips' RESET- pins, and the jumpers that
+//! connect some of them. The EVB002's is
 //! `boards/evb002.zon`; other boards are described the same way, in a board
 //! file read on the host side (see `parse`). A board's chips are alike, and
 //! chip k's nodes are numbered k.yxx, as in `Chip.Layout`.
@@ -14,6 +14,7 @@ chip: []const u8 = "ga144",
 chips: u8 = 1,
 jumpers: []const Jumper = &.{},
 serial: []const Serial = &.{},
+flash: ?FlashPins = null,
 pulls: []const Pull = &.{},
 wires: []const Wire = &.{},
 serdes: []const Link = &.{},
@@ -63,6 +64,19 @@ pub const Serial = struct {
     rx: Terminal,
     tx: Terminal,
     baud: u32 = 921600,
+};
+
+/// The pins of an SPI flash (`Flash`): the clock and chip select it listens
+/// to, the chip's data out, which it reads, and data in, which it sends on
+pub const FlashPins = struct {
+    clock: Terminal,
+    select: Terminal,
+    data_out: Terminal,
+    data_in: Terminal,
+
+    fn terminals(self: FlashPins) [4]Terminal {
+        return .{ self.clock, self.select, self.data_out, self.data_in };
+    }
 };
 
 /// A resistor from a pin to high or low
@@ -156,6 +170,10 @@ pub const Error = error{
     /// a pin wired to two chips' RESET-
     ResetPinShared,
     TooManyResets,
+    /// a flash's pin that is, or is wired to, another of its pins, a serial
+    /// port's, or one wired to a chip's RESET-, each of which a device of
+    /// its own is on
+    FlashPinShared,
 };
 
 /// what `check` found at fault, for messages
@@ -217,6 +235,22 @@ pub fn check(self: Board, spec: Spec, fault: *Fault) Error!void {
         // a net has one device, one chip's RESET-
         for (self.resets[0..k]) |other| if (std.meta.eql(other.by.ref(), r.by.ref())) return error.ResetPinShared;
         for (self.serial) |port| if (std.meta.eql(r.by.ref(), port.rx.ref()) or std.meta.eql(r.by.ref(), port.tx.ref())) return error.SerialPinWired;
+    }
+    if (self.flash) |f| {
+        const terminals = f.terminals();
+        for (terminals, 0..) |t, k| {
+            try self.checkTerminal(spec, t, fault);
+            for (terminals[0..k]) |other| if (std.meta.eql(other.ref(), t.ref())) return error.FlashPinShared;
+            for (self.serial) |port| if (std.meta.eql(t.ref(), port.rx.ref()) or std.meta.eql(t.ref(), port.tx.ref())) return error.FlashPinShared;
+            for (self.resets) |r| if (std.meta.eql(t.ref(), r.by.ref())) return error.FlashPinShared;
+            // or a wire joins it to another of its pins or a reset's, on
+            // one net (one to a serial port's pin is SerialPinWired)
+            for (self.wires) |w| for ([2][2]Terminal{ .{ w.a, w.b }, .{ w.b, w.a } }) |ends| if (std.meta.eql(ends[0].ref(), t.ref())) {
+                const other = ends[1].ref();
+                for (terminals) |pin| if (std.meta.eql(other, pin.ref())) return error.FlashPinShared;
+                for (self.resets) |r| if (std.meta.eql(other, r.by.ref())) return error.FlashPinShared;
+            };
+        }
     }
     fault.* = .none;
 }
@@ -282,6 +316,15 @@ pub fn apply(self: Board, chip: *Chip, ports: []const Attachment, settings: []co
     }
 }
 
+/// Puts `flash` on the board's flash pins, each connected while its jumper
+/// is on, as `settings` set it
+pub fn attachFlash(self: Board, chip: *Chip, flash: *Flash, settings: []const Setting) error{ NoFlash, NoSuchPin, TwoDevices }!void {
+    const f = self.flash orelse return error.NoFlash;
+    var refs: [4]?Chip.PinRef = undefined;
+    for (f.terminals(), &refs) |t, *ref| ref.* = if (self.jumperOn(t.jumper, settings)) t.ref() else null;
+    try chip.attachFlashPins(flash, refs[0], refs[1], refs[2], refs[3]);
+}
+
 /// Parses a board file, allocating what it names in `arena`. On
 /// `error.ParseZon`, `diagnostics` describes what is wrong.
 pub fn parse(gpa: Allocator, arena: Allocator, source: [:0]const u8, diagnostics: *std.zon.parse.Diagnostics) error{ OutOfMemory, ParseZon }!Board {
@@ -318,6 +361,25 @@ test check {
     try std.testing.expectError(error.NoSuchJumper, jumper.check(.ga144, &fault));
     const same: Board = .{ .serial = &.{.{ .name = "A", .rx = .{ .node = 708, .pin = 17 }, .tx = .{ .node = 708, .pin = 17 } }} };
     try std.testing.expectError(error.SerialPinsTheSame, same.check(.ga144, &fault));
+    const pins_705: FlashPins = .{ .clock = .{ .node = 705, .pin = 1 }, .select = .{ .node = 705, .pin = 3 }, .data_out = .{ .node = 705, .pin = 5 }, .data_in = .{ .node = 705, .pin = 17 } };
+    var flash: FlashPins = pins_705;
+    flash.select = flash.clock;
+    try std.testing.expectError(error.FlashPinShared, (Board{ .flash = flash }).check(.ga144, &fault));
+    const flash_serial: Board = .{ .flash = pins_705, .serial = &.{.{ .name = "A", .rx = .{ .node = 705, .pin = 17 }, .tx = .{ .node = 708, .pin = 1 } }} };
+    try std.testing.expectError(error.FlashPinShared, flash_serial.check(.ga144, &fault));
+    flash = pins_705;
+    flash.data_in = .{ .node = 708, .pin = 5 };
+    try std.testing.expectError(error.NoSuchPin, (Board{ .flash = flash }).check(.ga144, &fault));
+    const flash_reset: Board = .{ .chips = 2, .flash = pins_705, .resets = &.{.{ .chip = 1, .by = .{ .node = 705, .pin = 1 } }} };
+    try std.testing.expectError(error.FlashPinShared, flash_reset.check(.ga144, &fault));
+    // a wire from one to another of its pins, or to a reset's, but not to
+    // a plain pin
+    const flash_wired: Board = .{ .flash = pins_705, .wires = &.{.{ .a = .{ .node = 705, .pin = 1 }, .b = .{ .node = 705, .pin = 3 } }} };
+    try std.testing.expectError(error.FlashPinShared, flash_wired.check(.ga144, &fault));
+    const reset_wired: Board = .{ .chips = 2, .flash = pins_705, .resets = &.{.{ .chip = 1, .by = .{ .node = 600, .pin = 17 } }}, .wires = &.{.{ .a = .{ .node = 600, .pin = 17 }, .b = .{ .node = 705, .pin = 3 } }} };
+    try std.testing.expectError(error.FlashPinShared, reset_wired.check(.ga144, &fault));
+    const flash_plain: Board = .{ .flash = pins_705, .wires = &.{.{ .a = .{ .node = 705, .pin = 3 }, .b = .{ .node = 600, .pin = 17 } }} };
+    try flash_plain.check(.ga144, &fault);
     const pulled: Board = .{ .pulls = &.{ .{ .node = 705, .pin = 17, .high = true }, .{ .node = 705, .pin = 17, .high = false } } };
     try std.testing.expectError(error.PullListedTwice, pulled.check(.ga144, &fault));
     const itself: Board = .{ .wires = &.{.{ .a = .{ .node = 100, .pin = 17 }, .b = .{ .node = 100, .pin = 17 } }} };
@@ -538,6 +600,7 @@ const testRom = @import("rom.zig").testRom;
 const Chip = @import("Chip.zig");
 const Spec = @import("Spec.zig");
 const Uart = @import("Uart.zig");
+const Flash = @import("Flash.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
