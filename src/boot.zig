@@ -596,50 +596,71 @@ test "arrayForth 3's applications boot through the EVB002's USB port A as their 
     defer gpa.free(disk);
 
     // each loaded as arrayForth 3 loads it into a frame of a stream, its
-    // code and then its descriptors
-    const applications = [_][]const u8{
-        // the SRAM cluster
-        "2331 LOAD  2332 LOAD",
+    // code and then its descriptors, with the path its STREAMER takes.
+    // Only the application's own descriptors: the blocks that boot them
+    // describe 708 too, and others, such as 108 in block 1897, which here
+    // start at warm.
+    const applications = [_]struct { []const u8, []const u16 }{
+        // the SRAM cluster, along sr708 (block 1897)
+        .{ "2331 LOAD  2332 LOAD", &.{ 708, 108, 107, 7, 9 } },
         // the Ethernet NIC with its clock monitor, after the configuration
-        // that says where its modules are. Block 1583 adds it to pF/144
-        // with the crystal oscillator too (?CLK 2), whose descriptors load
-        // a bin 516 that nothing builds.
-        "1562 LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD  2002 LOAD",
+        // that says where its modules are, along s708 (block 2333), the
+        // chip but for the SRAM cluster's nodes, the path block 1665 boots
+        // it on with pF/144. Block 1583 adds it to pF/144 with the crystal
+        // oscillator too (?CLK 2), whose descriptors load a bin 516 that
+        // nothing builds.
+        .{
+            "1562 LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD  2002 LOAD",
+            &.{ 708, 700, 0, 6, 106, 101, 201, 208, 108, 109, 209, 210, 10, 17, 117, 111, 211, 217, 317, 301, 401, 417, 517, 501, 601, 617, 717, 709 },
+        },
     };
-    for (applications) |source| {
+    for (applications) |application| {
+        const source, const corners = application;
         var programs: [Chip.Layout.chip_numbers]Program = undefined;
-        var descriptors: [Chip.Layout.chip_numbers]Descriptor = undefined;
+        var descriptor_buffer: [Chip.Layout.chip_numbers]Descriptor = undefined;
         var diagnostic: assembler.Diagnostic = .{};
-        const assembled = arrayforth.assembleScript(source, disk, &programs, &descriptors, &diagnostic) catch |err| {
+        const assembled = arrayforth.assembleScript(source, disk, &programs, &descriptor_buffer, &diagnostic) catch |err| {
             std.debug.print("{s}: {t} at block {d} line {d} '{s}'\n", .{ source, err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
             return err;
         };
         try expect(assembled.descriptors.len > 0);
-        // as many at a time as there can be breakpoints, which stop each
-        // node where it starts
-        var first: usize = 0;
-        while (first < assembled.descriptors.len) : (first += Chip.max_breakpoints) {
-            const batch = assembled.descriptors[first..@min(first + Chip.max_breakpoints, assembled.descriptors.len)];
-            expectBootsAsDescribed(parsed, batch, assembled.descriptors, assembled.programs) catch |err| {
-                std.debug.print("{s}\n", .{source});
-                return err;
-            };
+
+        // as gasim lays out the stream, and as the STREAMER does
+        const descriptors = assembled.descriptors;
+        const ours = try gpa.alloc(Word, maxLen(.ga144, descriptors) + 3 * (descriptors.len + 2));
+        defer gpa.free(ours);
+        var path_buffer: [Chip.Layout.chip_numbers]u16 = undefined;
+        const path = try streamer.draw(corners, &path_buffer);
+        const theirs = try gpa.alloc(Word, streamer.maxLen(path.len, descriptors));
+        defer gpa.free(theirs);
+        const streams = [_]struct { []const u8, []const Word }{
+            .{ "gasim's", try asyncStream(gpa, .ga144, 708, descriptors, assembled.programs, ours) },
+            .{ "the STREAMER's", try streamer.stream(.ga144, path, descriptors, assembled.programs, theirs) },
+        };
+        for (streams) |s| {
+            const name, const words = s;
+            // as many at a time as there can be breakpoints, which stop
+            // each node where it starts
+            var first: usize = 0;
+            while (first < descriptors.len) : (first += Chip.max_breakpoints) {
+                const batch = descriptors[first..@min(first + Chip.max_breakpoints, descriptors.len)];
+                expectBootsAsDescribed(parsed, batch, words, assembled.programs) catch |err| {
+                    std.debug.print("{s} with {s} stream\n", .{ source, name });
+                    return err;
+                };
+            }
         }
     }
 }
 
-/// Boots node 708 with a stream of `descriptors`, through the EVB002's USB
-/// port A, and checks that each node of `checked` starts as its descriptor
-/// says
-fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, descriptors: []const Descriptor, programs: []const Program) !void {
+/// Boots node 708 with `words`, through the EVB002's USB port A, and
+/// checks that each node of `checked` starts as its descriptor says
+fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, words: []const Word, programs: []const Program) !void {
     const gpa = std.testing.allocator;
     var chip: Chip = try .initChips(gpa, .ga144, Board.evb002.chips);
     defer chip.deinit(gpa);
     try chip.loadRom(roms);
 
-    const buffer = try gpa.alloc(Word, maxLen(.ga144, descriptors) + 3 * (descriptors.len + 2));
-    defer gpa.free(buffer);
-    const words = try asyncStream(gpa, .ga144, 708, descriptors, programs, buffer);
     const bytes = try gpa.alloc(u8, 3 * words.len);
     defer gpa.free(bytes);
 
@@ -864,6 +885,7 @@ const Console = @import("Console.zig");
 const Uart = @import("Uart.zig");
 const ga144 = @import("ga144.zig");
 const testRom = @import("rom.zig").testRom;
+const streamer = @import("streamer.zig");
 const Chip = @import("Chip.zig");
 const f18 = @import("f18.zig");
 const Address = f18.Address;

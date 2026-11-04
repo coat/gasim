@@ -198,14 +198,19 @@ done.
    its descriptor, with no ptys, RTS or Wine in gasim.
    - ✓ With the streams gasim builds from their descriptors (`--boot`):
      the SRAM cluster and the NIC, in `zig build test` with the disk.
-   - With the streams arrayForth 3 itself builds. Its STREAMER (block
-     1602, which loads 1603–1618) lays out frames along its own path from
-     708 (`df708`), unlike gasim's, so either gasim builds them as it does,
-     or they are captured once from arrayForth 3 under Wine and kept beside
-     the ROM, as they are GreenArrays', and booted from a file; a capture
-     also checks a STREAMER in gasim byte for byte. Capturing needs RTS on
-     a pty, which a preload library gives (branch `pty-reset`, #55,
-     parked).
+   - ✓ With streams laid out as arrayForth 3's STREAMER (block 1602, which
+     loads 1603–1618) lays them out for root 708 (`src/streamer.zig`):
+     frames along a path, pumped from node to node, not gasim's tree. The
+     SRAM cluster along `sr708` (block 1897) and the NIC along `s708`
+     (block 2333).
+   - The STREAMER's other roots: 300 (synchronous), 705 (SPI, packed for
+     flash) and 207 (pF/144's snorkel); its two-chip paths; and its words
+     in gasim's arrayForth (`STREAM[`, `FRAME[`, `ORGN`, `TO`, `COURSE`),
+     so the blocks that build streams run as they are.
+   - A stream captured once from arrayForth 3 under Wine and kept beside
+     the ROM, as it is GreenArrays', would check the port byte for byte.
+     Capturing needs RTS on a pty, which a preload library gives (branch
+     `pty-reset`, #55, parked).
    - Driving gasim from the unmodified `sF5b2-af3.exe` under Wine, its IDE
      and flash burning, needs that library too, and would come back as a
      bridge program of its own, not in gasim.
