@@ -102,7 +102,8 @@ pub fn init(self: *Sim, gpa: Allocator) Allocator.Error!void {
     errdefer self.chip.deinit(gpa);
     self.programs = try gpa.alloc(Program, layout.count());
     errdefer gpa.free(self.programs);
-    self.descriptors = try gpa.alloc(boot.Descriptor, layout.count());
+    // each frame of a stream has descriptors of its own
+    self.descriptors = try gpa.alloc(boot.Descriptor, layout.count() * arrayforth.Stream.max_frames);
     errdefer gpa.free(self.descriptors);
     self.start = try .init(gpa, layout);
     errdefer self.start.deinit(gpa);
@@ -221,6 +222,9 @@ fn assemble(self: *Sim, kind: Kind, source: []const u8, loads: []const u32) !arr
 /// own node, and saves the chip to start from
 fn setUp(self: *Sim, kind: Kind, assembled: arrayforth.Assembled) error{ LoadFailed, OutOfMemory }!void {
     const programs = assembled.programs;
+    // the frames of a stream set nodes up one after another, through node
+    // 708's ROM
+    if (assembled.stream) |*s| if (s.frame_count > 1) return self.fail("the stream has {d} frames, which only gasim run --uart 708 --boot sends one after another", .{s.frame_count});
     const descriptors = if (assembled.descriptors.len > 0) assembled.descriptors else own: {
         var count: usize = 0;
         for (programs) |program| if (program.bin == null) {
