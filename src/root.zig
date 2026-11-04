@@ -21,6 +21,7 @@ pub const Uart = @import("Uart.zig");
 pub const disassembler = @import("disassembler.zig");
 pub const ga144 = @import("ga144.zig");
 pub const rom = @import("rom.zig");
+pub const streamer = @import("streamer.zig");
 
 const f18 = @import("f18.zig");
 pub const pins = @import("pins.zig");
@@ -44,6 +45,7 @@ test {
     _ = @import("rom.zig");
     _ = @import("Serdes.zig");
     _ = @import("Spec.zig");
+    _ = @import("streamer.zig");
     _ = @import("stack.zig");
     _ = @import("Tail.zig");
     _ = @import("Uart.zig");
