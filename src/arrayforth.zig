@@ -103,6 +103,20 @@
 //! starts at the label `main` if there is one, otherwise at 0. Code saved
 //! in a node's own bin is loaded into the node, and code saved with BIN in
 //! another bin is kept for `its`.
+//!
+//! Boot streams can be laid out as arrayForth 3's STREAMER (block 1602)
+//! lays them out, which gasim has built in, so that `STREAMER LOAD` loads
+//! nothing:
+//!
+//!     nn STREAM[ FRAME[ ... ]FRAME ]STREAM
+//!                       a stream from root nn, which must be 708, of one
+//!                       frame, whose boot descriptors FRAME[ begins afresh
+//!                       and ]FRAME ends, in place of any stream before
+//!     nn ORGN  nn TO    a path, in host memory: its first node, and a line
+//!                       along a row or a column to another
+//!     ' name  a COURSE  the address of a name's memory, and the path the
+//!                       frame takes from its root, ending with -1, or by
+//!                       default the chip (`streamer.entire`)
 
 pub const Error = assembler.Error || error{
     StackUnderflow,
@@ -155,6 +169,30 @@ pub const Error = assembler.Error || error{
     HostCode,
     /// a colorForth block that cannot be decoded
     NotSource,
+    /// STREAM[ of a root other than 708, the only one of the STREAMER's
+    /// that gasim builds streams for
+    UnknownRoot,
+    /// FRAME[, ]FRAME, COURSE or ]STREAM outside STREAM[
+    NoStream,
+    /// ]FRAME outside FRAME[
+    NoFrame,
+    /// ]STREAM or FRAME[ before ]FRAME, or a source that ends before it
+    UnclosedFrame,
+    /// a second FRAME[ in a stream, as gasim keeps one frame
+    TooManyFrames,
+    /// STREAM[ before the ]STREAM of the one before, or a source that ends
+    /// before it
+    UnclosedStream,
+    /// a COURSE of fewer than 2 nodes
+    PathTooShort,
+    /// a COURSE that does not start at the stream's root
+    NotFromRoot,
+    /// TO a node that is not along a row or a column from the one before
+    NotInLine,
+    /// a path of more nodes than two chips have, or a TO of more than 127
+    PathTooLong,
+    /// ' of a name without memory of its own, such as a constant
+    NoAddress,
 } || Io.Writer.Error;
 
 /// An interpreter that keeps its stack, bins and labels from one source to
@@ -250,7 +288,8 @@ pub const Session = struct {
     }
 
     /// Fails, as the end of a program does, if a definition was left
-    /// without its ;, or a boot descriptor loads a bin that was never saved
+    /// without its ;, a stream without its ]STREAM, or a boot descriptor
+    /// loads a bin that was never saved
     pub fn finish(self: *Session) Error!void {
         self.interpreter.checkClosed() catch |err| {
             self.recover();
@@ -276,6 +315,11 @@ pub const Session = struct {
         }
         it.compiling = null;
         it.loop_len = 0;
+        // a stream left open, whose frame is not kept
+        if (it.stream_root != null) it.stream = null;
+        it.stream_root = null;
+        it.framing = false;
+        it.course = null;
     }
 
     /// the bins saved, and the boot descriptors given, so far
@@ -325,6 +369,22 @@ pub const Assembled = struct {
     /// to, and the first of them
     feedback_differs: usize = 0,
     first_difference: ?Feedback = null,
+    /// the path of a stream's frame, from STREAM[ ... ]STREAM, for
+    /// `streamer.stream` to lay out the descriptors along, which are
+    /// then the frame's
+    stream: ?Stream = null,
+};
+
+/// the path a stream's frame takes, from its root, as ]FRAME found it
+pub const Stream = struct {
+    nodes: [2 * 144]u16 = undefined,
+    len: u16 = 0,
+    /// how many of the descriptors are the frame's
+    descriptor_count: usize = 0,
+
+    pub fn path(self: *const Stream) []const u16 {
+        return self.nodes[0..self.len];
+    }
 };
 
 /// A gray number arrayForth 2 wrote as it compiled colorForth, which is
@@ -471,6 +531,9 @@ const erased: Word = 0x134a9;
 
 /// the most labels a bin can have, including its ROM's
 const max_labels = 64;
+
+/// arrayForth 3's STREAMER, block 42 FH of its environment, block 1560
+const streamer_block = 1602;
 
 const Label = struct {
     name: []const u8,
@@ -703,6 +766,14 @@ const Interpreter = struct {
     color_line: ?usize = null,
     feedback_differs: usize = 0,
     first_difference: ?Feedback = null,
+    /// the root of the stream STREAM[ began, until ]STREAM, whether FRAME[
+    /// has begun its frame, the path COURSE gave it, the node ORGN or TO
+    /// drew to last, and the frame once ]FRAME ends it
+    stream_root: ?u16 = null,
+    framing: bool = false,
+    course: ?i32 = null,
+    previous: i32 = 0,
+    stream: ?Stream = null,
     /// between host and target, where red words define words for the host,
     /// such as macros that assemble a literal
     host_mode: bool = false,
@@ -720,9 +791,10 @@ const Interpreter = struct {
     fn assembled(self: Interpreter) Assembled {
         return .{
             .programs = self.programs[0..self.count],
-            .descriptors = self.descriptors[0..self.descriptor_count],
+            .descriptors = self.descriptors[0..if (self.stream) |frame| frame.descriptor_count else self.descriptor_count],
             .feedback_differs = self.feedback_differs,
             .first_difference = self.first_difference,
+            .stream = self.stream,
         };
     }
 
@@ -753,12 +825,15 @@ const Interpreter = struct {
         try self.checkSaved();
     }
 
-    /// fails if a definition is still being defined
+    /// fails if a definition is still being defined, or a stream or its
+    /// frame is still open
     fn checkClosed(self: *Interpreter) Error!void {
         if (self.compiling) |compiling| {
             self.diagnostic.* = compiling.directive;
             return error.UnclosedDefinition;
         }
+        if (self.framing) return error.UnclosedFrame;
+        if (self.stream_root != null) return error.UnclosedStream;
     }
 
     /// fails, at the end of a program, if a boot descriptor loads a bin
@@ -1975,7 +2050,8 @@ const Interpreter = struct {
             .CONSTANT => try self.define(.constant, try self.pop()),
             .LOAD => {
                 const block = try self.pop();
-                try self.load(block, block);
+                // the STREAMER is built in, which its block leaves in DECIMAL
+                if (block == streamer_block) self.base = 10 else try self.load(block, block);
             },
             .THRU => {
                 const last = try self.pop();
@@ -2048,6 +2124,77 @@ const Interpreter = struct {
                 d.return_stack = @splat(-1);
                 d.return_stack_len = d.return_stack.len;
             },
+            .STREAMER => try self.push(streamer_block),
+            .@"STREAM[" => {
+                const root = try self.pop();
+                if (self.stream_root != null) return error.UnclosedStream;
+                if (root != 708) return error.UnknownRoot;
+                // in place of any stream before, as at a prompt
+                self.stream_root = 708;
+                self.course = null;
+                self.stream = null;
+            },
+            .COURSE => {
+                const address = try self.pop();
+                if (self.stream_root == null) return error.NoStream;
+                _ = try self.cell(address);
+                self.course = address;
+            },
+            .@"FRAME[" => {
+                if (self.stream_root == null) return error.NoStream;
+                if (self.framing) return error.UnclosedFrame;
+                if (self.stream != null) return error.TooManyFrames;
+                // which leaves every node as it starts by default
+                self.descriptor_count = 0;
+                self.boot_node = null;
+                self.unsaved_count = 0;
+                self.framing = true;
+            },
+            .@"]FRAME" => {
+                if (!self.framing) return error.NoFrame;
+                self.framing = false;
+                var frame: Stream = .{};
+                if (self.course) |course| {
+                    var address = course;
+                    while (true) : (address += 1) {
+                        const entry = (try self.cell(address)).*;
+                        if (entry < 0) break;
+                        if (frame.len == frame.nodes.len) return error.PathTooLong;
+                        frame.nodes[frame.len] = std.math.cast(u16, entry) orelse return error.InvalidNode;
+                        frame.len += 1;
+                    }
+                } else frame.len = @intCast((streamer.draw(&streamer.entire, &frame.nodes) catch unreachable).len);
+                // #FRAME: from the root, to one node or more
+                if (frame.len < 2) return error.PathTooShort;
+                if (frame.nodes[0] != self.stream_root.?) return error.NotFromRoot;
+                // the descriptors given after it are not in the frame
+                frame.descriptor_count = self.descriptor_count;
+                self.stream = frame;
+            },
+            .@"]STREAM" => {
+                if (self.stream_root == null) return error.NoStream;
+                if (self.framing) return error.UnclosedFrame;
+                self.stream_root = null;
+            },
+            .ORGN => {
+                self.previous = try self.pop();
+                try self.comma(self.previous);
+            },
+            .TO => {
+                const to = try self.pop();
+                const from = std.math.cast(u16, self.previous) orelse return error.InvalidNode;
+                var line: [128]u16 = undefined;
+                const drawn = try streamer.draw(&.{ from, std.math.cast(u16, to) orelse return error.InvalidNode }, &line);
+                for (drawn[1..]) |n| try self.comma(n);
+                self.previous = to;
+            },
+            .@"'" => {
+                const i = self.findName(try self.name()) orelse return error.UnknownWord;
+                switch (self.names[i].kind) {
+                    .address, .array => try self.push(@intCast(self.names[i].value)),
+                    else => return error.NoAddress,
+                }
+            },
             .ITS => {
                 const number_of_bin = try self.pop();
                 try self.push(try self.labelOf(number_of_bin, try self.name()));
@@ -2108,12 +2255,7 @@ const Interpreter = struct {
             .@"2CONSTANT" => try self.define(.double_constant, try self.popDouble()),
             .ALLOT => try self.allot(try self.pop()),
             .HERE => try self.push(self.here),
-            .@"," => {
-                const value = try self.pop();
-                const address = self.here;
-                try self.allot(1);
-                self.memory[address] = value;
-            },
+            .@"," => try self.comma(try self.pop()),
             .@"@" => try self.push((try self.cell(try self.pop())).*),
             .@"!" => {
                 const address = try self.cell(try self.pop());
@@ -2312,6 +2454,13 @@ const Interpreter = struct {
             } else try disassembler.write(out, word, address);
             try out.writeByte('\n');
         }
+    }
+
+    /// Stores `value` in the next cell of host memory, as , does
+    fn comma(self: *Interpreter, value: i32) Error!void {
+        const address = self.here;
+        try self.allot(1);
+        self.memory[address] = value;
     }
 
     /// Uses `count` more cells of host memory
@@ -2621,6 +2770,15 @@ const ForthWord = enum {
     @"!ND",
     @"+ND",
     @"+wire",
+    STREAMER,
+    @"STREAM[",
+    @"FRAME[",
+    @"]FRAME",
+    @"]STREAM",
+    ORGN,
+    TO,
+    COURSE,
+    @"'",
     ITS,
     UP,
     DOWN,
@@ -2851,6 +3009,7 @@ const colorforth = @import("colorforth.zig");
 pub const Diagnostic = assembler.Diagnostic;
 pub const Program = assembler.Program;
 const boot = @import("boot.zig");
+const streamer = @import("streamer.zig");
 const Builder = @import("Builder.zig");
 const Chip = @import("Chip.zig");
 const disassembler = @import("disassembler.zig");
@@ -3305,6 +3464,85 @@ test "boot descriptor errors" {
     // values too large to add without overflowing
     try expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  2147483647 1 1 /PART", &programs, &descriptors, &diagnostic));
     try expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  1 2147483647 1 /PART", &programs, &descriptors, &diagnostic));
+}
+
+test "a stream's frame, as the STREAMER builds it" {
+    var programs: [1]Program = undefined;
+    var descriptors: [2]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    // as block 1584's, but for a node of its own
+    const assembled = try assembleNodes(
+        \\ STREAMER LOAD
+        \\ ASM[ # 715 NODE ERS # 0 org  begin begin !b unext unext  >BIN ]ASM
+        \\ 0 ARRAY MYP  708 ORGN 715 TO -1 ,
+        \\ 9 +NODE
+        \\ 708 STREAM[   ' MYP COURSE
+        \\    FRAME[   715 +NODE  715 /RAM  IO /B  0 /P
+        \\       708 +NODE xAA /P
+        \\    ]FRAME  ]STREAM
+    , &programs, &descriptors, &diagnostic);
+    try expectEqualSlices(u16, &.{ 708, 709, 710, 711, 712, 713, 714, 715 }, assembled.stream.?.path());
+    // FRAME[ began the descriptors afresh, without node 009's
+    try expectEqual(2, assembled.descriptors.len);
+    try expectEqual(715, assembled.descriptors[0].node);
+    try expectEqual(0xaa, assembled.descriptors[1].p);
+
+    // without a COURSE, the path covers the chip
+    const entire = try assembleNodes("708 STREAM[ FRAME[ ]FRAME ]STREAM", &programs, &descriptors, &diagnostic);
+    try expectEqual(144, entire.stream.?.path().len);
+    try expectEqual(null, (try assembleNodes("1 1 +", &programs, &descriptors, &diagnostic)).stream);
+
+    // descriptors after ]FRAME are not the frame's, as the STREAMER builds
+    // it there, and STREAMER LOAD leaves the base in DECIMAL, as its block
+    // does
+    const after = try assembleNodes("HEX STREAMER LOAD  708 STREAM[ FRAME[ 708 +NODE ]FRAME ]STREAM  9 +NODE", &programs, &descriptors, &diagnostic);
+    try expectEqual(1, after.descriptors.len);
+    try expectEqual(708, after.descriptors[0].node);
+}
+
+test "a session builds a stream again, and drops one left open by an error" {
+    var programs: [1]Program = undefined;
+    var descriptors: [2]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+
+    try session.interpret("CREATE P  708 ORGN 709 TO -1 ,");
+    try session.interpret("708 STREAM[ ' P COURSE FRAME[ 709 +NODE ]FRAME ]STREAM");
+    try session.interpret("708 STREAM[ ' P COURSE FRAME[ ]FRAME ]STREAM");
+    try expectEqual(0, session.assembled().descriptors.len);
+    try expectEqual(2, session.assembled().stream.?.path().len);
+
+    try expectError(error.UnknownWord, session.interpret("708 STREAM[ FRAME[ 709 +NODE NOTHING"));
+    try expectEqual(null, session.assembled().stream);
+    try session.interpret("708 STREAM[ FRAME[ ]FRAME ]STREAM");
+    try session.finish();
+    try expectEqual(144, session.assembled().stream.?.path().len);
+    try session.interpret("708 STREAM[");
+    try expectError(error.UnclosedStream, session.finish());
+}
+
+test "stream errors" {
+    try expectAssembleError(error.UnknownRoot, "300 STREAM[");
+    try expectAssembleError(error.NoStream, "FRAME[");
+    try expectAssembleError(error.NoStream, "0 COURSE");
+    try expectAssembleError(error.NoStream, "]STREAM");
+    try expectAssembleError(error.NoFrame, "708 STREAM[ ]FRAME");
+    try expectAssembleError(error.UnclosedFrame, "708 STREAM[ FRAME[ ]STREAM");
+    try expectAssembleError(error.UnclosedFrame, "708 STREAM[ FRAME[ FRAME[");
+    try expectAssembleError(error.UnclosedFrame, "708 STREAM[ FRAME[");
+    try expectAssembleError(error.TooManyFrames, "708 STREAM[ FRAME[ ]FRAME FRAME[");
+    try expectAssembleError(error.UnclosedStream, "708 STREAM[ 708 STREAM[");
+    try expectAssembleError(error.UnclosedStream, "708 STREAM[");
+    try expectAssembleError(error.PathTooShort, "CREATE P  708 ORGN -1 ,  708 STREAM[ ' P COURSE FRAME[ ]FRAME");
+    try expectAssembleError(error.NotFromRoot, "CREATE P  709 ORGN 708 TO -1 ,  708 STREAM[ ' P COURSE FRAME[ ]FRAME");
+    try expectAssembleError(error.NotInLine, "708 ORGN 607 TO");
+    try expectAssembleError(error.NumberOutOfRange, "708 STREAM[ 5 COURSE");
+    // a path that runs off the end of host memory, without its -1
+    try expectAssembleError(error.NumberOutOfRange, "0 ARRAY P  708 ORGN  708 STREAM[ ' P COURSE FRAME[ ]FRAME");
+    try expectAssembleError(error.NoAddress, "5 CONSTANT FIVE  ' FIVE");
+    try expectAssembleError(error.UnknownWord, "' NOTHING");
 }
 
 test "assembling into ROM" {

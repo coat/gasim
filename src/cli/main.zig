@@ -68,7 +68,9 @@ const usage =
     \\  --boot                     load programs with a boot stream through the
     \\                             SERDES port of node 001, or with --uart,
     \\                             through the UART to the node's ROM, before
-    \\                             stdin. This needs ROM.
+    \\                             stdin. This needs ROM. With --uart, an
+    \\                             arrayForth 3 source's STREAM[ ... ]STREAM is
+    \\                             laid out as arrayForth 3's STREAMER does.
     \\  --break <node>:<address>   stop when the node is about to fetch the word
     \\                             at the address, in hex, such as 105:003. Can
     \\                             be given more than once.
@@ -431,10 +433,11 @@ pub fn main(init: std.process.Init) !void {
         try writer.flush();
         return;
     }
-    // boot descriptors say what to load into nodes and how to start them.
-    // Without them, each program in its node's own bin is loaded and started
-    // at its entry, and code saved in other bins is not loaded.
-    const descriptors = if (assembled.descriptors.len > 0) assembled.descriptors else own: {
+    // boot descriptors say what to load into nodes and how to start them,
+    // as a stream's frame does even if it describes no node. Without them,
+    // each program in its node's own bin is loaded and started at its
+    // entry, and code saved in other bins is not loaded.
+    const descriptors = if (assembled.descriptors.len > 0 or assembled.stream != null) assembled.descriptors else own: {
         var count: usize = 0;
         for (programs) |program| if (program.bin == null) {
             descriptor_buffer[count] = .ofProgram(program);
@@ -503,12 +506,27 @@ pub fn main(init: std.process.Init) !void {
         if (spec.node(root).rom != .async_boot)
             fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {f}", .{ uart_option, Chip.nodeName(root) });
         if (roms == null) fatal("--boot needs a ROM, for node {f} to boot from (see --rom)", .{Chip.nodeName(root)});
-        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors) + 3 * (descriptors.len + 2));
-        const words = gasim.boot.asyncStream(init.gpa, layout, root, descriptors, programs, buffer) catch |err| switch (err) {
-            error.NoSuchNode => fatal("--uart node {f} is not in {f}", .{ Chip.nodeName(root), layout }),
-            error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
-            error.RootTooLong => fatal("--boot: node {f}'s program leaves no room in its RAM for the code that sets it up", .{Chip.nodeName(root)}),
-            else => |e| return e,
+        // laid out as arrayForth 3's STREAMER does, for a STREAM[ ]STREAM
+        const words = if (assembled.stream) |*s| streamer: {
+            const course = s.path();
+            // ]FRAME has made sure it starts at 708
+            if (course[0] != root) fatal("--boot: {s}'s stream is for node {f}, the only root gasim has of the STREAMER's, not the --uart node {f}", .{ source_path, Chip.nodeName(course[0]), Chip.nodeName(root) });
+            const buffer = try arena.alloc(gasim.Word, gasim.streamer.maxLen(course.len, descriptors));
+            break :streamer gasim.streamer.stream(layout, course, descriptors, programs, buffer) catch |err| switch (err) {
+                error.NoSuchNode, error.NotNeighbours, error.RepeatedNode => fatal("--boot: {s}'s COURSE is not a path of neighbours in {f}, each once ({t})", .{ source_path, layout, err }),
+                error.NotOnPath => fatal("--boot: {s} describes a node off its frame's COURSE", .{source_path}),
+                error.RootTooManyLoads, error.RootNotInPlace => fatal("--boot: node {f} can only be loaded with one part of a bin, to the addresses it comes from ({t})", .{ Chip.nodeName(root), err }),
+                error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
+                error.UnknownRoot, error.PathTooShort, error.NoSuchBin => unreachable,
+            };
+        } else gasim: {
+            const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors) + 3 * (descriptors.len + 2));
+            break :gasim gasim.boot.asyncStream(init.gpa, layout, root, descriptors, programs, buffer) catch |err| switch (err) {
+                error.NoSuchNode => fatal("--uart node {f} is not in {f}", .{ Chip.nodeName(root), layout }),
+                error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
+                error.RootTooLong => fatal("--boot: node {f}'s program leaves no room in its RAM for the code that sets it up", .{Chip.nodeName(root)}),
+                else => |e| return e,
+            };
         };
         uart.preload = gasim.boot.asyncBytes(words, try arena.alloc(u8, 3 * words.len));
     } else if (boot) {
