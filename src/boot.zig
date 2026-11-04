@@ -275,7 +275,7 @@ pub fn maxLen(layout: Chip.Layout, descriptors: []const Descriptor) usize {
     var len = layout.count() * (2 + 2 * 5);
     for (descriptors) |descriptor| {
         for (descriptor.loads[0..descriptor.load_count]) |load| len += 5 + load.len;
-        len += 4 + 2 + 2 + 2 * (descriptor.stack_len + descriptor.return_stack_len);
+        len += 4 + 2 + 2 + 2 * (@as(usize, descriptor.stack_len) + descriptor.return_stack_len);
     }
     return len;
 }
