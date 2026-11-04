@@ -72,9 +72,12 @@ const usage =
     \\  --boot                     load programs with a boot stream through the
     \\                             SERDES port of node 001, or with --uart,
     \\                             through the UART to the node's ROM, before
-    \\                             stdin. This needs ROM. With --uart, an
-    \\                             arrayForth 3 source's STREAM[ ... ]STREAM is
-    \\                             laid out as arrayForth 3's STREAMER does.
+    \\                             stdin. This needs ROM. An arrayForth 3
+    \\                             source's STREAM[ ... ]STREAM is laid out
+    \\                             as arrayForth 3's STREAMER does: from 708,
+    \\                             with --uart, or from 705, packed into the
+    \\                             --board's SPI flash, such as with --board
+    \\                             evb002 --jumper J26=off.
     \\  --break <node>:<address>   stop when the node is about to fetch the word
     \\                             at the address, in hex, such as 105:003. Can
     \\                             be given more than once.
@@ -454,10 +457,15 @@ pub fn main(init: std.process.Init) !void {
     // as a stream's frame does even if it describes no node. Without them,
     // each program in its node's own bin is loaded and started at its
     // entry, and code saved in other bins is not loaded.
-    // the frames of a stream set nodes up one after another, which only
-    // the STREAMER's stream does
-    if (assembled.stream) |*s| if (s.frame_count > 1 and !(boot and uart_node != null))
-        fatal("{s}'s stream has {d} frames, which only --uart 708 --boot sends one after another", .{ source_path, s.frame_count });
+    // the parts of a stream set nodes up one after another, and /ROOT and
+    // FORWARD are for the root's ROM, which only the STREAMER's stream
+    // does, through 708's UART or 705's flash
+    const flash_boot = boot and assembled.stream != null and assembled.stream.?.root == 705;
+    if (assembled.stream) |*s| if ((s.part_count != s.frame_count or s.frame_count > 1) and !(boot and (uart_node != null or flash_boot)))
+        fatal("{s}'s stream has several frames, or /ROOT or FORWARD, which only --boot sends to the root's ROM, with --uart 708 or a --board's flash for 705", .{source_path});
+    // the flash is not in the chip's snapshots, which the interface
+    // restarts from
+    if (flash_boot and command != .run) fatal("--boot from a board's flash needs run", .{});
     const descriptors = if (assembled.descriptors.len > 0 or assembled.stream != null) assembled.descriptors else own: {
         var count: usize = 0;
         for (programs) |program| if (program.bin == null) {
@@ -519,7 +527,24 @@ pub fn main(init: std.process.Init) !void {
     }
     defer for (pty_devices[0..pty_len]) |*device| device.close(io);
     var feeder: Chip.Feeder = .{ .words = &.{} };
-    if (boot and uart_node != null) {
+    if (flash_boot) {
+        // packed for the board's flash, which 705's ROM reads it from
+        const b = board orelse fatal("--boot: {s}'s stream is for node 705, which boots from a board's SPI flash (see --board)", .{source_path});
+        const pins = b.flash orelse fatal("--boot: {s}'s stream is for node 705, which boots from an SPI flash, and {s} has none", .{ source_path, b.name });
+        if (flash_path != null) fatal("--boot puts {s}'s stream in the flash, so --flash cannot", .{source_path});
+        if (!std.meta.eql(pins.data_in.ref(), Chip.PinRef{ .node = 705, .pin = 17 }))
+            fatal("--boot: {s}'s flash sends on {f}.{d}, not 705.17, which 705's ROM reads", .{ b.name, Chip.nodeName(pins.data_in.ref().node), pins.data_in.pin });
+        if (spec.node(705).rom != .spi_boot) fatal("--boot needs node 705 to have an SPI boot ROM, as the GA144's does", .{});
+        if (roms == null) fatal("--boot needs a ROM, for node 705 to boot from (see --rom)", .{});
+        for (descriptors) |descriptor| if (descriptor.node >= Chip.Layout.chip_numbers)
+            fatal("--boot through node 705 boots its chip, not node {f}", .{Chip.nodeName(descriptor.node)});
+        for (b.pulls) |pull| if (pull.high and std.meta.eql(pull.terminal().ref(), pins.data_in.ref()) and b.jumperOn(pull.jumper, settings[0..settings_len]))
+            fatal("--boot: {s} holds 705.17 high{s}{s}, so 705 does not boot from the flash", .{ b.name, if (pull.jumper != null) " through " else "", pull.jumper orelse "" });
+        const words = layOut(arena, layout, assembled, source_path);
+        const packed_stream = gasim.streamer.pack(words, try arena.alloc(u8, (words.len * 18 + 15) / 16 * 2)) catch
+            fatal("--boot: {s}'s stream is too long for the STREAMER to pack", .{source_path});
+        flash = .init(packed_stream);
+    } else if (boot and uart_node != null) {
         const root = uart_node.?;
         // a boot stream sets up nodes of the chip it goes to
         for (descriptors) |descriptor| if (descriptor.node / Chip.Layout.chip_numbers != root / Chip.Layout.chip_numbers)
@@ -528,20 +553,9 @@ pub fn main(init: std.process.Init) !void {
             fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {f}", .{ uart_option, Chip.nodeName(root) });
         if (roms == null) fatal("--boot needs a ROM, for node {f} to boot from (see --rom)", .{Chip.nodeName(root)});
         // laid out as arrayForth 3's STREAMER does, for a STREAM[ ]STREAM
-        const words = if (assembled.stream != null) streamer: {
-            var frame_buffer: [gasim.arrayforth.Stream.max_frames]gasim.streamer.Frame = undefined;
-            const frames = assembled.frames(&frame_buffer);
-            // ]FRAME has made sure each starts at 708
-            if (root != 708) fatal("--boot: {s}'s stream is for node 708, the only root gasim has of the STREAMER's, not the --uart node {f}", .{ source_path, Chip.nodeName(root) });
-            const buffer = try arena.alloc(gasim.Word, gasim.streamer.maxLen(frames));
-            break :streamer gasim.streamer.stream(layout, frames, programs, buffer) catch |err| switch (err) {
-                error.NoSuchNode, error.NotNeighbours, error.RepeatedNode => fatal("--boot: {s}'s COURSE is not a path of neighbours in {f}, each once ({t})", .{ source_path, layout, err }),
-                error.NotOnPath => fatal("--boot: {s} describes a node off its frame's COURSE", .{source_path}),
-                error.RootTooManyLoads, error.RootNotInPlace => fatal("--boot: node {f} can only be loaded with one part of a bin, to the addresses it comes from ({t})", .{ Chip.nodeName(root), err }),
-                error.RootStopsReading => fatal("--boot: a frame of {s} before the last leaves node {f} at warm, not reading the next (see ser-exec /P)", .{ source_path, Chip.nodeName(root) }),
-                error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
-                error.UnknownRoot, error.PathTooShort, error.NoSuchBin => unreachable,
-            };
+        const words = if (assembled.stream) |*s| streamer: {
+            if (root != s.root) fatal("--boot: {s}'s stream is for node {f}, not the --uart node {f}", .{ source_path, Chip.nodeName(s.root), Chip.nodeName(root) });
+            break :streamer layOut(arena, layout, assembled, source_path);
         } else gasim: {
             const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors) + 3 * (descriptors.len + 2));
             break :gasim gasim.boot.asyncStream(init.gpa, layout, root, descriptors, programs, buffer) catch |err| switch (err) {
@@ -609,7 +623,7 @@ pub fn main(init: std.process.Init) !void {
             .node => |node| fatal("{s}: {f}: {t}", .{ board_path.?, Chip.nodeName(node), err }),
             .link => |link| fatal("{s}: SERDES {f} to {f}: {t}", .{ board_path.?, Chip.nodeName(link[0]), Chip.nodeName(link[1]), err }),
         };
-        if (flash_path != null) b.attachFlash(&chip, &flash, settings[0..settings_len]) catch |err|
+        if (flash_path != null or flash_boot) b.attachFlash(&chip, &flash, settings[0..settings_len]) catch |err|
             fatal("{s}: the SPI flash's pins: {t}", .{ board_path.?, err });
     }
     if (uart_node) |node| {
@@ -1223,6 +1237,25 @@ fn assemble(
 ) gasim.arrayforth.Error!gasim.arrayforth.Assembled {
     if (std.mem.endsWith(u8, path, ".af")) return gasim.arrayforth.assembleNodes(source, programs, descriptors, diagnostic);
     return .{ .programs = try assembler.assembleNodesFor(spec, source, programs, diagnostic), .descriptors = &.{} };
+}
+
+/// Lays out a source's stream as arrayForth 3's STREAMER does
+fn layOut(arena: Allocator, layout: Chip.Layout, assembled: gasim.arrayforth.Assembled, source_path: []const u8) []gasim.Word {
+    const root = assembled.stream.?.root;
+    var part_buffer: [gasim.arrayforth.Stream.max_parts]gasim.streamer.Part = undefined;
+    const parts = assembled.parts(&part_buffer);
+    const buffer = arena.alloc(gasim.Word, gasim.streamer.maxLen(parts)) catch fatal("out of memory", .{});
+    return gasim.streamer.stream(layout, parts, assembled.programs, buffer) catch |err| switch (err) {
+        error.NoSuchNode, error.NotNeighbours, error.RepeatedNode => fatal("--boot: {s}'s COURSE is not a path of neighbours in {f}, each once ({t})", .{ source_path, layout, err }),
+        error.NotOnPath => fatal("--boot: {s} describes a node off its frame's COURSE", .{source_path}),
+        error.RootTooManyLoads, error.RootNotInPlace => fatal("--boot: node {f} can only be loaded with one part of a bin, to the addresses it comes from ({t})", .{ Chip.nodeName(root), err }),
+        error.RootStopsReading => fatal("--boot: a part of {s} before the last leaves node {f} at warm, not reading the next (see ser-exec and spi-exec)", .{ source_path, Chip.nodeName(root) }),
+        error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
+        error.ForwardNoRoot => fatal("--boot: {s}'s FORWARD follows no frame whose root's frame loads node {f} with x32 words or more, of which it patches x23 and x31", .{ source_path, Chip.nodeName(root) }),
+        error.ForwardTooFar => fatal("--boot: {s}'s FORWARD is to past the first 16 KB of flash, which 16 bits of the address reach", .{source_path}),
+        // which gasim's arrayForth makes sure of
+        error.UnknownRoot, error.PathTooShort, error.NoSuchBin, error.MixedRoots, error.ForwardNotFlash, error.RootPastRam => unreachable,
+    };
 }
 
 /// Reads a board file, or the EVB002's for evb002, exiting with what is

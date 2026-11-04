@@ -222,9 +222,11 @@ fn assemble(self: *Sim, kind: Kind, source: []const u8, loads: []const u32) !arr
 /// own node, and saves the chip to start from
 fn setUp(self: *Sim, kind: Kind, assembled: arrayforth.Assembled) error{ LoadFailed, OutOfMemory }!void {
     const programs = assembled.programs;
-    // the frames of a stream set nodes up one after another, through node
-    // 708's ROM
-    if (assembled.stream) |*s| if (s.frame_count > 1) return self.fail("the stream has {d} frames, which only gasim run --uart 708 --boot sends one after another", .{s.frame_count});
+    // the parts of a stream set nodes up one after another, and /ROOT and
+    // FORWARD are for the root's ROM, through node 708's UART or 705's
+    // flash
+    if (assembled.stream) |*s| if (s.part_count != s.frame_count or s.frame_count > 1)
+        return self.fail("the stream has several frames, or /ROOT or FORWARD, which only gasim run --boot sends to the root's ROM, with --uart 708 or a --board's flash for 705", .{});
     const descriptors = if (assembled.descriptors.len > 0) assembled.descriptors else own: {
         var count: usize = 0;
         for (programs) |program| if (program.bin == null) {

@@ -171,7 +171,10 @@ more info.
 - `--boot`: load programs with a boot stream through the SERDES port of node
   001, as one GA144 boots another, instead of writing them straight into RAM.
   With `--uart 708`, the stream goes through the UART to node 708's ROM
-  instead, before stdin. This needs ROM.
+  instead, before stdin. This needs ROM. An arrayForth 3 source's `STREAM[
+  ... ]STREAM` is laid out as arrayForth 3's STREAMER does: from 708
+  through the UART, or from 705 packed into the board's SPI flash, for
+  705's ROM to read (`--board evb002 --jumper J26=off --boot`).
 
   ```
   $ gasim run --uart 708 examples/uart.ga

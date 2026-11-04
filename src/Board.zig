@@ -87,7 +87,7 @@ pub const Pull = struct {
     high: bool,
     jumper: ?[]const u8 = null,
 
-    fn terminal(self: Pull) Terminal {
+    pub fn terminal(self: Pull) Terminal {
         return .{ .chip = self.chip, .node = self.node, .pin = self.pin, .jumper = self.jumper };
     }
 };
