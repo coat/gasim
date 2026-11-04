@@ -203,10 +203,14 @@ done.
      frames along a path, pumped from node to node, not gasim's tree. The
      SRAM cluster along `sr708` (block 1897) and the NIC along `s708`
      (block 2333).
+   - ✓ The STREAMER's words in gasim's arrayForth (`STREAM[`, `FRAME[`,
+     `]FRAME`, `]STREAM`, `ORGN`, `TO`, `COURSE`, `'`), with `STREAMER
+     LOAD` loading nothing, so that block 1897 builds its stream as it is,
+     up to its `]STREAM`, and `--boot` with `--uart` lays out a stream
+     that has them as the STREAMER does. One frame per stream.
    - The STREAMER's other roots: 300 (synchronous), 705 (SPI, packed for
-     flash) and 207 (pF/144's snorkel); its two-chip paths; and its words
-     in gasim's arrayForth (`STREAM[`, `FRAME[`, `ORGN`, `TO`, `COURSE`),
-     so the blocks that build streams run as they are.
+     flash) and 207 (pF/144's snorkel); streams of several frames; and its
+     two-chip paths.
    - A stream captured once from arrayForth 3 under Wine and kept beside
      the ROM, as it is GreenArrays', would check the port byte for byte.
      Capturing needs RTS on a pty, which a preload library gives (branch
