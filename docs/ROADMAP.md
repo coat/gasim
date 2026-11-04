@@ -179,8 +179,10 @@ done.
      UART on its node's pins, with a doorbell that the readers ring so a
      run waits for input on any; ga-tools boots node 708 of either chip
      through one, its RTS calls stubbed out.
-   - The UART on TCP or the TUI; SPI flash backed by a file; the 2 MB SRAM
-     on 007, 008 and 009; the analog nodes' outputs.
+   - ✓ The EVB002's SPI flash, backed by a file (`--flash`): a device on
+     host 705's four pins that answers reads (`src/Flash.zig`).
+   - The UART on TCP or the TUI; writing the flash; the 2 MB SRAM on 007,
+     008 and 009; the analog nodes' outputs.
    - Pin activity dumped as VCD files for GTKWave.
    - The console stays, for playing and debugging.
    - The UART's state in snapshots, and a UART in the TUI, GUI and web.
@@ -191,8 +193,9 @@ done.
      booting 708 (`zig build ga-tools`): a check that doesn't involve
      GreenArrays' code.
    - ✓ Code from the host chip running on the target's SERDES boot ROM.
-   - SPI boot through 705's ROM, and the host booting the target over
-     SERDES and 300↔300 with GreenArrays' own code.
+   - ✓ SPI boot through 705's ROM, from the flash, with J26 (NO BOOT) off.
+   - The host booting the target over SERDES and 300↔300 with
+     GreenArrays' own code.
 5. **arrayForth 3's streams, from files.** Its applications booting 708
    through the EVB002's USB port A, each node checked as it starts against
    its descriptor, with no ptys, RTS or Wine in gasim.
