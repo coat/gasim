@@ -150,6 +150,9 @@ more info.
   ptys](#serial-ports-on-ptys)).
 - `--jumper <name>=on|off`: set one of the board's jumpers otherwise than
   as it is shipped, such as `J26=off`. Can be given more than once.
+- `--flash <file>`: with `run`, the contents of the board's SPI flash, up
+  to 16 MB, erased past the end. The EVB002's host 705 boots from it with
+  `--jumper J26=off` (NO BOOT), and the ROM.
 - `--chip <file>`: the chip, described in a chip file (see [Chip
   files](#chip-files); default the GA144)
 - `--layout <rows>x<columns>`: a chip of that size, up to 100x100, of basic
@@ -283,6 +286,9 @@ with (AN021):
 - the host chip, with USB ports A (708's pins 17 and 1) and B (200.17 in,
   100.17 out), J26 (NO BOOT) holding 705.17 high, and pull-ups on the SPI
   flash's and the SRAM's chip enables;
+- the SPI flash on host 705's pins 1 (clock), 3 (chip select), 5 (data
+  out) and 17 (data in), with the contents of a file given with `--flash`,
+  which answers reads: 705's ROM boots from it with `--jumper J26=off`;
 - the target chip, chip 1, with USB port C (1.708's pins 17 and 1) and a
   pull-up on 1.705.17;
 - SERDES from host 701 to target 001, and J34 and J35 joining the chips'

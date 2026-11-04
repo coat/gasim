@@ -7,6 +7,7 @@
 // jumpers: on as shipped
 // serial: the FT232R USB serial chips, sending to the chip on rx and
 //   listening on tx, at 921600 baud, through J23 (DB014 5.2)
+// flash: the SPI flash's pins
 // pulls: resistors to high or low
 // wires: between pins, through a jumper
 // serdes: SERDES links between nodes
@@ -54,6 +55,15 @@
             .rx = .{ .chip = 1, .node = 708, .pin = 17, .jumper = "J23.9-10" },
             .tx = .{ .chip = 1, .node = 708, .pin = 1, .jumper = "J23.11-12" },
         },
+    },
+    // the 16 MB SPI flash on host 705's pins (DB014 5.3), which J39 and
+    // J37 select as shipped while node 600.17 is low, as it is from reset.
+    // Node 600's choice of the MMC card instead is not modelled.
+    .flash = .{
+        .clock = .{ .node = 705, .pin = 1 },
+        .select = .{ .node = 705, .pin = 3 },
+        .data_out = .{ .node = 705, .pin = 5 },
+        .data_in = .{ .node = 705, .pin = 17 },
     },
     .pulls = .{
         .{ .node = 705, .pin = 17, .high = true, .jumper = "J26" },
