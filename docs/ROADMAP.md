@@ -181,8 +181,11 @@ done.
      through one, its RTS calls stubbed out.
    - ✓ The EVB002's SPI flash, backed by a file (`--flash`): a device on
      host 705's four pins that answers reads (`src/Flash.zig`).
-   - The UART on TCP or the TUI; writing the flash; the 2 MB SRAM on 007,
-     008 and 009; the analog nodes' outputs.
+   - ✓ The EVB002's 2 MB SRAM, on host 007's and 009's parallel buses
+     (`Computer.BusDevice`, DB in io) and 008's pins (`src/Sram.zig`),
+     which the disk's SRAM cluster writes and reads back.
+   - The UART on TCP or the TUI; writing the flash; the parallel buses'
+     phantom wakeups and Up port; the analog nodes' outputs.
    - Pin activity dumped as VCD files for GTKWave.
    - The console stays, for playing and debugging.
    - The UART's state in snapshots, and a UART in the TUI, GUI and web.
@@ -219,10 +222,10 @@ done.
      as `PACK` does (`streamer.pack`), `/ROOT`'s frames for the root alone
      and `FORWARD` (`--board evb002 --jumper J26=off --boot`). Block
      1671's stream, without the polyFORTH VM, boots its first frame (block
-     1672's) as described, takes the nucleus to 108, and reads the next
-     frame where `FORWARD` says, which comes to bin 1710's own x3A38: the
-     stream so far pads to as many words as arrayForth 3's, 1656. The next frame waits on 108,
-     which waits on the SRAM gasim does not have yet (step 3).
+     1672's) as described, takes the nucleus through 108 to the SRAM, and
+     boots the next frame, from where `FORWARD` says, as described too.
+     That address is bin 1710's own x3A38: the stream so far pads to as
+     many words as arrayForth 3's, 1656.
    - The STREAMER's other roots: 300 (synchronous) and 207 (pF/144's
      snorkel); and its two-chip paths.
    - A stream captured once from arrayForth 3 under Wine and kept beside
