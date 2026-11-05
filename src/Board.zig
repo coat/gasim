@@ -1,7 +1,7 @@
 //! What a board puts around its chips: serial ports wired to the chips'
-//! pins, an SPI flash, pull resistors, wires between pins, SERDES links
-//! between chips, pins wired to chips' RESET- pins, and the jumpers that
-//! connect some of them. The EVB002's is
+//! pins, an SPI flash, an SRAM, pull resistors, wires between pins, SERDES
+//! links between chips, pins wired to chips' RESET- pins, and the jumpers
+//! that connect some of them. The EVB002's is
 //! `boards/evb002.zon`; other boards are described the same way, in a board
 //! file read on the host side (see `parse`). A board's chips are alike, and
 //! chip k's nodes are numbered k.yxx, as in `Chip.Layout`.
@@ -15,6 +15,7 @@ chips: u8 = 1,
 jumpers: []const Jumper = &.{},
 serial: []const Serial = &.{},
 flash: ?FlashPins = null,
+sram: ?SramPins = null,
 pulls: []const Pull = &.{},
 wires: []const Wire = &.{},
 serdes: []const Link = &.{},
@@ -76,6 +77,23 @@ pub const FlashPins = struct {
 
     fn terminals(self: FlashPins) [4]Terminal {
         return .{ self.clock, self.select, self.data_out, self.data_in };
+    }
+};
+
+/// An SRAM (`Sram`) on two nodes' parallel buses and four pins: the
+/// address bus and two high address lines above it, the data bus, and
+/// chip enable and write enable
+pub const SramPins = struct {
+    address: Node,
+    data: Node,
+    high: [2]Terminal,
+    enable: Terminal,
+    write: Terminal,
+    /// as many as the address lines reach, or fewer, a power of 2
+    words: u32 = 1 << 20,
+
+    fn terminals(self: SramPins) [4]Terminal {
+        return .{ self.high[0], self.high[1], self.enable, self.write };
     }
 };
 
@@ -174,6 +192,13 @@ pub const Error = error{
     /// port's, or one wired to a chip's RESET-, each of which a device of
     /// its own is on
     FlashPinShared,
+    /// an SRAM's bus node without a parallel bus, or the same for both
+    NotBus,
+    /// an SRAM's pin that is another of its pins, or a device's
+    SramPinShared,
+    /// an SRAM of more words than its address lines reach, or not a power
+    /// of 2
+    SramSize,
 };
 
 /// what `check` found at fault, for messages
@@ -222,7 +247,7 @@ pub fn check(self: Board, spec: Spec, fault: *Fault) Error!void {
         fault.* = .{ .node = n.number() };
         if (n.chip >= self.chips or n.node >= Chip.Layout.chip_numbers) return error.NoSuchNode;
         const i = self.layout(spec).index(n.number()) orelse return error.NoSuchNode;
-        if (!spec.hasData(n.node) or spec.pins(n.node) != 0 or self.layout(spec).neighbour(i, .up) != null) return error.NotSerdes;
+        if (!spec.hasData(n.node) or spec.node(n.node).bus or spec.pins(n.node) != 0 or self.layout(spec).neighbour(i, .up) != null) return error.NotSerdes;
         if (link.a.number() == link.b.number()) return error.SerdesListedTwice;
         for (self.serdes[0..k]) |other| if (other.a.number() == n.number() or other.b.number() == n.number()) return error.SerdesListedTwice;
     };
@@ -250,6 +275,23 @@ pub fn check(self: Board, spec: Spec, fault: *Fault) Error!void {
                 for (terminals) |pin| if (std.meta.eql(other, pin.ref())) return error.FlashPinShared;
                 for (self.resets) |r| if (std.meta.eql(other, r.by.ref())) return error.FlashPinShared;
             };
+        }
+    }
+    if (self.sram) |m| {
+        for ([_]Node{ m.address, m.data }) |n| {
+            fault.* = .{ .node = n.number() };
+            if (n.chip >= self.chips or n.node >= Chip.Layout.chip_numbers or self.layout(spec).index(n.number()) == null) return error.NoSuchNode;
+            if (!spec.node(n.node).bus or m.address.number() == m.data.number()) return error.NotBus;
+        }
+        fault.* = .none;
+        if (m.words == 0 or m.words & (m.words - 1) != 0 or m.words > 1 << 20) return error.SramSize;
+        const terminals = m.terminals();
+        for (terminals, 0..) |t, k| {
+            try self.checkTerminal(spec, t, fault);
+            for (terminals[0..k]) |other| if (std.meta.eql(other.ref(), t.ref())) return error.SramPinShared;
+            for (self.serial) |port| if (std.meta.eql(t.ref(), port.rx.ref()) or std.meta.eql(t.ref(), port.tx.ref())) return error.SramPinShared;
+            for (self.resets) |reset| if (std.meta.eql(t.ref(), reset.by.ref())) return error.SramPinShared;
+            if (self.flash) |f| for (f.terminals()) |pin| if (std.meta.eql(t.ref(), pin.ref())) return error.SramPinShared;
         }
     }
     fault.* = .none;
@@ -325,6 +367,16 @@ pub fn attachFlash(self: Board, chip: *Chip, flash: *Flash, settings: []const Se
     try chip.attachFlashPins(flash, refs[0], refs[1], refs[2], refs[3]);
 }
 
+/// Puts `sram` on the board's SRAM buses and pins, each pin connected while
+/// its jumper is on, as `settings` set it
+pub fn attachSram(self: Board, chip: *Chip, sram: *Sram, settings: []const Setting) error{ NoSram, NoSuchNode, NoBus, NoSuchPin, TwoDevices }!void {
+    const m = self.sram orelse return error.NoSram;
+    try chip.attachBus(m.address.number(), sram.addressBus());
+    try chip.attachBus(m.data.number(), sram.dataBus());
+    const devices = [4]pins.Device{ sram.highDevice(0), sram.highDevice(1), sram.enableDevice(), sram.writeDevice() };
+    for (m.terminals(), devices) |t, device| if (self.jumperOn(t.jumper, settings)) try chip.attachPin(t.ref(), device);
+}
+
 /// Parses a board file, allocating what it names in `arena`. On
 /// `error.ParseZon`, `diagnostics` describes what is wrong.
 pub fn parse(gpa: Allocator, arena: Allocator, source: [:0]const u8, diagnostics: *std.zon.parse.Diagnostics) error{ OutOfMemory, ParseZon }!Board {
@@ -380,6 +432,22 @@ test check {
     try std.testing.expectError(error.FlashPinShared, reset_wired.check(.ga144, &fault));
     const flash_plain: Board = .{ .flash = pins_705, .wires = &.{.{ .a = .{ .node = 705, .pin = 3 }, .b = .{ .node = 600, .pin = 17 } }} };
     try flash_plain.check(.ga144, &fault);
+    const sram_8: SramPins = .{ .address = .{ .node = 9 }, .data = .{ .node = 7 }, .high = .{ .{ .node = 8, .pin = 5 }, .{ .node = 8, .pin = 17 } }, .enable = .{ .node = 8, .pin = 1 }, .write = .{ .node = 8, .pin = 3 } };
+    try (Board{ .sram = sram_8 }).check(.ga144, &fault);
+    var sram = sram_8;
+    sram.data = .{ .node = 8 };
+    try std.testing.expectError(error.NotBus, (Board{ .sram = sram }).check(.ga144, &fault));
+    sram = sram_8;
+    sram.data = sram.address;
+    try std.testing.expectError(error.NotBus, (Board{ .sram = sram }).check(.ga144, &fault));
+    sram = sram_8;
+    sram.write = sram.enable;
+    try std.testing.expectError(error.SramPinShared, (Board{ .sram = sram }).check(.ga144, &fault));
+    sram = sram_8;
+    sram.words = 3;
+    try std.testing.expectError(error.SramSize, (Board{ .sram = sram }).check(.ga144, &fault));
+    const sram_flash: Board = .{ .sram = sram_8, .flash = .{ .clock = .{ .node = 8, .pin = 1 }, .select = .{ .node = 705, .pin = 3 }, .data_out = .{ .node = 705, .pin = 5 }, .data_in = .{ .node = 705, .pin = 17 } } };
+    try std.testing.expectError(error.SramPinShared, sram_flash.check(.ga144, &fault));
     const pulled: Board = .{ .pulls = &.{ .{ .node = 705, .pin = 17, .high = true }, .{ .node = 705, .pin = 17, .high = false } } };
     try std.testing.expectError(error.PullListedTwice, pulled.check(.ga144, &fault));
     const itself: Board = .{ .wires = &.{.{ .a = .{ .node = 100, .pin = 17 }, .b = .{ .node = 100, .pin = 17 } }} };
@@ -397,6 +465,8 @@ test check {
     const not_serdes: Board = .{ .chips = 2, .serdes = &.{.{ .a = .{ .node = 701 }, .b = .{ .chip = 1, .node = 708 } }} };
     try std.testing.expectError(error.NotSerdes, not_serdes.check(.ga144, &fault));
     try std.testing.expectEqual(Fault{ .node = 10708 }, fault);
+    const bus_serdes: Board = .{ .serdes = &.{.{ .a = .{ .node = 7 }, .b = .{ .node = 9 } }} };
+    try std.testing.expectError(error.NotSerdes, bus_serdes.check(.ga144, &fault));
     const no_chip: Board = .{ .chips = 2, .serdes = &.{.{ .a = .{ .node = 701 }, .b = .{ .chip = 2, .node = 1 } }} };
     try std.testing.expectError(error.NoSuchNode, no_chip.check(.ga144, &fault));
     // a node number past a chip's, which would be another chip's
@@ -601,6 +671,8 @@ const Chip = @import("Chip.zig");
 const Spec = @import("Spec.zig");
 const Uart = @import("Uart.zig");
 const Flash = @import("Flash.zig");
+const Sram = @import("Sram.zig");
+const pins = @import("pins.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

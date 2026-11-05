@@ -789,7 +789,7 @@ test "arrayForth 3's applications boot through the EVB002's USB port A as their 
             var first: usize = 0;
             while (first < checked.len) : (first += Chip.max_breakpoints) {
                 const batch = checked[first..@min(first + Chip.max_breakpoints, checked.len)];
-                expectBootsAsDescribed(parsed, batch, .{ .uart = words }, assembled.programs) catch |err| {
+                expectBootsAsDescribed(parsed, batch, .{ .uart = words }, assembled.programs, null) catch |err| {
                     std.debug.print("{s} with {s} stream\n", .{ source, name });
                     return err;
                 };
@@ -830,10 +830,10 @@ test "a stream of several frames boots each along its own path, and sets a node 
     // 608 is at 0 with its first frame's code before it is with its own
     const checked = [_]Descriptor{ frames[0].descriptors[0], frames[1].descriptors[0], frames[1].descriptors[1] };
     try expectEqual(608, checked[1].node);
-    try expectBootsAsDescribed(parsed, &checked, .{ .uart = words }, assembled.programs);
+    try expectBootsAsDescribed(parsed, &checked, .{ .uart = words }, assembled.programs, null);
 }
 
-test "arrayForth 3's stream for flash, after block 1671, boots its first frame and reads the next where FORWARD says" {
+test "arrayForth 3's stream for flash, after block 1671, boots through the EVB002's flash and SRAM as described" {
     var roms: [144]ga144.NodeRom = undefined;
     const parsed = try testRom(&roms);
     const gpa = std.testing.allocator;
@@ -841,15 +841,16 @@ test "arrayForth 3's stream for flash, after block 1671, boots its first frame a
     defer gpa.free(disk);
 
     // block 1671 without the polyFORTH VM, which gasim's arrayForth cannot
-    // describe, after the bins it loads: the speed-up (block 2286), 705's
-    // flash boot and the wires to the SRAM (2295, 2296), and the SRAM
-    // cluster's (2331). Block 1672's
+    // describe, and with the NIC, as the 708 test has it, so that the second
+    // frame describes nodes, after the bins it loads: the speed-up (block
+    // 2286), 705's flash boot and the wires to the SRAM (2295, 2296), and
+    // the SRAM cluster's (2331). Block 1672's
     // frame sets up the wires and 108 to take pF/144's nucleus from flash
     // x20000 to the SRAM, and leaves 705 in bin 1710's start, which copies
     // it and then reads the next frame where FORWARD says.
     const source =
         \\1562 LOAD  2331 LOAD  2286 LOAD  2295 LOAD  2296 LOAD
-        \\STREAMER LOAD  0 CONSTANT ?CLK  0 CONSTANT ?ETH
+        \\STREAMER LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD
         \\705 STREAM[
         \\   ( Speedup)  0 0 3 1608 /ROOT
         \\   ( Nucleus to SRAM)  1672 LOAD
@@ -900,24 +901,44 @@ test "arrayForth 3's stream for flash, after block 1671, boots its first frame a
         checked_len += 1;
     };
     try expectEqual(13, checked_len);
-    try expectBootsAsDescribed(parsed, checked_buffer[0..checked_len], .{ .flash = image }, assembled.programs);
+    const sram_words = try gpa.alloc(u16, Sram.evb002_words);
+    defer gpa.free(sram_words);
+    @memset(sram_words, 0xffff);
+    try expectBootsAsDescribed(parsed, checked_buffer[0..checked_len], .{ .flash = image }, assembled.programs, sram_words);
 
-    // and the nucleus goes through the wires to 108, which stores it to
-    // the SRAM, and 705 reads the second frame from where FORWARD patched
-    // into its RAM. That frame's path goes through 108, which waits on the
-    // SRAM cluster, as gasim has no SRAM, so it gets no further.
-    var chip: Chip = try .initChips(gpa, .ga144, Board.evb002.chips);
-    defer chip.deinit(gpa);
-    try chip.loadRom(parsed);
-    const settings = [_]Board.Setting{.{ .name = "J26", .on = false }};
-    var fault: Board.Fault = .none;
-    try Board.evb002.apply(&chip, &.{}, &settings, &fault);
-    var flash: Flash = .init(image);
-    try Board.evb002.attachFlash(&chip, &flash, &settings);
-    try chip.run();
-    try expectEqual(0x1234, chip.node(108).?.data_stack.t);
-    const fwd: u18 = @bitCast(chip.node(705).?.mem[0x23]);
+    // and with the nucleus through the wires to 108, which stores it to the
+    // SRAM, 705 reads the second frame where FORWARD patched into its RAM:
+    // the first frame's nodes that it does not reach, the SRAM cluster, and
+    // each node it describes, start as described
+    checked_len = 0;
+    for (parts[1].frame.descriptors) |d| if (d.node != 705 and d.node != 708 and std.mem.indexOfScalar(u16, parts[3].frame.path, d.node) == null) {
+        checked_buffer[checked_len] = d;
+        checked_len += 1;
+    };
+    try expectEqual(4, checked_len);
+    for (parts[3].frame.descriptors) |d| if (d.node != 705 and d.node != 708) {
+        checked_buffer[checked_len] = d;
+        checked_len += 1;
+    };
+    try expectEqual(4 + 30, checked_len);
+    var first: usize = 0;
+    while (first < checked_len) : (first += Chip.max_breakpoints) {
+        @memset(sram_words, 0xffff);
+        try expectBootsAsDescribed(parsed, checked_buffer[first..@min(first + Chip.max_breakpoints, checked_len)], .{ .flash = image }, assembled.programs, sram_words);
+    }
+    // by when the last of the second frame's nodes start, the nucleus is in
+    // the SRAM, its count less 1 at 0 and its word next, at 4, as node 009
+    // puts addresses on the bus shifted up 2
+    try expectEqual(0, sram_words[0]);
+    try expectEqual(0x1234, sram_words[4]);
+    // and nothing else is written
+    try expectEqual(sram_words.len - 2, std.mem.count(u16, sram_words, &.{0xffff}));
+
+    // FORWARD's address, in the first frame's root frame, which loads all
+    // of 705's RAM from bin 1710, is where the second frame starts
     const second = std.mem.lastIndexOfScalar(Word, stream_words, 0x10000 | @as(Word, streamer.spi_exec)).?;
+    const root_ram = std.mem.lastIndexOf(Word, stream_words[0..second], &.{ 0, 64 }).? + 2;
+    const fwd: u18 = @bitCast(stream_words[root_ram + 0x23]);
     try expectEqual(second * 18 / 8, fwd >> 2);
     // which is the x3A38 that bin 1710's source has for fwd, as FORWARD
     // patched it when the disk's stream was built: the speed-up and the
@@ -928,18 +949,71 @@ test "arrayForth 3's stream for flash, after block 1671, boots its first frame a
     var unpadded = second;
     while (stream_words[unpadded - 1] == 0) unpadded -= 1;
     try expectEqual(1651, unpadded);
-    try expect(flash.next_bit.? > (fwd >> 2) * 8);
-    try expect(flash.next_bit.? < stream_words.len * 18);
+}
+
+test "arrayForth 3's SRAM cluster writes the EVB002's SRAM and reads it back" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    const gpa = std.testing.allocator;
+    const disk = try Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024));
+    defer gpa.free(disk);
+
+    // the cluster's bins and descriptors (blocks 2331 and 2332), and a
+    // master on 108 with block 2337's words, which reads each word after
+    // the cluster's 007 has sent 008 stop, ending the read cycle, from the
+    // charge the SRAM left on the data bus (block 4735)
+    const source =
+        \\1562 LOAD  2331 LOAD  2332 LOAD
+        \\1999 108 ASM[ NODE BIN ERS  # 0 org
+        \\: x! ( n a)  dup dup xor  : ex! ( n da)  : mk! ( m f -p)  inv !b inv !b !b ;
+        \\: x@ ( a - n)  dup dup xor  : ex@ ( da - n)  !b !b @b ;
+        \\: go  x1234. 4. x!  x5678. 6. x!  4. x@  6. x@  begin end
+        \\>BIN ]ASM
+        \\108 +NODE  1999 /RAM  LEFT /B  1999 ITS go /P
+    ;
+    const programs = try gpa.alloc(Program, Chip.Layout.chip_numbers);
+    defer gpa.free(programs);
+    var descriptor_buffer: [8]Descriptor = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = arrayforth.assembleScript(source, disk, programs, &descriptor_buffer, &diagnostic) catch |err| {
+        std.debug.print("{t} at block {d} line {d} '{s}'\n", .{ err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
+        return err;
+    };
+    try expectEqual(5, assembled.descriptors.len);
+
+    var chip: Chip = try .init(gpa, .ga144);
+    defer chip.deinit(gpa);
+    try chip.loadRom(parsed);
+    const sram_words = try gpa.alloc(u16, Sram.evb002_words);
+    defer gpa.free(sram_words);
+    @memset(sram_words, 0);
+    var sram: Sram = .init(sram_words);
+    try Board.evb002.attachSram(&chip, &sram, &.{});
+    for (assembled.descriptors) |d| try chip.setUp(d, assembled.programs);
+    for (0..100_000) |_| _ = chip.step();
+
+    const master = chip.node(108).?;
+    try expectEqual(0x5678, master.data_stack.t);
+    try expectEqual(0x1234, master.data_stack.s);
+    // at 4 and 6 shifted up 2, as 009 puts them on the bus
+    try expectEqual(0x1234, sram_words[4 << 2]);
+    try expectEqual(0x5678, sram_words[6 << 2]);
+    try expectEqual(sram_words.len - 2, std.mem.count(u16, sram_words, &.{0}));
 }
 
 /// Boots the EVB002's host chip, node 708 with a stream through USB port A,
 /// or node 705 from the contents of its flash, with J26 (NO BOOT) off, and
-/// checks that each node of `checked` starts as its descriptor says
-fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, from: union(enum) { uart: []const Word, flash: []const u8 }, programs: []const Program) !void {
+/// checks that each node of `checked` starts as its descriptor says. The
+/// board's SRAM holds `sram_words`, if given, or else words of its own.
+fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, from: union(enum) { uart: []const Word, flash: []const u8 }, programs: []const Program, sram_words: ?[]u16) !void {
     const gpa = std.testing.allocator;
     var chip: Chip = try .initChips(gpa, .ga144, Board.evb002.chips);
     defer chip.deinit(gpa);
     try chip.loadRom(roms);
+    const own_words: ?[]u16 = if (sram_words == null) try gpa.alloc(u16, Sram.evb002_words) else null;
+    defer if (own_words) |words| gpa.free(words);
+    if (own_words) |words| @memset(words, 0);
+    var sram: Sram = .init(sram_words orelse own_words.?);
 
     const words = if (from == .uart) from.uart else &.{};
     const bytes = try gpa.alloc(u8, 3 * words.len);
@@ -954,6 +1028,7 @@ fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descript
     try Board.evb002.apply(&chip, &.{.{ .uart = &uart, .port = port_a }}, settings, &fault);
     var flash: Flash = .init(if (from == .flash) from.flash else &.{});
     if (from == .flash) try Board.evb002.attachFlash(&chip, &flash, settings);
+    try Board.evb002.attachSram(&chip, &sram, settings);
     for (checked) |d| try chip.breakpoints.insert(.init(chip.layout.index(d.node).?, @truncate(d.p)));
 
     // a node that starts at a port, as the NIC's 616 does at its left
@@ -1168,6 +1243,7 @@ const Program = assembler.Program;
 const Console = @import("Console.zig");
 const Uart = @import("Uart.zig");
 const Flash = @import("Flash.zig");
+const Sram = @import("Sram.zig");
 const ga144 = @import("ga144.zig");
 const testRom = @import("rom.zig").testRom;
 const streamer = @import("streamer.zig");
