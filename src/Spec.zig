@@ -20,6 +20,8 @@ pub const Node = struct {
     /// through up on the top and bottom rows and left on the others, if
     /// that port faces off the array.
     pins: []const u5 = &.{},
+    /// an 18-bit parallel bus, through its data register (DB001 3.5)
+    bus: bool = false,
     /// the word of its ROM it starts at after reset, rather than waiting
     /// for code on its ports
     reset: ?Reset = null,
@@ -61,9 +63,9 @@ pub fn resetAddress(self: Spec, number: u16) ?u9 {
 }
 
 /// whether node `number` has a data register, which a SERDES node has, as
-/// its ROM writes to it
+/// its ROM writes to it, and a node with a parallel bus, which it drives
 pub fn hasData(self: Spec, number: u16) bool {
-    return self.node(number).rom == .serdes_boot;
+    return self.node(number).rom == .serdes_boot or self.node(number).bus;
 }
 
 pub const Error = error{
@@ -112,6 +114,7 @@ test ga144 {
     try std.testing.expectEqual(0xa9, ga144.resetAddress(200));
     try std.testing.expectEqual(null, ga144.resetAddress(404));
     try std.testing.expect(ga144.hasData(1) and ga144.hasData(701) and !ga144.hasData(708));
+    try std.testing.expect(ga144.node(7).bus and ga144.node(9).bus and !ga144.node(8).bus and ga144.hasData(9));
     try std.testing.expectEqual(Node{ .node = 404 }, ga144.node(404));
     try std.testing.expectEqual(.async_boot, ga144.node(10708).rom);
     try std.testing.expectEqual(0xaa, ga144.romWord(708, "cold"));

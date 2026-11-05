@@ -292,6 +292,10 @@ with (AN021):
 - the SPI flash on host 705's pins 1 (clock), 3 (chip select), 5 (data
   out) and 17 (data in), with the contents of a file given with `--flash`,
   which answers reads: 705's ROM boots from it with `--jumper J26=off`;
+- the SRAM, 1M words of 16 bits, zeroed at the start of a run: its address
+  on host 009's parallel bus and 008.5 and 008.17, its data on 007's bus,
+  and CE- and WE- on 008.1 and 008.3, as arrayForth 3's SRAM cluster
+  drives them;
 - the target chip, chip 1, with USB port C (1.708's pins 17 and 1) and a
   pull-up on 1.705.17;
 - SERDES from host 701 to target 001, and J34 and J35 joining the chips'

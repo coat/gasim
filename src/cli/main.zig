@@ -625,6 +625,16 @@ pub fn main(init: std.process.Init) !void {
         };
         if (flash_path != null or flash_boot) b.attachFlash(&chip, &flash, settings[0..settings_len]) catch |err|
             fatal("{s}: the SPI flash's pins: {t}", .{ board_path.?, err });
+        // the SRAM, zeroed, which is not in the chip's snapshots, so only
+        // for run, as a board of more than one chip such as the EVB002 is
+        if (b.sram) |m| if (command == .run) {
+            const sram = try arena.create(gasim.Sram);
+            const words = try arena.alloc(u16, m.words);
+            @memset(words, 0);
+            sram.* = .init(words);
+            b.attachSram(&chip, sram, settings[0..settings_len]) catch |err|
+                fatal("{s}: the SRAM: {t}", .{ board_path.?, err });
+        };
     }
     if (uart_node) |node| {
         uart.input = .{ .io = io, .queue = &input };

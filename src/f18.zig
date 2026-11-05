@@ -160,6 +160,10 @@ pub const Computer = struct {
     /// io register bit that, when set, has a read of the wakeup pin wait for
     /// it to be low rather than high
     const wake_low_bit: u18 = 1 << 11;
+    /// io register bit DB, which, set as it is from reset, has a node with a
+    /// parallel bus drive it from its data register, and clear, read it as
+    /// inputs (DB001 3.5; bit 12, as the SRAM cluster's io values have it)
+    pub const bus_driven_bit: u18 = 1 << 12;
 
     /// control and status for communication ports and I/O logic.
     io: Word,
@@ -200,6 +204,10 @@ pub const Computer = struct {
     /// a device on the pins, which sees them as the node reads and writes
     /// io, at its time then, as a word can run a long `unext` loop first
     pin_device: ?PinDevice = null,
+    /// whether its data register is a parallel bus, and a device on it, if
+    /// any
+    bus: bool = false,
+    bus_device: ?BusDevice = null,
     /// io bits of the pins on a net with something else on it, whose levels
     /// are in `pin_inputs` even while the node drives them, as the net may
     /// be driven otherwise
@@ -228,6 +236,19 @@ pub const Computer = struct {
     pub const PinDevice = struct {
         context: *anyopaque,
         read: *const fn (context: *anyopaque, node: *Computer) void,
+        written: *const fn (context: *anyopaque, node: *const Computer) void,
+    };
+
+    /// A device on a node's 18-bit parallel bus, told when the node writes
+    /// its data register, the bus register, or io, which sets whether it
+    /// drives the bus, and asked, when the node reads the bus as inputs,
+    /// what is on the bus at the node's time: what the device drives, or
+    /// the charge the lines keep of what it last drove, or null for that of
+    /// what the node drove. The node's Up port, which waits on a phantom
+    /// signal, is not the bus here.
+    pub const BusDevice = struct {
+        context: *anyopaque,
+        read: *const fn (context: *anyopaque, node: *const Computer) ?u18,
         written: *const fn (context: *anyopaque, node: *const Computer) void,
     };
 
@@ -386,7 +407,13 @@ pub const Computer = struct {
 
         const raw: u9 = @bitCast(address);
         if (raw == io_address) return self.readIo();
-        if (raw == data_address) if (self.data) |data| return data;
+        if (raw == data_address) if (self.data) |data| {
+            // as inputs: what a device has on the bus, or else the charge
+            // the lines keep of what the node drove, taken as its register,
+            // which it may have written since without driving
+            if (self.bus and !self.drivesBus()) if (self.bus_device) |device| if (device.read(device.context, self)) |value| return @bitCast(value);
+            return data;
+        };
         if (port.select(raw)) |ports| {
             if (self.readPorts(ports)) |word| return word;
         }
@@ -406,10 +433,12 @@ pub const Computer = struct {
         if (raw == io_address) {
             self.io = value;
             if (self.pin_device) |device| device.written(device.context, self);
+            if (self.bus_device) |device| device.written(device.context, self);
             return true;
         }
         if (raw == data_address and self.data != null) {
             self.data = value;
+            if (self.bus_device) |device| device.written(device.context, self);
             return true;
         }
         if (port.select(raw)) |ports| {
@@ -501,6 +530,11 @@ pub const Computer = struct {
             }
         }
         return written;
+    }
+
+    /// whether a node with a parallel bus drives it, as DB in io says
+    pub fn drivesBus(self: *const Computer) bool {
+        return @as(u18, @bitCast(self.io)) & bus_driven_bit != 0;
     }
 
     /// Bits without I/O facilities read as the inverse of what was last
