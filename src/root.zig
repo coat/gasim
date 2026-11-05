@@ -20,6 +20,7 @@ pub const Spec = @import("Spec.zig");
 pub const Uart = @import("Uart.zig");
 pub const Flash = @import("Flash.zig");
 pub const Sram = @import("Sram.zig");
+pub const Sync = @import("Sync.zig");
 pub const disassembler = @import("disassembler.zig");
 pub const ga144 = @import("ga144.zig");
 pub const rom = @import("rom.zig");
@@ -53,4 +54,5 @@ test {
     _ = @import("Uart.zig");
     _ = @import("Flash.zig");
     _ = @import("Sram.zig");
+    _ = @import("Sync.zig");
 }

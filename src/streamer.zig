@@ -1,7 +1,9 @@
 //! Boot streams laid out as arrayForth 3's STREAMER (blocks 1602 to 1618 of
 //! its disk) lays them out for the ROM of node 708, which reads them from
-//! its pins as a UART sends them, or node 705, which reads them from an SPI
-//! flash (`Flash`), rather than as `boot` does.
+//! its pins as a UART sends them, node 300, which reads them from its
+//! synchronous line (`Sync`), or node 705, which reads them from an SPI
+//! flash (`Flash`), or for node 207, pF/144's snorkel, which sends them
+//! itself, rather than as `boot` does.
 //!
 //! The STREAMER boots nodes along a path, a line of neighbours from the
 //! root, instead of a tree. A frame for the root's ROM writes the rest of
@@ -17,17 +19,29 @@
 //! Between them can be frames for the root's ROM alone (/ROOT), and, in a
 //! stream for flash, FORWARD, which tells the root's code where the next
 //! frame starts in the flash.
+//!
+//! A stream from 207 has no ROM to read it: the snorkel writes it all to
+//! the path's next node, so its frames have no header and are not followed
+//! by a frame for the root, which goes on as it is (n207's R-ORG and R-END,
+//! of 0).
 
-/// The roots the STREAMER builds streams for here (ROOTS, block 1602, also
-/// has 300 and 207): where the root's ROM reads a frame (asyORG, spiORG),
-/// and its default path, the ENTIRE chip, as its corners (df708, df705)
-pub const roots = [_]struct { node: u16, exec: u10, entire: []const u16 }{
+/// The roots the STREAMER builds streams for (ROOTS, block 1602): where the
+/// root's ROM reads a frame (asyORG, synORG, spiORG), but for 207, and its
+/// default path, as its corners (df708, df300, df705, df207): the ENTIRE
+/// chip from 708 and 705, all but node 000 from 300, and from 207 all but
+/// the nodes pF/144 runs on, 000 to 009, 100 to 107 and 200 to 206
+pub const roots = [_]struct { node: u16, exec: ?u10, entire: []const u16 }{
     .{ .node = 708, .exec = boot.read_frame, .entire = &.{ 708, 717, 17, 0, 100, 116, 216, 200, 300, 316, 416, 400, 500, 516, 616, 600, 700, 707 } },
+    .{ .node = 300, .exec = sync_exec, .entire = &.{ 300, 700, 717, 617, 601, 501, 517, 417, 401, 301, 317, 217, 200, 100, 117, 17, 1 } },
     .{ .node = 705, .exec = spi_exec, .entire = &.{ 705, 700, 0, 17, 117, 101, 201, 217, 317, 301, 401, 417, 517, 501, 601, 617, 717, 706 } },
+    .{ .node = 207, .exec = null, .entire = &.{ 207, 208, 108, 109, 209, 210, 10, 17, 117, 111, 211, 217, 317, 300, 400, 417, 517, 500, 600, 617, 717, 700 } },
 };
 
 /// where node 705's ROM reads a frame from the flash
 pub const spi_exec: u10 = 0xb6;
+/// where node 300's ROM reads a frame from its synchronous line, its
+/// ser-exec (block 2224)
+pub const sync_exec: u10 = 0xb6;
 
 /// the default path of the root `node`, if it is one
 pub fn entire(node: u16) ?[]const u16 {
@@ -90,6 +104,11 @@ pub const Error = error{
     ForwardTooFar,
     /// /ROOT of words past the end of RAM
     RootPastRam,
+    /// a descriptor for root 207, which a stream from it does not set up,
+    /// as its snorkel sends the stream
+    RootNotSetUp,
+    /// /ROOT in a stream from 207, which has no ROM to read it
+    RootFrameNoRom,
 };
 
 /// A frame of a stream, from one FRAME[ to its ]FRAME: the path it takes
@@ -160,6 +179,7 @@ pub fn stream(
         if (root != null and root != node) return error.MixedRoots;
         root = node;
     };
+    if (root == 207) for (parts) |part| if (part == .root) return error.RootFrameNoRom;
     var len: usize = 0;
     // the root's RAM in the last frame's root frame, which FORWARD patches
     var root_ram: ?struct { at: usize, address: u6, count: u7 } = null;
@@ -168,9 +188,11 @@ pub fn stream(
         const goes_to: ?u10 = switch (part) {
             .frame => |f| jump: {
                 const words = try frame(layout, f.path, f.descriptors, programs, buffer[len..]);
-                const load = rootLoad(descriptorOf(f.descriptors, f.path[0]));
-                root_ram = .{ .at = len + words.len - load.count, .address = load.address, .count = load.count };
                 len += words.len;
+                // the snorkel, which goes on sending
+                if (f.path[0] == 207) break :jump null;
+                const load = rootLoad(descriptorOf(f.descriptors, f.path[0]));
+                root_ram = .{ .at = len - load.count, .address = load.address, .count = load.count };
                 break :jump descriptorOf(f.descriptors, f.path[0]).p;
             },
             .root => |r| jump: {
@@ -232,10 +254,11 @@ pub fn pack(words: []const Word, buffer: []u8) error{StreamTooLong}![]u8 {
 /// registers and stacks are left as they are. A root without a load stores
 /// the first word of bin 0, or 0 when that bin was not saved, at its RAM
 /// address 0. Unlike the STREAMER, a descriptor for a node off the path
-/// is an error. The descriptors are taken as they are, so they should
-/// carry FRAME['s defaults, as those of gasim's arrayForth do: one without
-/// a B, as from `Descriptor.ofProgram`, leaves B as it is, where the
-/// STREAMER sets it to IO.
+/// is an error, as is one for root 207, which the STREAMER ignores. The
+/// descriptors are taken as they are, so they should carry FRAME['s
+/// defaults, as those of gasim's arrayForth do: one without a B, as from
+/// `Descriptor.ofProgram`, leaves B as it is, where the STREAMER sets it
+/// to IO.
 fn frame(
     layout: Chip.Layout,
     path: []const u16,
@@ -254,6 +277,7 @@ fn frame(
     }
     for (descriptors) |d| {
         if (std.mem.indexOfScalar(u16, path, d.node) == null) return error.NotOnPath;
+        if (exec == null and d.node == path[0]) return error.RootNotSetUp;
         for (d.loads[0..d.load_count]) |load| _ = boot.findBin(programs, load.bin) orelse return error.NoSuchBin;
     }
 
@@ -264,11 +288,14 @@ fn frame(
     for (path[1..]) |node| len += init(descriptorOf(descriptors, node));
     if (len > std.math.maxInt(u18)) return error.StreamTooLong;
 
-    // asyORG, spiORG: the root writes the frame to the path's next node,
-    // which executes from that port, and then reads another frame
-    try builder.word(jump | @as(Word, exec));
-    try builder.word(try wall(layout, path[0], path[1]));
-    try builder.word(@bitCast(@as(u18, @intCast(len))));
+    // asyORG, synORG, spiORG: the root writes the frame to the path's next
+    // node, which executes from that port, and then reads another frame.
+    // From 207, the snorkel writes it there.
+    if (exec) |e| {
+        try builder.word(jump | @as(Word, e));
+        try builder.word(try wall(layout, path[0], path[1]));
+        try builder.word(@bitCast(@as(u18, @intCast(len))));
+    }
     try builder.word(call | try wall(layout, path[0], path[1]));
 
     // +PUMP: each node keeps its own loads and set up, the last of what it
@@ -307,7 +334,8 @@ fn frame(
         try builder.word(jump | @as(Word, d.p));
     }
 
-    // serEND, spiEND and +ROOT: the root's frame
+    // serEND, spiEND and +ROOT: the root's frame, which 207 has none of
+    if (exec == null) return buffer[0..builder.len];
     const root = descriptorOf(descriptors, path[0]);
     if (root.load_count > 1) return error.RootTooManyLoads;
     if (root.load_count == 1 and root.loads[0].source != root.loads[0].destination) return error.RootNotInPlace;
@@ -405,14 +433,17 @@ const Builder = struct {
 test draw {
     var buffer: [Chip.Layout.chip_numbers]u16 = undefined;
     try expectEqualSlices(u16, &.{ 708, 608, 508, 408, 308, 208, 108, 107, 7, 8, 9 }, try draw(&.{ 708, 108, 107, 7, 9 }, &buffer));
-    // each root's default path covers the chip
-    for (roots) |r| {
+    // each root's default path covers the chip, but node 000 from 300, and
+    // the nodes pF/144 runs on from 207
+    for (roots, [_]usize{ 144, 143, 144, 144 - 25 }) |r, covered| {
         const all = try draw(r.entire, &buffer);
-        try expectEqual(144, all.len);
+        try expectEqual(covered, all.len);
         try expectEqual(r.node, all[0]);
         for (all, 0..) |node, i| try expect(std.mem.indexOfScalar(u16, all[0..i], node) == null);
     }
-    try expectEqual(null, entire(300));
+    try expect(std.mem.indexOfScalar(u16, try draw(entire(300).?, &buffer), 0) == null);
+    for ([_]u16{ 0, 9, 100, 107, 200, 206 }) |pf| try expect(std.mem.indexOfScalar(u16, try draw(entire(207).?, &buffer), pf) == null);
+    try expectEqual(null, entire(708 - 1));
 
     try expectError(error.NotInLine, draw(&.{ 708, 607 }, &buffer));
     try expectError(error.NotInLine, draw(&.{ 708, 708 }, &buffer));
@@ -455,6 +486,41 @@ test frame {
     try expectError(error.RepeatedNode, frame(.ga144, &.{ 708, 608, 708 }, &descriptors, assembled, &buffer));
     try expectError(error.UnknownRoot, frame(.ga144, &.{ 608, 708 }, &descriptors, assembled, &buffer));
     try expectError(error.StreamTooLong, frame(.ga144, &.{ 708, 608 }, &descriptors, assembled, buffer[0..10]));
+}
+
+test "a frame from root 300 is 708's, for the sync ROM's ser-exec" {
+    var buffer: [64]Word = undefined;
+    const words = try frame(.ga144, &.{ 300, 400 }, &.{}, &.{}, &buffer);
+    const toward: Word = port.multiport(.initOne(.up));
+    try expectEqualSlices(Word, &.{ 0x10000 | @as(Word, sync_exec), toward, 1 + 3, 0x12000 | toward }, words[0..4]);
+    try expectEqualSlices(Word, &.{ 0x100a9, 0, 1, 0 }, words[words.len - 4 ..]);
+}
+
+test "a frame from root 207, which the snorkel sends, has no header and no root's frame" {
+    const source =
+        \\ node 208 : main dup ;
+    ;
+    var programs: [1]Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try assembler.assembleNodes(source, &programs, &diagnostic);
+    var buffer: [256]Word = undefined;
+    const descriptors: [1]Descriptor = .{.ofProgram(assembled[0])};
+
+    const words = try frame(.ga144, &.{ 207, 208 }, &descriptors, assembled, &buffer);
+    const toward: Word = try wall(.ga144, 207, 208);
+    // the first call, then 208's load and its jump to main, the last word
+    try expectEqual(0x12000 | toward, words[0]);
+    try expectEqual(1 + 5 + assembled[0].len + 1, words.len);
+    try expectEqual(0x10000 | assembled[0].entry.toWord(), words[words.len - 1]);
+    // as it is in a stream, where the root goes on sending
+    const parts = [_]Part{ .{ .frame = .{ .path = &.{ 207, 208 }, .descriptors = &descriptors } }, .{ .frame = .{ .path = &.{ 207, 208 }, .descriptors = &.{} } } };
+    var stream_buffer: [256]Word = undefined;
+    const both = try stream(.ga144, &parts, assembled, &stream_buffer);
+    try expectEqualSlices(Word, words, both[0..words.len]);
+
+    const root: [1]Descriptor = .{.{ .node = 207, .p = 0 }};
+    try expectError(error.RootNotSetUp, frame(.ga144, &.{ 207, 208 }, &root, assembled, &buffer));
+    try expectError(error.RootFrameNoRom, stream(.ga144, &.{ .{ .root = .{ .jump = 0, .bin = 208 } }, parts[1] }, assembled, &stream_buffer));
 }
 
 test stream {

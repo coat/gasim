@@ -833,6 +833,181 @@ test "a stream of several frames boots each along its own path, and sets a node 
     try expectBootsAsDescribed(parsed, &checked, .{ .uart = words }, assembled.programs, null);
 }
 
+test "a stream from root 300 boots through node 300's synchronous line, frame after frame" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    var programs: [4]Program = undefined;
+    var descriptor_buffer: [8]Descriptor = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    // the first frame starts 500 and leaves 300 reading the next, which
+    // starts 301 and loads 300 itself
+    const assembled = try arrayforth.assembleScript(
+        \\ STREAMER LOAD
+        \\ ASM[ # 500 NODE ERS # 0 org : main 5. main ; >BIN
+        \\      # 301 NODE ERS # 0 org : main 1. main ; >BIN
+        \\      # 300 NODE ERS # 0 org : main 3. main ; >BIN ]ASM
+        \\ 0 ARRAY UPWARD  300 ORGN 500 TO -1 ,
+        \\ 0 ARRAY ACROSS  300 ORGN 301 TO -1 ,
+        \\ 300 STREAM[   ' UPWARD COURSE
+        \\    FRAME[  500 +NODE 500 /RAM 0 /P  300 +NODE 300 ITS ser-exec /P  ]FRAME
+        \\    ' ACROSS COURSE
+        \\    FRAME[  301 +NODE 301 /RAM 0 /P  300 +NODE 300 /RAM 0 /P  ]FRAME
+        \\ ]STREAM
+    , null, &programs, &descriptor_buffer, &diagnostic);
+    try expectEqual(streamer.sync_exec, assembled.descriptors[1].p);
+    var frame_buffer: [arrayforth.Stream.max_frames]streamer.Frame = undefined;
+    const frames = assembled.frames(&frame_buffer);
+    var part_buffer: [arrayforth.Stream.max_parts]streamer.Part = undefined;
+    var buffer: [512]Word = undefined;
+    const words = try streamer.stream(.ga144, assembled.parts(&part_buffer), assembled.programs, &buffer);
+    const checked = [_]Descriptor{ frames[0].descriptors[0], frames[1].descriptors[0], frames[1].descriptors[1] };
+    try expectEqual(300, checked[2].node);
+    try expectBootsAsDescribed(parsed, &checked, .{ .sync = words }, assembled.programs, null);
+}
+
+test "a stream from root 207 boots its path as the snorkel sends it, 207 going on as it is" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    var programs: [4]Program = undefined;
+    var descriptor_buffer: [8]Descriptor = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try arrayforth.assembleScript(
+        \\ STREAMER LOAD
+        \\ ASM[ # 209 NODE ERS # 0 org : main 9. main ; >BIN
+        \\      # 210 NODE ERS # 0 org : main 10. main ; >BIN ]ASM
+        \\ 0 ARRAY ALONG  207 ORGN 210 TO -1 ,
+        \\ 207 STREAM[   ' ALONG COURSE
+        \\    FRAME[  209 +NODE 209 /RAM 0 /P  210 +NODE 210 /RAM 0 /P  ]FRAME
+        \\ ]STREAM
+    , null, &programs, &descriptor_buffer, &diagnostic);
+    var part_buffer: [arrayforth.Stream.max_parts]streamer.Part = undefined;
+    var buffer: [512]Word = undefined;
+    const words = try streamer.stream(.ga144, assembled.parts(&part_buffer), assembled.programs, &buffer);
+    // 208, which pumps the rest on, and is left at warm
+    const checked = [_]Descriptor{ assembled.descriptors[0], assembled.descriptors[1], .{ .node = 208, .b = Computer.io_address, .p = ga144.romWordOf(.basic, "warm").? } };
+    try expectBootsAsDescribed(parsed, &checked, .{ .snorkel = words }, assembled.programs, null);
+}
+
+test "the disk's sync master, bin 1901's 18o, clocks a word out as Sync does" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    const gpa = std.testing.allocator;
+    const disk = try Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024));
+    defer gpa.free(disk);
+
+    // node 300 with bin 1901 (block 2289), sending x2A5A5 with 18o, then
+    // letting go of the line with off, and going back to warm
+    const source =
+        \\2289 LOAD
+        \\300 +NODE 1901 /RAM  IO /B  1901 ITS 18o /P  x2A5A5. 1 /STACK  xA9. 1901 ITS off 0 2 /RSTACK
+    ;
+    const programs = try gpa.alloc(Program, Chip.Layout.chip_numbers);
+    defer gpa.free(programs);
+    var descriptor_buffer: [2]Descriptor = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = arrayforth.assembleScript(source, disk, programs, &descriptor_buffer, &diagnostic) catch |err| {
+        std.debug.print("{t} at block {d} line {d} '{s}'\n", .{ err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
+        return err;
+    };
+    const word: Word = @bitCast(@as(u18, 0x2a5a5));
+
+    // the levels of the clock and the data at each edge of the clock
+    const Edge = struct { clock: bool, data: bool };
+    const Recorder = struct {
+        clock: bool = false,
+        data: bool = false,
+        edges: [64]Edge = undefined,
+        len: usize = 0,
+
+        fn clockChanged(context: *anyopaque, _: u64, high: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (high == self.clock) return;
+            self.clock = high;
+            self.edges[self.len] = .{ .clock = high, .data = self.data };
+            self.len += 1;
+        }
+
+        fn dataChanged(context: *anyopaque, _: u64, high: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.data = high;
+        }
+    };
+    var recorder: Recorder = .{};
+    var chip: Chip = try .init(gpa, .ga144);
+    defer chip.deinit(gpa);
+    try chip.loadRom(parsed);
+    try chip.attachPin(.{ .node = 300, .pin = 17 }, .{ .context = &recorder, .changed = Recorder.clockChanged });
+    try chip.attachPin(.{ .node = 300, .pin = 1 }, .{ .context = &recorder, .changed = Recorder.dataChanged });
+    for (assembled.descriptors) |d| try chip.setUp(d, assembled.programs);
+    try chip.run();
+    try expect(Chip.waitsForCode(chip.node(300).?));
+
+    // as Sync drives them, a line let go reading low
+    var sync: Sync = .init(&.{word});
+    const clock = sync.clockDevice();
+    const data = sync.dataDevice();
+    var expected: [64]Edge = undefined;
+    var len: usize = 0;
+    var time: u64 = 0;
+    while (sync.nextClockEdge(time)) |edge| : (time = edge) {
+        expected[len] = .{ .clock = clock.drive.?(clock.context, edge).high, .data = data.drive.?(data.context, edge).high };
+        len += 1;
+    }
+    // up, then down and up for each two bits, and down as it lets go
+    try expectEqual(1 + 2 * 9 + 1, len);
+    try std.testing.expectEqualSlices(Edge, expected[0..len], recorder.edges[0..recorder.len]);
+}
+
+test "arrayForth 3's streams from root 207 boot as pF/144's snorkel sends them" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    const gpa = std.testing.allocator;
+    const disk = try Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024));
+    defer gpa.free(disk);
+
+    // up to their ]STREAM, before !SNORK sends them: block 1581's test of
+    // descriptors, to 715, and block 1583's, which adds the NIC to pF/144,
+    // with the clock monitor (?CLK 1) rather than the crystal oscillator
+    // (2), whose descriptors load a bin 516 that nothing builds, after the
+    // bins the NIC needs
+    var sources: [2]Io.Writer.Allocating = .{ .init(gpa), .init(gpa) };
+    defer for (&sources) |*source| source.deinit();
+    try sources[1].writer.writeAll("1562 LOAD  STREAMER LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD\n");
+    for ([_]u16{ 1581, 1583 }, &sources, [_]usize{ 0, 2 }) |block, *source, first| {
+        const text = disk[@as(usize, block) * 1024 ..][0..1024];
+        for (first..16) |line| try source.writer.print("{s}\n", .{text[line * 64 ..][0..64]});
+    }
+
+    for (&sources) |*source| {
+        const written = source.written();
+        const text = written[0 .. std.mem.indexOf(u8, written, "]STREAM").? + "]STREAM".len];
+        const programs = try gpa.alloc(Program, Chip.Layout.chip_numbers);
+        defer gpa.free(programs);
+        const descriptor_buffer = try gpa.alloc(Descriptor, Chip.Layout.chip_numbers);
+        defer gpa.free(descriptor_buffer);
+        var diagnostic: assembler.Diagnostic = .{};
+        const assembled = arrayforth.assembleScript(text, disk, programs, descriptor_buffer, &diagnostic) catch |err| {
+            std.debug.print("{s}: {t} at block {d} line {d} '{s}'\n", .{ text, err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
+            return err;
+        };
+        try expectEqual(207, assembled.stream.?.root);
+        var part_buffer: [arrayforth.Stream.max_parts]streamer.Part = undefined;
+        const parts = assembled.parts(&part_buffer);
+        const buffer = try gpa.alloc(Word, streamer.maxLen(parts));
+        defer gpa.free(buffer);
+        const words = try streamer.stream(.ga144, parts, assembled.programs, buffer);
+        try expect(assembled.descriptors.len > 0);
+        var first: usize = 0;
+        while (first < assembled.descriptors.len) : (first += Chip.max_breakpoints) {
+            const batch = assembled.descriptors[first..@min(first + Chip.max_breakpoints, assembled.descriptors.len)];
+            expectBootsAsDescribed(parsed, batch, .{ .snorkel = words }, assembled.programs, null) catch |err| {
+                std.debug.print("{s}\n", .{text});
+                return err;
+            };
+        }
+    }
+}
+
 test "arrayForth 3's stream for flash, after block 1671, boots through the EVB002's flash and SRAM as described" {
     var roms: [144]ga144.NodeRom = undefined;
     const parsed = try testRom(&roms);
@@ -1002,10 +1177,12 @@ test "arrayForth 3's SRAM cluster writes the EVB002's SRAM and reads it back" {
 }
 
 /// Boots the EVB002's host chip, node 708 with a stream through USB port A,
-/// or node 705 from the contents of its flash, with J26 (NO BOOT) off, and
-/// checks that each node of `checked` starts as its descriptor says. The
-/// board's SRAM holds `sram_words`, if given, or else words of its own.
-fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, from: union(enum) { uart: []const Word, flash: []const u8 }, programs: []const Program, sram_words: ?[]u16) !void {
+/// node 705 from the contents of its flash, with J26 (NO BOOT) off, node
+/// 300 from a synchronous line's master on its pins, with J34 and J35 off,
+/// or nodes from 207 as its snorkel would (`Snorkel`), and checks that each
+/// node of `checked` starts as its descriptor says. The board's SRAM holds
+/// `sram_words`, if given, or else words of its own.
+fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, from: union(enum) { uart: []const Word, flash: []const u8, sync: []const Word, snorkel: []const Word }, programs: []const Program, sram_words: ?[]u16) !void {
     const gpa = std.testing.allocator;
     var chip: Chip = try .initChips(gpa, .ga144, Board.evb002.chips);
     defer chip.deinit(gpa);
@@ -1024,10 +1201,17 @@ fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descript
     var uart: Uart = .init(port_a.baud, &discarding.writer);
     uart.preload = asyncBytes(words, bytes);
     var fault: Board.Fault = .none;
-    const settings: []const Board.Setting = if (from == .flash) &.{.{ .name = "J26", .on = false }} else &.{};
+    const settings: []const Board.Setting = switch (from) {
+        .flash => &.{.{ .name = "J26", .on = false }},
+        .sync => &.{ .{ .name = "J34", .on = false }, .{ .name = "J35", .on = false } },
+        else => &.{},
+    };
     try Board.evb002.apply(&chip, &.{.{ .uart = &uart, .port = port_a }}, settings, &fault);
     var flash: Flash = .init(if (from == .flash) from.flash else &.{});
     if (from == .flash) try Board.evb002.attachFlash(&chip, &flash, settings);
+    var sync: Sync = .init(if (from == .sync) from.sync else &.{});
+    if (from == .sync) try chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 });
+    var snorkel: Snorkel = .{ .words = if (from == .snorkel) from.snorkel else &.{} };
     try Board.evb002.attachSram(&chip, &sram, settings);
     for (checked) |d| try chip.breakpoints.insert(.init(chip.layout.index(d.node).?, @truncate(d.p)));
 
@@ -1047,8 +1231,9 @@ fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descript
         // UART's preloaded stream
         chip.hit = null;
         while (chip.hit == null and stops < max_stops and rounds < max_rounds) : (rounds += 1) {
+            const fed = snorkel.feed(&chip);
             _ = try chip.service();
-            if (!chip.step()) break;
+            if (!chip.step() and !fed) break;
         }
         const stop = chip.hit orelse {
             for (checked, differences) |d, difference| if (chip.breakpoints.contains(.init(chip.layout.index(d.node).?, @truncate(d.p)))) {
@@ -1070,6 +1255,28 @@ fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descript
         };
     }
 }
+
+/// Stands in for pF/144's snorkel in node 207, which writes a stream from
+/// root 207 to the port of its path's next node: each word as 207 executes
+/// `! ;` from its port, with the word on its stack and A at that port, the
+/// one the stream's first word calls
+const Snorkel = struct {
+    words: []const Word,
+    next: usize = 0,
+
+    /// gives 207 the next word if it waits for code; returns whether it did
+    fn feed(self: *Snorkel, chip: *Chip) bool {
+        if (self.next == self.words.len) return false;
+        const i = chip.layout.index(207).?;
+        const n = &chip.nodes[i];
+        if (!Chip.waitsForCode(n)) return false;
+        n.a = self.words[0] & 0x1ff;
+        n.data_stack.push(self.words[self.next]);
+        chip.execute(i, Instruction.encode(.{ .slot_0 = .@"!", .slot_1 = .@";", .slot_2 = .@";", .slot_3 = 0 })) catch unreachable;
+        self.next += 1;
+        return true;
+    }
+};
 
 /// how many times nodes may reach where they start, and rounds of the chip
 /// they may take, before they have all started
@@ -1244,6 +1451,7 @@ const Console = @import("Console.zig");
 const Uart = @import("Uart.zig");
 const Flash = @import("Flash.zig");
 const Sram = @import("Sram.zig");
+const Sync = @import("Sync.zig");
 const ga144 = @import("ga144.zig");
 const testRom = @import("rom.zig").testRom;
 const streamer = @import("streamer.zig");

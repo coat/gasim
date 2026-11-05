@@ -110,7 +110,9 @@
 //!
 //!     nn STREAM[ FRAME[ ... ]FRAME ... ]STREAM
 //!                       a stream from root nn, 708, which reads it from a
-//!                       UART, or 705, from flash, of up to 8 frames, in
+//!                       UART, 300, from its synchronous line, 705, from
+//!                       flash, or 207, which pF/144's snorkel sends it
+//!                       from (`streamer.roots`), of up to 8 frames, in
 //!                       place of any stream before. FRAME[ begins a
 //!                       frame's boot descriptors afresh, so that a later
 //!                       frame sets a node up again, and ]FRAME ends them.
@@ -124,7 +126,8 @@
 //!     ENTIRE COURSE     that default again, for a later frame
 //!     jmp a n bin /ROOT a frame for the root alone, between frames, that
 //!                       loads n words, at least 1, of a bin from a to a
-//!                       and jumps to jmp
+//!                       and jumps to jmp, for a root with a ROM to read
+//!                       it, not 207
 //!     FORWARD           after a frame of a stream from 705, pads the
 //!                       stream to where the next part starts on a byte of
 //!                       flash, and patches that address into the root's
@@ -182,9 +185,10 @@ pub const Error = assembler.Error || error{
     HostCode,
     /// a colorForth block that cannot be decoded
     NotSource,
-    /// STREAM[ of a root other than 708 and 705, the STREAMER's that gasim
-    /// builds streams for
+    /// STREAM[ of a root other than the STREAMER's, 708, 300, 705 and 207
     UnknownRoot,
+    /// /ROOT in a stream from 207, which has no ROM to read it
+    RootFrameNoRom,
     /// FRAME[, ]FRAME, COURSE, /ROOT, FORWARD or ]STREAM outside STREAM[
     NoStream,
     /// ]FRAME outside FRAME[
@@ -2324,6 +2328,7 @@ const Interpreter = struct {
                 const address = try self.pop();
                 const jump = try self.pop();
                 if (self.stream_root == null) return error.NoStream;
+                if (self.stream_root == 207) return error.RootFrameNoRom;
                 if (jump < 0 or jump > 0x3ff or n < 0 or n > 64 or !inRam(address, @max(n, 1))) return error.NumberOutOfRange;
                 try self.stream.?.add(.{ .root = .{ .jump = @intCast(jump), .address = @intCast(address), .count = @intCast(n), .bin = std.math.cast(u32, bin) orelse return error.NoSuchBin } });
             },
@@ -3835,7 +3840,8 @@ test "a stream from root 705, for flash, with a frame for the root alone and FOR
 }
 
 test "stream errors" {
-    try expectAssembleError(error.UnknownRoot, "300 STREAM[");
+    try expectAssembleError(error.UnknownRoot, "301 STREAM[");
+    try expectAssembleError(error.RootFrameNoRom, "207 STREAM[ 0 0 1 9 /ROOT");
     try expectAssembleError(error.NoStream, "FRAME[");
     try expectAssembleError(error.NoStream, "0 COURSE");
     try expectAssembleError(error.NoStream, "]STREAM");
