@@ -550,8 +550,6 @@ pub fn main(init: std.process.Init) !void {
             fatal("--boot: {s}'s flash sends on {f}.{d}, not 705.17, which 705's ROM reads", .{ b.name, Chip.nodeName(pins.data_in.ref().node), pins.data_in.pin });
         if (spec.node(705).rom != .spi_boot) fatal("--boot needs node 705 to have an SPI boot ROM, as the GA144's does", .{});
         if (roms == null) fatal("--boot needs a ROM, for node 705 to boot from (see --rom)", .{});
-        for (descriptors) |descriptor| if (descriptor.node >= Chip.Layout.chip_numbers)
-            fatal("--boot through node 705 boots its chip, not node {f}", .{Chip.nodeName(descriptor.node)});
         for (b.pulls) |pull| if (pull.high and std.meta.eql(pull.terminal().ref(), pins.data_in.ref()) and b.jumperOn(pull.jumper, settings[0..settings_len]))
             fatal("--boot: {s} holds 705.17 high{s}{s}, so 705 does not boot from the flash", .{ b.name, if (pull.jumper != null) " through " else "", pull.jumper orelse "" });
         const words = layOut(arena, layout, assembled, source_path);
@@ -560,8 +558,9 @@ pub fn main(init: std.process.Init) !void {
         flash = .init(packed_stream);
     } else if (boot and uart_node != null) {
         const root = uart_node.?;
-        // a boot stream sets up nodes of the chip it goes to
-        for (descriptors) |descriptor| if (descriptor.node / Chip.Layout.chip_numbers != root / Chip.Layout.chip_numbers)
+        // gasim's boot stream sets up nodes of the chip it goes to, where
+        // the STREAMER's paths can go on to another
+        if (assembled.stream == null) for (descriptors) |descriptor| if (descriptor.node / Chip.Layout.chip_numbers != root / Chip.Layout.chip_numbers)
             fatal("--boot through node {f} boots its chip, not node {f}", .{ Chip.nodeName(root), Chip.nodeName(descriptor.node) });
         if (spec.node(root).rom != .async_boot)
             fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {f}", .{ uart_option, Chip.nodeName(root) });
@@ -586,8 +585,6 @@ pub fn main(init: std.process.Init) !void {
         if (console_node == 300 and console_port == .left) fatal("--boot clocks the stream into node 300's wakeup pin, which its left port reads, so the console cannot use it", .{});
         if (spec.node(300).rom != .sync_boot) fatal("--boot needs node 300 to have a sync boot ROM, as the GA144's does", .{});
         if (roms == null) fatal("--boot needs a ROM, for node 300 to boot from (see --rom)", .{});
-        for (descriptors) |descriptor| if (descriptor.node >= Chip.Layout.chip_numbers)
-            fatal("--boot through node 300 boots its chip, not node {f}", .{Chip.nodeName(descriptor.node)});
         sync = .init(layOut(arena, layout, assembled, source_path));
         chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
             fatal("--boot needs node 300's pins 17 and 1, free for its synchronous line ({t})", .{err});
@@ -1279,10 +1276,12 @@ fn layOut(arena: Allocator, layout: Chip.Layout, assembled: gasim.arrayforth.Ass
     const root = assembled.stream.?.root;
     var part_buffer: [gasim.arrayforth.Stream.max_parts]gasim.streamer.Part = undefined;
     const parts = assembled.parts(&part_buffer);
+    // which the STREAMER leaves out, as a node off its default path may be
+    for (parts) |part| if (part == .frame) for (part.frame.descriptors) |d| if (std.mem.indexOfScalar(u16, part.frame.path, d.node) == null)
+        std.log.warn("--boot: {s} describes node {f} off its frame's COURSE, which leaves it as it is", .{ source_path, Chip.nodeName(d.node) });
     const buffer = arena.alloc(gasim.Word, gasim.streamer.maxLen(parts)) catch fatal("out of memory", .{});
     return gasim.streamer.stream(layout, parts, assembled.programs, buffer) catch |err| switch (err) {
         error.NoSuchNode, error.NotNeighbours, error.RepeatedNode => fatal("--boot: {s}'s COURSE is not a path of neighbours in {f}, each once ({t})", .{ source_path, layout, err }),
-        error.NotOnPath => fatal("--boot: {s} describes a node off its frame's COURSE", .{source_path}),
         error.RootTooManyLoads, error.RootNotInPlace => fatal("--boot: node {f} can only be loaded with one part of a bin, to the addresses it comes from ({t})", .{ Chip.nodeName(root), err }),
         error.RootStopsReading => fatal("--boot: a part of {s} before the last leaves node {f} at warm, not reading the next (see ser-exec and spi-exec)", .{ source_path, Chip.nodeName(root) }),
         error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),

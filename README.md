@@ -178,7 +178,11 @@ more info.
   300, clocked into its pins 17 and 1 as the disk's sync master (bin 1901)
   clocks a word out, with `run` and no `--board`. A stream from 207 is
   pF/144's snorkel's to send, so `--boot` refuses it; without `--boot`, a
-  stream of one frame sets its nodes up as any descriptors do.
+  stream of one frame sets its nodes up as any descriptors do. A path can
+  go on from a node to the same node of the other chip, as the EVB002's
+  sync bridge between its 300s carries what host 400 writes to its up port
+  to target 400 (block 1668). The stream doesn't build the bridge: a frame
+  before, as block 1670's does, has to.
 
   ```
   $ gasim run --uart 708 examples/uart.ga
@@ -329,8 +333,10 @@ Serial ports other than the one on stdin and stdout are left unconnected,
 which their nodes' pulldowns read as an idle, inverted line. A board with
 no serial ports has the console instead (`--console`). A wire can't go to a
 serial port's pin yet, as the port's input would not wake the other pin's
-node. `--boot` through a serial port boots the chip it is wired to, and
-arrayForth 3 programs (`.af`, `.blk`) only reach the first chip.
+node. `--boot` through a serial port boots the chip it is wired to, or the
+other one too along a STREAMER path that goes on through a bridge.
+arrayForth 3 programs (`.af`, `.blk`) go to the first chip's nodes, unless
+a descriptor puts them on another (`10500 +NODE`).
 
 A chip is held in reset while its RESET- is low, its nodes as after reset
 and waiting, and starts again as after reset when RESET- rises, at that
