@@ -20,6 +20,12 @@
 //! stream for flash, FORWARD, which tells the root's code where the next
 //! frame starts in the flash.
 //!
+//! A path can go on to another chip, from a node to the same node there,
+//! through a bridge between the two. The stream does not build the
+//! bridge: a frame before, as in block 1668's stream, or the IDE has to.
+//! Without it, what is for the other chip goes where the node's port
+//! leads on its own: host 400's up port is host 300's.
+//!
 //! A stream from 207 has no ROM to read it: the snorkel writes it all to
 //! the path's next node, so its frames have no header and are not followed
 //! by a frame for the root, which goes on as it is (n207's R-ORG and R-END,
@@ -81,9 +87,6 @@ pub const Error = error{
     NoSuchNode,
     NotNeighbours,
     RepeatedNode,
-    /// a descriptor is for a node off the path, which the STREAMER would
-    /// leave as it is
-    NotOnPath,
     /// the root's ROM can store one part of RAM, in place
     RootTooManyLoads,
     RootNotInPlace,
@@ -253,12 +256,13 @@ pub fn pack(words: []const Word, buffer: []u8) error{StreamTooLong}![]u8 {
 /// its RAM, from one bin to the same addresses, and where it starts: its
 /// registers and stacks are left as they are. A root without a load stores
 /// the first word of bin 0, or 0 when that bin was not saved, at its RAM
-/// address 0. Unlike the STREAMER, a descriptor for a node off the path
-/// is an error, as is one for root 207, which the STREAMER ignores. The
-/// descriptors are taken as they are, so they should carry FRAME['s
-/// defaults, as those of gasim's arrayForth do: one without a B, as from
-/// `Descriptor.ofProgram`, leaves B as it is, where the STREAMER sets it
-/// to IO.
+/// address 0. A descriptor for a node off the path is left out, as the
+/// STREAMER leaves it, which block 1668's stream relies on: its first
+/// frame describes 708, which its path does not reach. One for root 207
+/// is an error, where the STREAMER ignores it too. The descriptors are
+/// taken as they are, so they should carry FRAME['s defaults, as those of
+/// gasim's arrayForth do: one without a B, as from `Descriptor.ofProgram`,
+/// leaves B as it is, where the STREAMER sets it to IO.
 fn frame(
     layout: Chip.Layout,
     path: []const u16,
@@ -276,7 +280,7 @@ fn frame(
         if (i > 0) _ = try wall(layout, path[i - 1], node);
     }
     for (descriptors) |d| {
-        if (std.mem.indexOfScalar(u16, path, d.node) == null) return error.NotOnPath;
+        if (std.mem.indexOfScalar(u16, path, d.node) == null) continue;
         if (exec == null and d.node == path[0]) return error.RootNotSetUp;
         for (d.loads[0..d.load_count]) |load| _ = boot.findBin(programs, load.bin) orelse return error.NoSuchBin;
     }
@@ -376,8 +380,13 @@ fn psiz(d: Descriptor) usize {
 }
 
 /// WALL and CPORT: the port between two neighbours, which each calls by
-/// the same name
+/// the same name. As the STREAMER's MWALL (block 1603) has it, a node
+/// and the same node on another chip are neighbours through their up
+/// ports, which a bridge joins: the EVB002's sync bridge (blocks 1664 and
+/// 1670) carries what host 400 writes to its up port to target 400's.
 fn wall(layout: Chip.Layout, from: u16, to: u16) error{NotNeighbours}!Word {
+    if (from != to and from % Chip.Layout.chip_numbers == to % Chip.Layout.chip_numbers)
+        return port.multiport(.initOne(.up));
     const i = layout.index(from).?;
     for ([_]Direction{ .right, .down, .left, .up }) |direction| {
         if (layout.neighbour(i, direction) == layout.index(to).?) return port.multiport(.initOne(direction));
@@ -481,11 +490,27 @@ test frame {
     // the frame is as long as its header says
     try expectEqual(end - 2, @as(usize, @intCast(len)));
 
-    try expectError(error.NotOnPath, frame(.ga144, &.{ 708, 708 - 1 }, &descriptors, assembled, &buffer));
+    // a node off the path, left as it is
+    var off_path: [256]Word = undefined;
+    try expectEqualSlices(Word, try frame(.ga144, &.{ 708, 707 }, &.{}, assembled, &buffer), try frame(.ga144, &.{ 708, 707 }, &descriptors, assembled, &off_path));
     try expectError(error.NotNeighbours, frame(.ga144, &.{ 708, 508 }, &descriptors, assembled, &buffer));
     try expectError(error.RepeatedNode, frame(.ga144, &.{ 708, 608, 708 }, &descriptors, assembled, &buffer));
     try expectError(error.UnknownRoot, frame(.ga144, &.{ 608, 708 }, &descriptors, assembled, &buffer));
     try expectError(error.StreamTooLong, frame(.ga144, &.{ 708, 608 }, &descriptors, assembled, buffer[0..10]));
+}
+
+test "a path goes on to the same node of another chip through their up ports, as a bridge joins them" {
+    const two_chips: Chip.Layout = .{ .rows = 8, .columns = 18, .chips = 2 };
+    var buffer: [64]Word = undefined;
+    const up: Word = port.multiport(.initOne(.up));
+    // 708 focuses target 708 through its up port, which then pumps the
+    // rest to target 608 through its down port, as it would a neighbour
+    const words = try frame(two_chips, &.{ 708, 10708, 10608 }, &.{}, &.{}, &buffer);
+    try expectEqualSlices(Word, &.{ up, 0x12000 | up }, &.{ words[1], words[3] });
+    try expectEqual(0x12000 | @as(Word, port.multiport(.initOne(.down))), words[5]);
+    // but not to another node of the other chip, nor to a chip there is not
+    try expectError(error.NotNeighbours, frame(two_chips, &.{ 708, 10707 }, &.{}, &.{}, &buffer));
+    try expectError(error.NoSuchNode, frame(.ga144, &.{ 708, 10708 }, &.{}, &.{}, &buffer));
 }
 
 test "a frame from root 300 is 708's, for the sync ROM's ser-exec" {
