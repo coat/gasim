@@ -6,6 +6,8 @@
 // reset: the word of its ROM it starts at after reset, rather than waiting
 //   for code on its ports; the boot nodes start at cold, and node 200 at
 //   warm
+// bus: an 18-bit parallel bus, which the node drives or reads through its
+//   data register (DB001 3.5)
 // A SERDES node has a data register, which its ROM writes to.
 .{
     .name = "GA144",
@@ -28,9 +30,9 @@
         .{ .node = 713, .rom = .analog },
         .{ .node = 717, .rom = .analog },
         // external memory and eForth support
-        .{ .node = 7, .rom = .special },
+        .{ .node = 7, .rom = .special, .bus = true },
         .{ .node = 8, .rom = .special, .pins = .{ 17, 5, 3, 1 } },
-        .{ .node = 9, .rom = .special },
+        .{ .node = 9, .rom = .special, .bus = true },
         .{ .node = 105, .rom = .special },
         .{ .node = 106, .rom = .special },
         .{ .node = 107, .rom = .special },

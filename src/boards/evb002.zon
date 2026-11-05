@@ -8,6 +8,7 @@
 // serial: the FT232R USB serial chips, sending to the chip on rx and
 //   listening on tx, at 921600 baud, through J23 (DB014 5.2)
 // flash: the SPI flash's pins
+// sram: the SRAM's buses and pins
 // pulls: resistors to high or low
 // wires: between pins, through a jumper
 // serdes: SERDES links between nodes
@@ -64,6 +65,18 @@
         .select = .{ .node = 705, .pin = 3 },
         .data_out = .{ .node = 705, .pin = 5 },
         .data_in = .{ .node = 705, .pin = 17 },
+    },
+    // the 1M-word SRAM on host 009's bus for its address and 007's for its
+    // data, with 008.5 and 008.17 for its high address lines, and CE- and
+    // WE- on 008.1 and 008.3, which the board pulls up (DB014 5.4, 7.1).
+    // The board's order of the lines is not modelled, as nothing but the
+    // SRAM sees it.
+    .sram = .{
+        .address = .{ .node = 9 },
+        .data = .{ .node = 7 },
+        .high = .{ .{ .node = 8, .pin = 5 }, .{ .node = 8, .pin = 17 } },
+        .enable = .{ .node = 8, .pin = 1 },
+        .write = .{ .node = 8, .pin = 3 },
     },
     .pulls = .{
         .{ .node = 705, .pin = 17, .high = true, .jumper = "J26" },

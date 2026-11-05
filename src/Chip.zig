@@ -579,6 +579,7 @@ pub fn initChips(gpa: Allocator, spec: Spec, chips: u8) Allocator.Error!Chip {
         n.pins = spec.pins(number);
         n.wake_port = wakePort(layout, @intCast(i), n.pins);
         if (spec.hasData(number)) n.data = 0;
+        n.bus = spec.node(number).bus;
         n.p.address = Address.fromWord(port.multiport(layout.neighbourPorts(@intCast(i))));
         reset_address[i] = n.p.address;
         chip.wake(@intCast(i));
@@ -757,6 +758,7 @@ pub fn setUp(self: *Chip, descriptor: boot.Descriptor, programs: []const assembl
     if (descriptor.io) |io| {
         n.io = io;
         if (n.pin_device) |device| device.written(device.context, n);
+        if (n.bus_device) |device| device.written(device.context, n);
     }
     if (descriptor.a) |a| n.a = a;
     if (descriptor.b) |b| n.b = @truncate(@as(u18, @bitCast(b)));
@@ -876,6 +878,24 @@ pub fn attachUartPins(self: *Chip, uart: *Uart, rx: ?PinRef, tx: ?PinRef) error{
     }
 }
 
+/// Puts a device on the net of pin `p`, which it listens to or drives
+pub fn attachPin(self: *Chip, p: PinRef, device: gpio.Device) error{ NoSuchPin, TwoDevices }!void {
+    const pin = try self.pinOf(p);
+    if (self.wiring.nets[pin.net].device != null) return error.TwoDevices;
+    self.wiring.nets[pin.net].device = device;
+    self.wiring.hook(pin.node);
+}
+
+/// Puts a device on the parallel bus of node `number`, which it tells of
+/// the node's bus as it is
+pub fn attachBus(self: *Chip, number: u16, device: Computer.BusDevice) error{ NoSuchNode, NoBus, TwoDevices }!void {
+    const n = &self.nodes[self.layout.index(number) orelse return error.NoSuchNode];
+    if (!self.spec.node(number % Layout.chip_numbers).bus) return error.NoBus;
+    if (n.bus_device != null) return error.TwoDevices;
+    n.bus_device = device;
+    device.written(device.context, n);
+}
+
 /// Puts an SPI flash on four pins, any of which can be left unconnected: it
 /// listens to the clock, chip select and data out, and drives data in
 pub fn attachFlashPins(self: *Chip, flash: *Flash, clock: ?PinRef, select: ?PinRef, data_out: ?PinRef, data_in: ?PinRef) error{ NoSuchPin, TwoDevices }!void {
@@ -900,8 +920,9 @@ pub fn attachSerdes(self: *Chip, a: u16, b: u16) error{ NoSuchNode, NotSerdes, P
     if (ends[0] == ends[1]) return error.NotSerdes;
     for (ends) |i| {
         const n = &self.nodes[i];
-        // a node with pins has them on its pin device
-        if (n.data == null or n.pins != 0) return error.NotSerdes;
+        // a node with pins has them on its pin device, and one with a
+        // parallel bus its data register on the bus
+        if (n.data == null or n.bus or n.pins != 0) return error.NotSerdes;
         if (n.ports[@backingInt(Direction.up)].port != null or self.layout.neighbour(i, .up) != null) return error.PortConnected;
     }
     if (self.serdes.len == max_serdes) return error.Full;
@@ -1274,6 +1295,8 @@ fn resetChip(self: *Chip, chip: u8, time: u64, hold: bool) void {
         n.pins = before.pins;
         n.wake_port = before.wake_port;
         n.pin_device = before.pin_device;
+        n.bus = before.bus;
+        n.bus_device = before.bus_device;
         n.shared_pins = before.shared_pins;
         if (before.data != null) n.data = 0;
         n.p.address = if (hold) held_address else self.reset_address[i];
@@ -1609,6 +1632,51 @@ test Layout {
     try expectEqual(717, layout.nodeNumber(143));
 }
 
+test "a node drives its parallel bus from its data register, or reads it as inputs, as DB in io says" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    const Probe = struct {
+        driven: [4]?u18 = @splat(null),
+        count: usize = 0,
+
+        fn read(_: *anyopaque, _: *const Computer) ?u18 {
+            return 0x2a;
+        }
+
+        fn written(context: *anyopaque, computer: *const Computer) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.count < self.driven.len) self.driven[self.count] = if (computer.drivesBus()) @bitCast(computer.data.?) else null;
+            self.count += 1;
+        }
+    };
+    var probe: Probe = .{};
+    try chip.attachBus(9, .{ .context = &probe, .read = Probe.read, .written = Probe.written });
+    try std.testing.expectError(error.TwoDevices, chip.attachBus(9, .{ .context = &probe, .read = Probe.read, .written = Probe.written }));
+    try std.testing.expectError(error.NoBus, chip.attachBus(8, .{ .context = &probe, .read = Probe.read, .written = Probe.written }));
+
+    // 009 drives 5, as from reset, and reads it back from the register,
+    // then clears DB and reads what the device drives; 007, with no device,
+    // reads its register driven, and as inputs the charge the bus keeps
+    var programs: [2]assembler.Program = undefined;
+    var descriptors: [0]boot.Descriptor = .{};
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try arrayforth.assembleNodes(
+        \\ ASM[ # 9 NODE ERS # 0 org : main  5. data a! !  @  x14555. io b! !b  @  begin end  >BIN
+        \\      # 7 NODE ERS # 0 org : main  6. data a! !  @  x14555. io b! !b  @  begin end  >BIN ]ASM
+    , &programs, &descriptors, &diagnostic);
+    for (assembled.programs) |program| try chip.load(program);
+    for (0..200) |_| _ = chip.step();
+    const n9 = chip.node(9).?;
+
+    try std.testing.expectEqual(0x2a, n9.data_stack.t);
+    try std.testing.expectEqual(5, n9.data_stack.s);
+    // the device told of the bus as it is when attached, driven with 0
+    try std.testing.expectEqualSlices(?u18, &.{ 0, 5, null }, probe.driven[0..3]);
+    const n7 = chip.node(7).?;
+    try std.testing.expectEqual(6, n7.data_stack.t);
+    try std.testing.expectEqual(6, n7.data_stack.s);
+}
+
 test "chips after the first" {
     const layout: Layout = .{ .rows = 8, .columns = 18, .chips = 2 };
     try expectEqual(288, layout.count());
@@ -1831,6 +1899,8 @@ test attachSerdes {
     try expectError(error.NotSerdes, chip.attachSerdes(701, 10708));
     try expectError(error.NoSuchNode, chip.attachSerdes(701, 20001));
     try expectError(error.NotSerdes, chip.attachSerdes(701, 701));
+    // a parallel bus node, with a data register, no pins and no node up
+    try expectError(error.NotSerdes, chip.attachSerdes(7, 9));
     try chip.attachSerdes(701, 10001);
     try expectError(error.PortConnected, chip.attachSerdes(1, 10001));
 }
