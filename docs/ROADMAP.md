@@ -226,8 +226,15 @@ done.
      boots the next frame, from where `FORWARD` says, as described too.
      That address is bin 1710's own x3A38: the stream so far pads to as
      many words as arrayForth 3's, 1656.
-   - The STREAMER's other roots: 300 (synchronous) and 207 (pF/144's
-     snorkel); and its two-chip paths.
+   - ✓ Root 300, through its synchronous line: `synORG`'s frames, for
+     the sync ROM's `ser-exec`, clocked in by `Sync`, which clocks words
+     as the disk's sync master, bin 1901's `18o`, does (`--boot`, without
+     `--board`).
+   - ✓ Root 207, pF/144's snorkel: frames with no header and no frame for
+     the root. The disk's streams from it (blocks 1581 and 1583, with
+     `?CLK 1`) boot as described in the tests, which stand in for the
+     snorkel.
+   - The STREAMER's two-chip paths (block 1582).
    - A stream captured once from arrayForth 3 under Wine and kept beside
      the ROM, as it is GreenArrays', would check the port byte for byte.
      Capturing needs RTS on a pty, which a preload library gives (branch
