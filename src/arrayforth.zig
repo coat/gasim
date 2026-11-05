@@ -2526,8 +2526,7 @@ const Interpreter = struct {
 
     fn selectTarget(self: *Interpreter, number_of_node: i32) Error!void {
         const chip = self.chip orelse return error.NoChip;
-        if (number_of_node < 0 or number_of_node > 999999) return error.InvalidNode;
-        const node_number: u16 = @intCast(@rem(number_of_node, 10000));
+        const node_number = std.math.cast(u16, number_of_node) orelse return error.InvalidNode;
         if (chip.layout.index(node_number) == null) return error.InvalidNode;
         self.target = node_number;
     }
@@ -3953,6 +3952,31 @@ test "a session acts on a chip, as the IDE does" {
     try expectEqual(0, session.stack().len);
     try session.interpret("1 2");
     try expectEqual(2, session.stack().len);
+}
+
+test "NODE selects a node of another chip, as +NODE describes one" {
+    const gpa = std.testing.allocator;
+    var chip: Chip = try .initChips(gpa, .ga144, 2);
+    defer chip.deinit(gpa);
+    var programs: [1]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var out: Io.Writer = .fixed(&.{});
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out, .chip = &chip });
+
+    try session.interpret("10500 NODE");
+    try expectEqual(10500, session.target());
+    try session.interpret("0 10708 HOOK");
+    try expectEqual(10708, session.target());
+    try expectError(error.InvalidNode, session.interpret("20500 NODE"));
+    try expectError(error.InvalidNode, session.interpret("70000 NODE"));
+    try expectError(error.InvalidNode, session.interpret("-1 NODE"));
+
+    // on one chip, it is not in the layout, where it was host 500
+    var one: Chip = try .init(gpa, .ga144);
+    defer one.deinit(gpa);
+    session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out, .chip = &one });
+    try expectError(error.InvalidNode, session.interpret("10500 NODE"));
 }
 
 test "host definitions" {
