@@ -223,10 +223,12 @@ fn assemble(self: *Sim, kind: Kind, source: []const u8, loads: []const u32) !arr
 fn setUp(self: *Sim, kind: Kind, assembled: arrayforth.Assembled) error{ LoadFailed, OutOfMemory }!void {
     const programs = assembled.programs;
     // the parts of a stream set nodes up one after another, and /ROOT and
-    // FORWARD are for the root's ROM, through node 708's UART or 705's
-    // flash
+    // FORWARD are for the root's ROM, through node 708's UART, 300's
+    // synchronous line or 705's flash
+    if (assembled.stream) |*s| if (s.root == 207 and s.frame_count > 1)
+        return self.fail("the stream from node 207 has several frames, which pF/144's snorkel sends, and gasim sets up the nodes of only one", .{});
     if (assembled.stream) |*s| if (s.part_count != s.frame_count or s.frame_count > 1)
-        return self.fail("the stream has several frames, or /ROOT or FORWARD, which only gasim run --boot sends to the root's ROM, with --uart 708 or a --board's flash for 705", .{});
+        return self.fail("the stream has several frames, or /ROOT or FORWARD, which only gasim run --boot sends to the root's ROM, with --uart 708, a --board's flash for 705, or 300's synchronous line", .{});
     const descriptors = if (assembled.descriptors.len > 0) assembled.descriptors else own: {
         var count: usize = 0;
         for (programs) |program| if (program.bin == null) {
