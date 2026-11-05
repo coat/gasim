@@ -173,8 +173,12 @@ more info.
   With `--uart 708`, the stream goes through the UART to node 708's ROM
   instead, before stdin. This needs ROM. An arrayForth 3 source's `STREAM[
   ... ]STREAM` is laid out as arrayForth 3's STREAMER does: from 708
-  through the UART, or from 705 packed into the board's SPI flash, for
-  705's ROM to read (`--board evb002 --jumper J26=off --boot`).
+  through the UART, from 705 packed into the board's SPI flash, for
+  705's ROM to read (`--board evb002 --jumper J26=off --boot`), or from
+  300, clocked into its pins 17 and 1 as the disk's sync master (bin 1901)
+  clocks a word out, with `run` and no `--board`. A stream from 207 is
+  pF/144's snorkel's to send, so `--boot` refuses it; without `--boot`, a
+  stream of one frame sets its nodes up as any descriptors do.
 
   ```
   $ gasim run --uart 708 examples/uart.ga

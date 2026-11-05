@@ -75,9 +75,12 @@ const usage =
     \\                             stdin. This needs ROM. An arrayForth 3
     \\                             source's STREAM[ ... ]STREAM is laid out
     \\                             as arrayForth 3's STREAMER does: from 708,
-    \\                             with --uart, or from 705, packed into the
+    \\                             with --uart, from 705, packed into the
     \\                             --board's SPI flash, such as with --board
-    \\                             evb002 --jumper J26=off.
+    \\                             evb002 --jumper J26=off, or from 300, with
+    \\                             run and no --board, clocked into its pins 17
+    \\                             and 1 as a synchronous line's master does.
+    \\                             A stream from 207 is pF/144's to send.
     \\  --break <node>:<address>   stop when the node is about to fetch the word
     \\                             at the address, in hex, such as 105:003. Can
     \\                             be given more than once.
@@ -459,13 +462,23 @@ pub fn main(init: std.process.Init) !void {
     // entry, and code saved in other bins is not loaded.
     // the parts of a stream set nodes up one after another, and /ROOT and
     // FORWARD are for the root's ROM, which only the STREAMER's stream
-    // does, through 708's UART or 705's flash
+    // does, through 708's UART, 300's synchronous line or 705's flash
     const flash_boot = boot and assembled.stream != null and assembled.stream.?.root == 705;
-    if (assembled.stream) |*s| if ((s.part_count != s.frame_count or s.frame_count > 1) and !(boot and (uart_node != null or flash_boot)))
-        fatal("{s}'s stream has several frames, or /ROOT or FORWARD, which only --boot sends to the root's ROM, with --uart 708 or a --board's flash for 705", .{source_path});
+    const sync_boot = boot and assembled.stream != null and assembled.stream.?.root == 300 and uart_node == null;
+    if (boot and assembled.stream != null and assembled.stream.?.root == 207)
+        fatal("--boot: {s}'s stream is for node 207, which pF/144's snorkel sends, and gasim does not run pF/144", .{source_path});
+    // a board's pins are the board's, and its serial port the root it
+    // boots from
+    if (boot and assembled.stream != null and assembled.stream.?.root == 300 and board != null)
+        fatal("--boot clocks {s}'s stream into node 300's pins itself, which --board leaves to the board", .{source_path});
+    if (assembled.stream) |*s| if (s.root == 207 and s.frame_count > 1)
+        fatal("{s}'s stream from node 207 has several frames, which pF/144's snorkel sends, and gasim sets up the nodes of only one", .{source_path});
+    if (assembled.stream) |*s| if ((s.part_count != s.frame_count or s.frame_count > 1) and !(boot and (uart_node != null or flash_boot or sync_boot)))
+        fatal("{s}'s stream has several frames, or /ROOT or FORWARD, which only --boot sends to the root's ROM, with --uart 708, a --board's flash for 705, or 300's synchronous line", .{source_path});
     // the flash is not in the chip's snapshots, which the interface
     // restarts from
     if (flash_boot and command != .run) fatal("--boot from a board's flash needs run", .{});
+    if (sync_boot and command != .run) fatal("--boot through node 300's synchronous line needs run", .{});
     const descriptors = if (assembled.descriptors.len > 0 or assembled.stream != null) assembled.descriptors else own: {
         var count: usize = 0;
         for (programs) |program| if (program.bin == null) {
@@ -527,6 +540,7 @@ pub fn main(init: std.process.Init) !void {
     }
     defer for (pty_devices[0..pty_len]) |*device| device.close(io);
     var feeder: Chip.Feeder = .{ .words = &.{} };
+    var sync: gasim.Sync = .init(&.{});
     if (flash_boot) {
         // packed for the board's flash, which 705's ROM reads it from
         const b = board orelse fatal("--boot: {s}'s stream is for node 705, which boots from a board's SPI flash (see --board)", .{source_path});
@@ -566,6 +580,17 @@ pub fn main(init: std.process.Init) !void {
             };
         };
         uart.preload = gasim.boot.asyncBytes(words, try arena.alloc(u8, 3 * words.len));
+    } else if (sync_boot) {
+        // clocked into 300's pins, as the EVB002's host 300 would its
+        // target's, whose pins are the board's
+        if (console_node == 300 and console_port == .left) fatal("--boot clocks the stream into node 300's wakeup pin, which its left port reads, so the console cannot use it", .{});
+        if (spec.node(300).rom != .sync_boot) fatal("--boot needs node 300 to have a sync boot ROM, as the GA144's does", .{});
+        if (roms == null) fatal("--boot needs a ROM, for node 300 to boot from (see --rom)", .{});
+        for (descriptors) |descriptor| if (descriptor.node >= Chip.Layout.chip_numbers)
+            fatal("--boot through node 300 boots its chip, not node {f}", .{Chip.nodeName(descriptor.node)});
+        sync = .init(layOut(arena, layout, assembled, source_path));
+        chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
+            fatal("--boot needs node 300's pins 17 and 1, free for its synchronous line ({t})", .{err});
     } else if (boot) {
         if (console_node == 1 and console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
         if (spec.node(1).rom != .serdes_boot) fatal("--boot needs node 001 to have a SERDES boot ROM, as the GA144's does", .{});
@@ -1265,6 +1290,8 @@ fn layOut(arena: Allocator, layout: Chip.Layout, assembled: gasim.arrayforth.Ass
         error.ForwardTooFar => fatal("--boot: {s}'s FORWARD is to past the first 16 KB of flash, which 16 bits of the address reach", .{source_path}),
         // which gasim's arrayForth makes sure of
         error.UnknownRoot, error.PathTooShort, error.NoSuchBin, error.MixedRoots, error.ForwardNotFlash, error.RootPastRam => unreachable,
+        // a stream from 207, which --boot refuses
+        error.RootNotSetUp, error.RootFrameNoRom => unreachable,
     };
 }
 
