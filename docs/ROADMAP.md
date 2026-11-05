@@ -234,7 +234,15 @@ done.
      the root. The disk's streams from it (blocks 1581 and 1583, with
      `?CLK 1`) boot as described in the tests, which stand in for the
      snorkel.
-   - The STREAMER's two-chip paths (block 1582).
+   - ✓ The STREAMER's two-chip paths: from a node to the same node of
+     the other chip through their up ports, as the STREAMER's `MWALL`
+     (block 1603) has it, which the EVB002's sync bridge (bins 1907, 1904 and 1901)
+     joins. Block 1668's two-chip stream for flash, without the polyFORTH
+     VM and with its own test of target 500 and 100, builds the bridge in
+     its second frame and boots its last across it as described, and
+     block 1582's test boots target 500 from root 207 across a bridge set
+     up as block 1670's frame sets it. Descriptors off a frame's path are
+     left out, as the STREAMER leaves them, which block 1668 relies on.
    - A stream captured once from arrayForth 3 under Wine and kept beside
      the ROM, as it is GreenArrays', would check the port byte for byte.
      Capturing needs RTS on a pty, which a preload library gives (branch

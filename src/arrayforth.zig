@@ -2467,10 +2467,10 @@ const Interpreter = struct {
     }
 
     /// Selects the boot descriptor of a node, which starts at warm with B
-    /// addressing IO, as arrayForth 3's FRAME[ sets them
+    /// addressing IO, as arrayForth 3's FRAME[ sets them. The node can be on
+    /// another chip, such as 10500, which a two-chip path reaches.
     fn bootNode(self: *Interpreter, number_of_node: i32) Error!void {
-        if (number_of_node < 0 or number_of_node > 999999) return error.InvalidNode;
-        const node_number: u16 = @intCast(@rem(number_of_node, 10000));
+        const node_number = std.math.cast(u16, number_of_node) orelse return error.InvalidNode;
         for (self.descriptors[self.descriptor_start..self.descriptor_count], self.descriptor_start..) |d, i| if (d.node == node_number) {
             self.boot_node = i;
             return;
@@ -3633,6 +3633,9 @@ test "boot descriptor errors" {
     try expectEqual(1, replaced.descriptors[0].load_count);
     try expectEqual(1, replaced.descriptors[0].loads[0].bin);
     try expectError(error.TooManyDescriptors, assembleNodes("1 +NODE 2 +NODE", &programs, &descriptors, &diagnostic));
+    // a node of another chip keeps its chip, as a two-chip path reaches it
+    try expectEqual(10500, (try assembleNodes("10500 +NODE", &programs, &descriptors, &diagnostic)).descriptors[0].node);
+    try expectError(error.InvalidNode, assembleNodes("70000 +NODE", &programs, &descriptors, &diagnostic));
     try expectError(error.TooManyLoads, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  0 1 1 /PART 0 1 1 /PART 0 1 1 /PART 0 1 1 /PART", &programs, &descriptors, &diagnostic));
     try expectError(error.NumberOutOfRange, assembleNodes("ASM[ # 1 NODE dup >BIN ]ASM 1 +NODE  60 5 1 /PART", &programs, &descriptors, &diagnostic));
     try expectError(error.NumberOutOfRange, assembleNodes("1 +NODE  11 /STACK", &programs, &descriptors, &diagnostic));

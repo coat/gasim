@@ -885,7 +885,7 @@ test "a stream from root 207 boots its path as the snorkel sends it, 207 going o
     const words = try streamer.stream(.ga144, assembled.parts(&part_buffer), assembled.programs, &buffer);
     // 208, which pumps the rest on, and is left at warm
     const checked = [_]Descriptor{ assembled.descriptors[0], assembled.descriptors[1], .{ .node = 208, .b = Computer.io_address, .p = ga144.romWordOf(.basic, "warm").? } };
-    try expectBootsAsDescribed(parsed, &checked, .{ .snorkel = words }, assembled.programs, null);
+    try expectBootsAsDescribed(parsed, &checked, .{ .snorkel = .{ .words = words } }, assembled.programs, null);
 }
 
 test "the disk's sync master, bin 1901's 18o, clocks a word out as Sync does" {
@@ -1000,7 +1000,7 @@ test "arrayForth 3's streams from root 207 boot as pF/144's snorkel sends them" 
         var first: usize = 0;
         while (first < assembled.descriptors.len) : (first += Chip.max_breakpoints) {
             const batch = assembled.descriptors[first..@min(first + Chip.max_breakpoints, assembled.descriptors.len)];
-            expectBootsAsDescribed(parsed, batch, .{ .snorkel = words }, assembled.programs, null) catch |err| {
+            expectBootsAsDescribed(parsed, batch, .{ .snorkel = .{ .words = words } }, assembled.programs, null) catch |err| {
                 std.debug.print("{s}\n", .{text});
                 return err;
             };
@@ -1126,6 +1126,157 @@ test "arrayForth 3's stream for flash, after block 1671, boots through the EVB00
     try expectEqual(1651, unpadded);
 }
 
+test "arrayForth 3's two-chip stream for flash, block 1668, boots the target through the EVB002's sync bridge as described" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    const gpa = std.testing.allocator;
+    const disk = try Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024));
+    defer gpa.free(disk);
+
+    // block 1668 as the block 1671 test has it, without the polyFORTH VM
+    // and with the NIC, and with the block's own test of two target nodes,
+    // after the bins it loads, the bridge's among them: the loader on host
+    // 400 (block 2290), the bridge on host 300 and target 300 (2287) and
+    // the sync master that loads the target's (2289)
+    const source =
+        \\1562 LOAD  2331 LOAD  2286 LOAD  2295 LOAD  2296 LOAD
+        \\2287 LOAD  2289 LOAD  2290 LOAD
+        \\STREAMER LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD
+        \\1669 LOAD
+        \\705 STREAM[   ' sr705 COURSE
+        \\   ( Speedup)  0 0 3 1608 /ROOT
+        \\   ( Nucleus to SRAM)  1672 LOAD
+        \\   ( Build bridge)  ' br705 COURSE  1670 LOAD
+        \\   FRAME[  ( Residual) SRAM 2 + LOAD  ' ss705 COURSE
+        \\      ( Async bootable)  708 +NODE xAA /P
+        \\      ( Test)  10500 +NODE x30000. /IO  10100 +NODE x30000. /IO
+        \\      ( Clock/Ether)  ENIC 1+ LOAD
+        \\   ]FRAME
+        \\]STREAM
+    ;
+    const programs = try gpa.alloc(Program, Chip.Layout.chip_numbers);
+    defer gpa.free(programs);
+    const descriptor_buffer = try gpa.alloc(Descriptor, 4 * Chip.Layout.chip_numbers);
+    defer gpa.free(descriptor_buffer);
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = arrayforth.assembleScript(source, disk, programs, descriptor_buffer, &diagnostic) catch |err| {
+        std.debug.print("{t} at block {d} line {d} '{s}'\n", .{ err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
+        return err;
+    };
+    var part_buffer: [arrayforth.Stream.max_parts]streamer.Part = undefined;
+    const parts = assembled.parts(&part_buffer);
+    try expectEqual(6, parts.len);
+    try expectEqual(.forward, std.meta.activeTag(parts[2]));
+    try expectEqual(.forward, std.meta.activeTag(parts[4]));
+    // the bridge's frame, along br705 to host 300, and the last, along
+    // ss705, which keeps off the bridge's 300s and crosses from host 400 to
+    // target 400
+    const bridge = parts[3].frame;
+    try expectEqual(300, bridge.path[bridge.path.len - 1]);
+    const last = parts[5].frame;
+    try expectEqual(282, last.path.len);
+    const crossing = std.mem.indexOfScalar(u16, last.path, 10400).?;
+    try expectEqual(400, last.path[crossing - 1]);
+    try expectEqual(null, std.mem.indexOfScalar(u16, last.path, 300));
+    try expectEqual(null, std.mem.indexOfScalar(u16, last.path, 10300));
+    // the target's nodes the block's test describes, after 708's
+    try expectEqualSlices(u16, &.{ 708, 10500, 10100 }, &.{ last.descriptors[0].node, last.descriptors[1].node, last.descriptors[2].node });
+
+    const words = try gpa.alloc(Word, streamer.maxLen(parts));
+    defer gpa.free(words);
+    const stream_words = try streamer.stream(Board.evb002.layout(.ga144), parts, assembled.programs, words);
+    // the stream at 0, and at x20000 a nucleus of one word, as in the block
+    // 1671 test
+    const image = try gpa.alloc(u8, 0x20004);
+    defer gpa.free(image);
+    @memset(image, 0xff);
+    _ = try streamer.pack(stream_words, image);
+    image[0x20000..][0..4].* = .{ 0, 0, 0x12, 0x34 };
+    const sram_words = try gpa.alloc(u16, Sram.evb002_words);
+    defer gpa.free(sram_words);
+
+    // the bridge's nodes start as described: host 400 at bin 1907's start,
+    // which resets the target, loads bin 1904 into target 300 through host
+    // 300's sync master, and then into host 300; and then, through the
+    // bridge, the last frame's, the target's 500 and 100 among them
+    for ([_][]const Descriptor{ bridge.descriptors, last.descriptors }, [_]usize{ 3, 32 }) |descriptors, count| {
+        var checked: [Chip.max_breakpoints]Descriptor = undefined;
+        var len: usize = 0;
+        for (descriptors) |d| if (d.node != 705 and d.node != 708) {
+            checked[len] = d;
+            len += 1;
+        };
+        try expectEqual(count, len);
+        @memset(sram_words, 0xffff);
+        try expectBootsAsDescribed(parsed, checked[0..len], .{ .flash = image }, assembled.programs, sram_words);
+    }
+}
+
+test "arrayForth 3's two-chip test, block 1582, boots target 500 from root 207 through the EVB002's sync bridge" {
+    var roms: [144]ga144.NodeRom = undefined;
+    const parsed = try testRom(&roms);
+    const gpa = std.testing.allocator;
+    const disk = try Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024));
+    defer gpa.free(disk);
+    const programs = try gpa.alloc(Program, Chip.Layout.chip_numbers);
+    defer gpa.free(programs);
+    const descriptor_buffer = try gpa.alloc(Descriptor, Chip.Layout.chip_numbers);
+    defer gpa.free(descriptor_buffer);
+    var diagnostic: assembler.Diagnostic = .{};
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    var session: arrayforth.Session = .init(programs, descriptor_buffer, &diagnostic, .{ .out = &discarding.writer, .blocks = disk });
+
+    // the bridge, as the IDE erects it (block 1623's SPAN) or block 1670's
+    // frame sets it up, without its 705 (whose bin 1710 is block 2295's)
+    // and 708: host 400's loader, 500 with the bridge's bin to read, and
+    // 300's sync master
+    var sources: [2]Io.Writer.Allocating = .{ .init(gpa), .init(gpa) };
+    defer for (&sources) |*source| source.deinit();
+    try sources[0].writer.writeAll("1562 LOAD  2287 LOAD  2289 LOAD  2290 LOAD  2295 LOAD  STREAMER LOAD  1669 LOAD\n705 STREAM[  ' br705 COURSE\n");
+    // and block 1582, up to its ]STREAM, before !SNORK sends it
+    for ([_]u16{ 1670, 1582 }, &sources) |block, *source| {
+        const text = disk[@as(usize, block) * 1024 ..][0..1024];
+        for (0..16) |line| try source.writer.print("{s}\n", .{text[line * 64 ..][0..64]});
+    }
+    const bridge_source = sources[0].written();
+    const bridge_text = try std.fmt.allocPrint(gpa, "{s} ]STREAM", .{bridge_source[0 .. std.mem.indexOf(u8, bridge_source, "]FRAME").? + "]FRAME".len]});
+    defer gpa.free(bridge_text);
+    var set_up: [3]Descriptor = undefined;
+    var set_up_len: usize = 0;
+    session.interpret(bridge_text) catch |err| {
+        std.debug.print("{t} at line {d} '{s}'\n", .{ err, diagnostic.line, diagnostic.token });
+        return err;
+    };
+    for (session.assembled().descriptors) |d| if (d.node != 705 and d.node != 708) {
+        set_up[set_up_len] = d;
+        // a frame leaves a node's return stack with where it executes
+        // from, a port it reads 400 from, which 300's off returns to
+        if (d.node == 300) {
+            set_up[set_up_len].return_stack[0] = port.multiport(.initOne(.up));
+            set_up[set_up_len].return_stack_len = 1;
+        }
+        set_up_len += 1;
+    };
+    try expectEqual(3, set_up_len);
+
+    const written = sources[1].written();
+    session.interpret(written[0 .. std.mem.indexOf(u8, written, "]STREAM").? + "]STREAM".len]) catch |err| {
+        std.debug.print("{t} at line {d} '{s}'\n", .{ err, diagnostic.line, diagnostic.token });
+        return err;
+    };
+    try session.finish();
+    const assembled = session.assembled();
+    var part_buffer: [arrayforth.Stream.max_parts]streamer.Part = undefined;
+    const parts = assembled.parts(&part_buffer);
+    // from 207 along row 4 to host 400, and on to target 400 and 500
+    try expectEqualSlices(u16, &.{ 207, 307, 407, 406, 405, 404, 403, 402, 401, 400, 10400, 10500 }, parts[0].frame.path);
+    try expectEqual(10500, assembled.descriptors[0].node);
+    const buffer = try gpa.alloc(Word, streamer.maxLen(parts));
+    defer gpa.free(buffer);
+    const words = try streamer.stream(Board.evb002.layout(.ga144), parts, assembled.programs, buffer);
+    try expectBootsAsDescribed(parsed, assembled.descriptors, .{ .snorkel = .{ .words = words, .set_up = set_up[0..set_up_len] } }, assembled.programs, null);
+}
+
 test "arrayForth 3's SRAM cluster writes the EVB002's SRAM and reads it back" {
     var roms: [144]ga144.NodeRom = undefined;
     const parsed = try testRom(&roms);
@@ -1179,10 +1330,11 @@ test "arrayForth 3's SRAM cluster writes the EVB002's SRAM and reads it back" {
 /// Boots the EVB002's host chip, node 708 with a stream through USB port A,
 /// node 705 from the contents of its flash, with J26 (NO BOOT) off, node
 /// 300 from a synchronous line's master on its pins, with J34 and J35 off,
-/// or nodes from 207 as its snorkel would (`Snorkel`), and checks that each
-/// node of `checked` starts as its descriptor says. The board's SRAM holds
-/// `sram_words`, if given, or else words of its own.
-fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, from: union(enum) { uart: []const Word, flash: []const u8, sync: []const Word, snorkel: []const Word }, programs: []const Program, sram_words: ?[]u16) !void {
+/// or nodes from 207 as its snorkel would (`Snorkel`), after setting up the
+/// nodes of `set_up`, and checks that each node of `checked` starts as its
+/// descriptor says. The board's SRAM holds `sram_words`, if given, or else
+/// words of its own.
+fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descriptor, from: union(enum) { uart: []const Word, flash: []const u8, sync: []const Word, snorkel: struct { words: []const Word, set_up: []const Descriptor = &.{} } }, programs: []const Program, sram_words: ?[]u16) !void {
     const gpa = std.testing.allocator;
     var chip: Chip = try .initChips(gpa, .ga144, Board.evb002.chips);
     defer chip.deinit(gpa);
@@ -1211,7 +1363,8 @@ fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descript
     if (from == .flash) try Board.evb002.attachFlash(&chip, &flash, settings);
     var sync: Sync = .init(if (from == .sync) from.sync else &.{});
     if (from == .sync) try chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 });
-    var snorkel: Snorkel = .{ .words = if (from == .snorkel) from.snorkel else &.{} };
+    var snorkel: Snorkel = .{ .words = if (from == .snorkel) from.snorkel.words else &.{} };
+    if (from == .snorkel) for (from.snorkel.set_up) |d| try chip.setUp(d, programs);
     try Board.evb002.attachSram(&chip, &sram, settings);
     for (checked) |d| try chip.breakpoints.insert(.init(chip.layout.index(d.node).?, @truncate(d.p)));
 
