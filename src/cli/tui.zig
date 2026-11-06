@@ -243,6 +243,8 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "up down, j k", "scroll" },
         .{ "pgup pgdn", "page" },
         .{ "g G, home end", "the top or bottom" },
+        .{ "/", "list only the keys with what is typed, enter to keep it" },
+        .{ "esc", "list every key again, or close" },
         .{ "esc, q, ?, F1", "close" },
     } },
 };
@@ -362,6 +364,11 @@ const Tui = struct {
     help_scroll: ?u16 = null,
     /// rows of the help last drawn in view
     help_page: u16 = 1,
+    /// what the keys listed in the help must have, if anything
+    help_filter: [32]u8 = undefined,
+    help_filter_len: u8 = 0,
+    /// whether keys are typed into the filter, after `/`
+    help_filtering: bool = false,
     /// the next key chooses a port of the selected node to watch
     choosing_watch: bool = false,
     /// quitting was asked for with unsaved blocks, and asking again quits
@@ -698,6 +705,8 @@ const Tui = struct {
     /// whose keys are those at the top
     fn openHelp(self: *Tui) bool {
         self.choosing_watch = false;
+        self.help_filter_len = 0;
+        self.help_filtering = false;
         self.help_scroll = if (self.helpHeading()) |heading| helpRow(heading) else 0;
         return true;
     }
@@ -717,9 +726,18 @@ const Tui = struct {
         };
     }
 
-    /// Handles keys while the help is shown, which scroll and close it
+    /// Handles keys while the help is shown, which filter, scroll and close it
     fn helpKey(self: *Tui, k: vaxis.Key) bool {
         const page: i32 = self.help_page;
+        if (self.help_filtering) {
+            if (self.helpFilterKey(k)) return true;
+        } else if (k.matches('/', .{})) {
+            self.help_filtering = true;
+            self.help_filter_len = 0;
+            return true;
+        } else if (self.help_filter_len > 0 and k.matches(vaxis.Key.escape, .{})) {
+            return self.openHelp();
+        }
         if (k.matchesAny(&.{ vaxis.Key.escape, vaxis.Key.f1, 'q', '?' }, .{})) self.help_scroll = null;
         if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.scrollHelp(-1);
         if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{})) self.scrollHelp(1);
@@ -730,9 +748,54 @@ const Tui = struct {
         return true;
     }
 
+    /// Handles keys typed into the help's filter, returning false for keys
+    /// that are not text, which go on scrolling
+    fn helpFilterKey(self: *Tui, k: vaxis.Key) bool {
+        const len = &self.help_filter_len;
+        if (k.matches(vaxis.Key.escape, .{})) return self.openHelp();
+        if (k.matches(vaxis.Key.enter, .{})) {
+            if (len.* == 0) return self.openHelp();
+            self.help_filtering = false;
+            return true;
+        }
+        if (k.matches(vaxis.Key.backspace, .{})) {
+            // as at the command line, deleting the last character stops
+            if (len.* == 0) return self.openHelp();
+            len.* -= 1;
+        } else if (k.text) |text| {
+            for (text) |byte| if (len.* < self.help_filter.len and byte >= ' ' and byte < 0x7f) {
+                self.help_filter[len.*] = byte;
+                len.* += 1;
+            };
+        } else return false;
+        self.help_scroll = 0;
+        return true;
+    }
+
+    /// whether the help lists a key, having what the filter asks for, as
+    /// the key, what it does, or the heading it is under
+    fn helpLists(self: *const Tui, heading: []const u8, hint: Hint) bool {
+        const filter = self.help_filter[0..self.help_filter_len];
+        for ([_][]const u8{ heading, hint[0], hint[1] }) |text| {
+            if (std.ascii.findIgnoreCase(text, filter) != null) return true;
+        }
+        return false;
+    }
+
+    /// rows of the help that the filter leaves, as `help_rows` counts them
+    fn helpRowsListed(self: *const Tui) u16 {
+        var rows: u16 = 0;
+        for (help) |section| {
+            var listed: u16 = 0;
+            for (section[1]) |hint| listed += @intFromBool(self.helpLists(section[0], hint));
+            if (listed > 0) rows += listed + 2;
+        }
+        return rows -| 1;
+    }
+
     fn scrollHelp(self: *Tui, rows: i32) void {
         const first = self.help_scroll orelse return;
-        self.help_scroll = @intCast(std.math.clamp(@as(i32, first) + rows, 0, @max(help_rows - @as(i32, self.help_page), 0)));
+        self.help_scroll = @intCast(std.math.clamp(@as(i32, first) + rows, 0, @max(@as(i32, self.helpRowsListed()) - self.help_page, 0)));
     }
 
     fn mapKey(self: *Tui, k: vaxis.Key) void {
@@ -1920,27 +1983,50 @@ const Tui = struct {
         const inside = box.child(.{ .border = .{ .where = .all, .style = .{ .fg = .{ .index = 6 } } } }).child(.{ .x_off = 1 });
         self.help_page = @max(inside.height, 1);
         // so the last page is full, as after resizing
-        const first = @min(self.help_scroll.?, help_rows -| self.help_page);
+        const listed = self.helpRowsListed();
+        const first = @min(self.help_scroll.?, listed -| self.help_page);
         self.help_scroll = first;
-        const more = self.print("{s}{s}", .{ if (first > 0) "↑" else "", if (first + self.help_page < help_rows) "↓" else "" });
-        _ = box.child(.{ .x_off = 2, .width = width -| 3, .height = 1 }).print(&.{
+        const more = self.print("{s}{s}", .{ if (first > 0) "↑" else "", if (first + self.help_page < listed) "↓" else "" });
+        const filter = self.help_filter[0..self.help_filter_len];
+        const title = box.child(.{ .x_off = 2, .width = width -| 3, .height = 1 });
+        const end = title.print(&.{
             .{ .text = "help", .style = .{ .bold = true } },
             .{ .text = " " },
             .{ .text = more, .style = .{ .bold = true } },
+            .{ .text = if (self.help_filtering or filter.len > 0) " /" else "" },
+            .{ .text = filter, .style = colors.literal },
         }, .{ .wrap = .none });
+        if (self.help_filtering) box.showCursor(@min(2 + end.col, width -| 2), 0);
+        // in the bottom border, what `/` does until it is used
+        if (!self.help_filtering) {
+            const label = if (filter.len > 0) " esc all keys " else " / filter ";
+            _ = box.printSegment(.{ .text = label, .style = colors.dim }, .{ .row_offset = height -| 1, .col_offset = @intCast(width -| label.len -| 2), .wrap = .none });
+        }
+        if (listed == 0) {
+            _ = inside.printSegment(.{ .text = "no key has that", .style = colors.dim }, .{ .wrap = .none });
+            return;
+        }
 
         var row: u16 = 0;
         for (help) |section| {
-            if (row >= first and row - first < inside.height) {
-                _ = inside.printSegment(.{ .text = section[0], .style = colors.heading }, .{ .row_offset = row - first, .wrap = .none });
-            }
+            const heading_row = row;
             row += 1;
+            var any = false;
             for (section[1]) |hint| {
+                if (!self.helpLists(section[0], hint)) continue;
+                any = true;
                 if (row >= first and row - first < inside.height) {
                     _ = inside.printSegment(.{ .text = hint[0], .style = colors.label }, .{ .row_offset = row - first, .wrap = .none });
                     _ = inside.printSegment(.{ .text = hint[1] }, .{ .row_offset = row - first, .col_offset = help_key_width, .wrap = .none });
                 }
                 row += 1;
+            }
+            if (!any) {
+                row = heading_row;
+                continue;
+            }
+            if (heading_row >= first and heading_row - first < inside.height) {
+                _ = inside.printSegment(.{ .text = section[0], .style = colors.heading }, .{ .row_offset = heading_row - first, .wrap = .none });
             }
             row += 1;
         }
@@ -3105,6 +3191,94 @@ test "help opens at the keys of what has the focus" {
     try t.press('i');
     try t.press(vaxis.Key.f1);
     try expectEqual(@min(helpRow("typing in the editor"), help_rows - t.tui.help_page), t.tui.help_scroll.?);
+}
+
+test "help lists only the keys with what is typed" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+    try t.press('?');
+    try expect(try t.shows(28, " / filter "));
+
+    // as it is typed, in what a key does, whatever its case
+    try t.press('/');
+    for ("BREAKP") |c| try t.press(c);
+    try expect(try t.shows(0, " /BREAKP"));
+    try expect(try t.shows(1, "node"));
+    try expect(try t.shows(2, "b "));
+    try expect(try t.shows(2, "set or clear a breakpoint"));
+    try expect(try t.shows(4, "debug"));
+    try expectEqual(0, t.tui.chip.steps);
+
+    // letters that would scroll are typed
+    try t.press('j');
+    try expect(try t.shows(0, "/BREAKPj"));
+    try expect(try t.shows(1, "no key has that"));
+    try t.press(vaxis.Key.backspace);
+    try expect(try t.shows(1, "node"));
+
+    // enter keeps it, for the keys to scroll and close again
+    try t.press(vaxis.Key.enter);
+    try expect(try t.shows(28, " esc all keys "));
+    try t.press('k');
+    try expect(try t.shows(1, "node"));
+
+    // esc lists every key again, and then closes
+    try t.press(vaxis.Key.escape);
+    try expect(try t.shows(1, "everywhere"));
+    try expectEqual(0, t.tui.help_filter_len);
+    try expect(t.tui.help_scroll != null);
+
+    // arrows go on scrolling what is listed, and typing goes back to its top
+    try t.press('/');
+    try t.press('e');
+    try t.press(vaxis.Key.down);
+    try expectEqual(1, t.tui.help_scroll.?);
+    try t.press('n');
+    try expectEqual(0, t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+
+    // in a heading, it lists what is under it
+    try t.press('/');
+    for ("mouse") |c| try t.press(c);
+    try expect(try t.shows(1, "mouse"));
+    try expect(try t.shows(2, "focus a panel"));
+
+    // deleting past the start stops, as esc does
+    for ("mouse") |_| try t.press(vaxis.Key.backspace);
+    try expect(t.tui.help_filtering);
+    try t.press(vaxis.Key.backspace);
+    try expect(!t.tui.help_filtering);
+    try expect(try t.shows(1, "everywhere"));
+    try expectEqual(help_rows, t.tui.helpRowsListed());
+
+    // nothing typed leaves the help where it was
+    try t.press(vaxis.Key.escape);
+    try t.pressWith('5', .{ .alt = true });
+    try t.press('?');
+    try t.press('/');
+    try expectEqual(helpRow("debug"), t.tui.help_scroll.?);
+    try t.press(vaxis.Key.enter);
+    try expectEqual(helpRow("debug"), t.tui.help_scroll.?);
+    try expect(!t.tui.help_filtering);
+
+    // keeping a filter leaves it scrolled
+    try t.press('/');
+    try t.press('e');
+    try t.press(vaxis.Key.down);
+    try t.press(vaxis.Key.enter);
+    try expectEqual(1, t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+
+    // closing forgets it
+    try t.press('/');
+    try t.press('z');
+    try t.press(vaxis.Key.enter);
+    try t.press('q');
+    try expectEqual(null, t.tui.help_scroll);
+    try t.press('?');
+    try expectEqual(0, t.tui.help_filter_len);
 }
 
 test "help lists the keys, and scrolls" {
