@@ -294,9 +294,6 @@ pub const Session = struct {
         defer it.color_load = null;
         it.color_blocks = blocks;
         it.color_depth = 0;
-        // outside F18 code, as the node a compile before left open is not
-        // this block's
-        it.color_node = false;
         it.feedback_differs = 0;
         it.first_difference = null;
         it.unresolved_then = null;
@@ -637,7 +634,7 @@ const HostWord = struct {
     /// the block a session compiled it from
     block: ?u32 = null,
     /// defined outside host and target, as a loader's blocks define their
-    /// words in x86 code, which the end of its load forgets
+    /// words in x86 code, which F18 code does not see
     outside: bool = false,
 
     const Part = union(enum) { number: i32, word: []const u8 };
@@ -1450,9 +1447,10 @@ const Interpreter = struct {
     /// the blocks it loads have been, and saves the bin being assembled
     fn loadColorForth(self: *Interpreter, block: i32) Error!void {
         defer self.color_line = null;
-        // the words a loader's block defined in x86 code, which are its own
-        defer self.keepHostWords(null, true);
         self.color_address = false;
+        // outside F18 code, as arrayForth 2's loaders load descriptor blocks
+        // after compile, though a block loaded from one goes on in its node
+        self.color_node = false;
         // a definition that a load before left open, as one ends without ;
         self.defining = null;
         self.defining_yellow = false;
@@ -1497,13 +1495,12 @@ const Interpreter = struct {
         self.saved_count = kept;
         self.forgetColorDescriptors(block);
 
-        self.keepHostWords(block, false);
+        self.keepHostWords(block);
     }
 
     /// Forgets the host words a session compiled from `block`, or with null
-    /// from any colorForth block, or with `outside` those defined outside
-    /// host and target
-    fn keepHostWords(self: *Interpreter, block: ?u32, outside: bool) void {
+    /// from any colorForth block
+    fn keepHostWords(self: *Interpreter, block: ?u32) void {
         const from = struct {
             fn from(at: ?u32, wanted: ?u32) bool {
                 return if (wanted) |b| at == b else at != null;
@@ -1519,7 +1516,7 @@ const Interpreter = struct {
         var moved: struct { start: u16 = 0, end: u16 = 0, to: u16 = 0 } = .{};
         for (self.host_words[0..self.host_word_count], 0..) |word, i| {
             if (i == self.host_mark) mark = words;
-            if (if (outside) word.outside else from(word.block, block)) {
+            if (from(word.block, block)) {
                 if (self.defining != null and self.defining.? == i) self.defining = null;
                 continue;
             }
@@ -1796,10 +1793,14 @@ const Interpreter = struct {
         return null;
     }
 
-    fn findHostWord(self: *Interpreter, text: []const u8) ?HostWord {
+    /// the host word named `text`, but in F18 code, not one defined in x86
+    /// code, as arrayForth 2's F18 compiler has its own words, such as dup,
+    /// which come first
+    fn findHostWord(self: *Interpreter, text: []const u8, in_code: bool) ?HostWord {
         var i = self.host_word_count;
         while (i > 0) {
             i -= 1;
+            if (in_code and self.host_words[i].outside) continue;
             if (eql(self.host_words[i].name, text)) return self.host_words[i];
         }
         return null;
@@ -1833,7 +1834,7 @@ const Interpreter = struct {
     /// literal or call
     fn greenWord(self: *Interpreter, text: []const u8) Error!void {
         if (self.bin) |*bin| if (bin.findColor(text)) |value| return self.callOrPush(value, true);
-        if (self.findHostWord(text)) |word| return self.runHostWord(word);
+        if (self.findHostWord(text, true)) |word| return self.runHostWord(word);
         if (self.bin == null) return error.NoNode;
         if (self.earlierLabel(text)) |value| return self.callOrPush(value, true);
         if (colorforth_literals.get(text)) |value| return self.namedLiteral(value);
@@ -1855,9 +1856,13 @@ const Interpreter = struct {
             if (self.unresolved_then == null) self.unresolved_then = self.diagnostic.line;
             return;
         }
-        const built_in = try self.findBuiltIn(word);
+        // and last, an x86 word that F18 code has no word for
+        const built_in = self.findBuiltIn(word) catch |err| {
+            if (err == error.UnknownWord) if (self.findHostWord(text, false)) |host_word| return self.runHostWord(host_word);
+            return err;
+        };
         switch (built_in) {
-            .forth, .number => return error.UnknownWord,
+            .forth, .number => return if (self.findHostWord(text, false)) |host_word| self.runHostWord(host_word) else error.UnknownWord,
             else => try self.runBuiltIn(built_in),
         }
     }
@@ -1872,9 +1877,11 @@ const Interpreter = struct {
     fn yellowWord(self: *Interpreter, text: []const u8) Error!void {
         const address = self.color_address;
         self.color_address = false;
-        if (self.findHostWord(text)) |host_word| return self.runHostWord(host_word);
         const node_begun = self.color_node and self.bin != null;
         const in_code = node_begun and !self.host_mode and self.host_depth == 0;
+        // colorForth's own words come before those of x86 code, such as
+        // block 1412's over
+        if (self.findHostWord(text, in_code)) |host_word| if (!host_word.outside or std.meta.stringToEnum(ColorWord, text) == null) return self.runHostWord(host_word);
         if (address or !in_code) {
             if (self.bin) |*bin| if (bin.findColor(text)) |value| return self.push(value);
             if (self.earlierLabel(text)) |value| return self.push(value);
@@ -5046,28 +5053,44 @@ test "colorForth's then with nothing to resolve only aligns, and is noted" {
     try expectEqual(9, colorforth.place(assembled.unresolved_then.?).token);
 }
 
-test "the loads of a program go on from one to the next, but for the host words defined outside host" {
-    // as arrayForth 2 goes on in the node a load before left open, but a
-    // loader's words, such as block 1412's dup, are its own
+test "a block loaded from F18 code goes on in its node, but one loaded after it does not" {
+    // and a word defined in x86 code, as block 1412's dup, lasts, but F18
+    // code and colorForth have their own words, which come first
     const bytes = try colorBlocks(&.{
         \\: dup ] 7 ;
+        \\: seven ] 7 ;
         ,
         \\
         ,
         \\[ 5 node 0 org
-        \\: main ] dup ;
+        \\: main ] dup ; [ 4 load
         ,
         \\
         ,
         \\: more ] drop ;
+        ,
+        \\
+        ,
+        \\: after ] over ;
+        \\[ 9 +node 3 dup 2 /stack seven /p
+        ,
+        \\
+        ,
+        \\[ 6 node 0 org
+        \\: main ] seven , ;
     });
     var programs: [4]Program = undefined;
+    var descriptors: [4]boot.Descriptor = undefined;
     var diagnostic: Diagnostic = .{};
-    const assembled = (try assembleColorForth(&bytes, &.{ 0, 2, 4 }, &programs, &.{}, &diagnostic)).programs;
-    try expectEqual(1, assembled.len);
-    try expectEqual(2, assembled[0].len);
-    try expectEqual(opcodes(.dup, .@";", .@";", .@";"), assembled[0].ram[0]);
-    try expectEqual(opcodes(.drop, .@";", .@";", .@";"), assembled[0].ram[1]);
+    const assembled = try assembleColorForth(&bytes, &.{ 0, 2, 6, 8 }, &programs, &descriptors, &diagnostic);
+    try expectEqual(2, assembled.programs.len);
+    try expectEqual(2, assembled.programs[0].len);
+    try expectEqual(opcodes(.dup, .@";", .@";", .@";"), assembled.programs[0].ram[0]);
+    try expectEqual(opcodes(.drop, .@";", .@";", .@";"), assembled.programs[0].ram[1]);
+    try expectEqualSlices(Word, &.{ 3, 3 }, assembled.descriptors[0].stack[0..assembled.descriptors[0].stack_len]);
+    try expectEqual(7, assembled.descriptors[0].p);
+    // an x86 word F18 code has no word for still runs in it
+    try expectEqual(7, assembled.programs[1].ram[0]);
 }
 
 test "colorForth's red words before a node define words for the host" {

@@ -145,7 +145,12 @@ of a structure that has one too many. Between `host` and
 words as yellow ones and pushes its numbers, such as `:r-l- ]$1f5 lit ;`,
 a macro for a literal, and one with no words before the next falls
 through into it, as `:head :pipe [1112 ]load ;`, until `empty` forgets
-the words defined since `mark`. Yellow words in a definition run as it is
+the words defined since `mark`. One defined outside `host`, as a loader's
+block defines its words in x86 code, such as block 228's `+wire`, is
+there for the blocks loaded after it, until `reclaim` or `empty`, but F18
+code's words and colorForth's own, such as `dup`, come before it. Each
+load given to the compiler starts outside F18 code,
+though a block loaded from F18 code goes on in its node. Yellow words in a definition run as it is
 defined, and the next green word compiles the number they leave, as
 colorForth does: `:seven [3 4 + ]lit ;`. There, and in host words, `@` and
 `!` fetch and store, such as an image's system variables, which leave
