@@ -256,10 +256,12 @@ done.
    normally provides (DB006 §5.5). Its license only covers GreenArrays'
    chips, so it stays bring-your-own-distribution, and GreenArrays should be
    asked first. gasim would never ship it. As DB006 §5.2.2.2 has it:
-   - The VM described: gasim's arrayForth assembles the stock code (block
-     2280, `STOCK`, which needs `DO-ROM`) and describes the VM in blocks
-     1981 and 1982, which need CONFIG's block names (1562), the chip's
-     `nns` and `b-nn` (block 1564) and the STREAMER's `?RAM`.
+   - ✓ The VM described: after CONFIG (block 1562), gasim's arrayForth
+     assembles the stock code (block 2280, `STOCK`, where `DO-ROM` is
+     gasim's own ROM) and runs block 1665 as it is, describing the VM as
+     blocks 1981 and 1982 do, with the STREAMER's `?RAM`. It keeps what
+     `!STREAM`, `!NUCLEUS` and `!stream` send, in order
+     (`Assembled.sends`), which `gasim run` refuses until it sends them.
    - Sent as `1665 LOAD` sends it, on port A: block 1666's stream, which
      wires 708 down to 108 and loads the SRAM cluster; `!NUCLEUS`, a
      frame of the nucleus, the first 9 blocks of `pFDISK.blk`, for 108 to

@@ -736,8 +736,8 @@ test "arrayForth 3's applications boot through the EVB002's USB port A as their 
     const applications = [_][]const u8{
         sram.written()[0..install_end],
         // the Ethernet NIC with its clock monitor, as block 1665 adds it to
-        // pF/144's stream, without the polyFORTH VM, which gasim's
-        // arrayForth cannot describe as its ?RAM is the IDE's. Block 1583
+        // pF/144's stream, without the polyFORTH VM, which the block 1665
+        // test describes, so that this boots through 708. Block 1583
         // adds it to pF/144 with the crystal oscillator too (?CLK 2), whose
         // descriptors load a bin 516 that nothing builds.
         \\1562 LOAD  STREAMER LOAD  1 CONSTANT ?CLK  1 CONSTANT ?ETH  2001 LOAD
@@ -1008,6 +1008,75 @@ test "arrayForth 3's streams from root 207 boot as pF/144's snorkel sends them" 
     }
 }
 
+test "pF/144's serial boot, block 1665, describes the VM and sends its streams and nucleus" {
+    const gpa = std.testing.allocator;
+    const disk = Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer gpa.free(disk);
+
+    // as arrayForth 3 does, with its configuration (block 1562) and all
+    // its stock code assembled (2280), as DB006 5.2.2.2 asks
+    const programs = try gpa.alloc(Program, Chip.Layout.chip_numbers);
+    defer gpa.free(programs);
+    const descriptor_buffer = try gpa.alloc(Descriptor, 4 * Chip.Layout.chip_numbers);
+    defer gpa.free(descriptor_buffer);
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = arrayforth.assembleScript("1562 LOAD  2280 LOAD  1665 LOAD", disk, programs, descriptor_buffer, &diagnostic) catch |err| {
+        std.debug.print("{t} at block {d} line {d} '{s}'\n", .{ err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
+        return err;
+    };
+    // block 1666's stream, which resets the chip, then the nucleus, and
+    // then block 1665's, which doesn't
+    const sends = assembled.sends();
+    try expectEqual(3, sends.len);
+    try expectEqual(true, sends[0].stream.reset);
+    try expectEqual(.nucleus, std.meta.activeTag(sends[1]));
+    try expectEqual(false, sends[2].stream.reset);
+
+    var frames: [arrayforth.Stream.max_frames]streamer.Frame = undefined;
+    // the wires from 708 down to 108, and 108 to write the nucleus to the
+    // SRAM, after the cluster's own nodes, 107, 7, 8 and 9
+    const nuc = assembled.framesOf(&sends[0].stream.stream, &frames);
+    try expectEqual(1, nuc.len);
+    try expectEqualSlices(u16, &.{ 708, 608, 508, 408, 308, 208, 108, 107, 7, 8, 9 }, nuc[0].path);
+    const wire = findDescriptor(nuc[0].descriptors, 408).?;
+    try expectEqual(1711, wire.loads[0].bin);
+    try expectEqual(1713, findDescriptor(nuc[0].descriptors, 108).?.loads[0].bin);
+
+    // the VM, as blocks 1981 and 1982 describe it: the bitsy, the stack,
+    // the buds, the serial nodes, the snorkel and the SPI flash's 705
+    const vm = assembled.framesOf(&sends[2].stream.stream, &frames);
+    try expectEqual(1, vm.len);
+    const bitsy = findDescriptor(vm[0].descriptors, 105).?;
+    try expectEqual(1703, bitsy.loads[0].bin);
+    try expectEqualSlices(Word, &.{ 0xffe0, 0x15555, 1 }, bitsy.stack[0..bitsy.stack_len]);
+    for ([_]struct { u16, u32 }{ .{ 106, 1700 }, .{ 206, 1702 }, .{ 205, 1705 }, .{ 6, 1701 }, .{ 5, 1704 }, .{ 100, 1706 }, .{ 200, 1707 }, .{ 207, 1605 }, .{ 705, 1606 } }) |node_bin| {
+        try expectEqual(node_bin[1], findDescriptor(vm[0].descriptors, node_bin[0]).?.loads[0].bin);
+    }
+    // /WIRE's -1 ?RAM ! replaced 101's ganglion with the wire
+    const serial_wire = findDescriptor(vm[0].descriptors, 101).?;
+    try expectEqual(1, serial_wire.load_count);
+    try expectEqual(1709, serial_wire.loads[0].bin);
+    try expectEqual(0xaa, findDescriptor(vm[0].descriptors, 708).?.p);
+
+    // the 2-chip boot, block 1662, sends the bridge's stream too, which
+    // fills the sends there are room for
+    const two = try arrayforth.assembleScript("1562 LOAD  2280 LOAD  1662 LOAD", disk, programs, descriptor_buffer, &diagnostic);
+    try expectEqual(arrayforth.Send.max, two.sends().len);
+    // and softsim's, block 1674, describes the VM with no stream, once the
+    // STREAMER is loaded, as softsim loads it, as far as its crystal
+    // oscillator (?CLK 2), whose descriptors load a bin 516 that nothing
+    // builds, as with block 1583
+    try expectError(error.NoSuchBin, arrayforth.assembleScript("1562 LOAD  2280 LOAD  STREAMER LOAD  1674 LOAD", disk, programs, descriptor_buffer, &diagnostic));
+}
+
+fn findDescriptor(descriptors: []const Descriptor, node: u16) ?*const Descriptor {
+    for (descriptors) |*d| if (d.node == node) return d;
+    return null;
+}
+
 test "arrayForth 3's stream for flash, after block 1671, boots through the EVB002's flash and SRAM as described" {
     var roms: [144]ga144.NodeRom = undefined;
     const parsed = try testRom(&roms);
@@ -1015,8 +1084,8 @@ test "arrayForth 3's stream for flash, after block 1671, boots through the EVB00
     const disk = try Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(disk);
 
-    // block 1671 without the polyFORTH VM, which gasim's arrayForth cannot
-    // describe, and with the NIC, as the 708 test has it, so that the second
+    // block 1671 without the polyFORTH VM, which the block 1665 test
+    // describes, and with the NIC, as the 708 test has it, so that the second
     // frame describes nodes, after the bins it loads: the speed-up (block
     // 2286), 705's flash boot and the wires to the SRAM (2295, 2296), and
     // the SRAM cluster's (2331). Block 1672's
