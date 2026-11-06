@@ -68,7 +68,8 @@ blocks, or starts one there that saving creates, and `:new` starts a new
 file, which `:w` names. Either asks for `!`, as `:e! file`, to let blocks go
 that are not saved, and forgets the code compiled from the file before.
 `:q` quits, `:q!` though the blocks are not saved, `:wq` after saving them,
-and `:x` after saving them if they changed. Tab completes the name of a .cf
+and `:x` after saving them if they changed. `:messages` lists the latest
+errors and what stopped a run. Tab completes the name of a .cf
 file or a directory, and esc lets the command go. A name that is not absolute
 is relative to the directory gasim was started in.
 

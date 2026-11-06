@@ -46,6 +46,12 @@ stays, and input that nodes have read is not read again.
 Borders between panels can be dragged, or on touch screens, which turn drags
 into scrolling, tapped and then tapped again where they should go.
 
+A message stays in the status bar until the next key. Errors and what
+stopped a run are red, and the last 32 are kept for the editor's
+`:messages`, which lists as many of the latest as fit. While a key is
+waiting for another, such as `w` for a port, the bar shows only what it
+takes.
+
 The console and the aforth panel have two modes, like the colorForth
 editor. Until you start typing, they take the same keys as the other
 panels, so they can be zoomed, hidden, resized and left, and the chip run
