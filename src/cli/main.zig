@@ -442,6 +442,9 @@ pub fn main(init: std.process.Init) !void {
         first.found,
         assembled.feedback_differs - 1,
     });
+    if (assembled.unresolved_then) |line| std.log.warn("{f}: then has nothing to resolve, which arrayForth 2 went past", .{
+        Where{ .path = source_path, .line = line, .kind = .colorforth },
+    });
     if (listing) {
         var buffer: [4096]u8 = undefined;
         var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
