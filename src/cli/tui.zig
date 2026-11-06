@@ -331,7 +331,7 @@ const Tui = struct {
     map_more: []const u8 = "",
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
-    message_buffer: [64]u8 = undefined,
+    message_buffer: [160]u8 = undefined,
     /// the first row of the help in view, while it is shown
     help_scroll: ?u16 = null,
     /// rows of the help last drawn in view
@@ -904,7 +904,14 @@ const Tui = struct {
             nodes += 1;
         };
         self.settled = false;
-        self.message = if (assembled.first_difference) |first| self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ nodes, assembled.feedback_differs, first.noted, first.found }) else self.printLasting("compiled, and started the chip again with {d} nodes' code", .{nodes});
+        const then_block = if (assembled.unresolved_then) |line| gasim.colorforth.place(line).block else null;
+        self.message = if (assembled.first_difference) |first| (if (then_block) |block|
+            self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}, and a then in block {d} has nothing to resolve", .{ nodes, assembled.feedback_differs, first.noted, first.found, block })
+        else
+            self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ nodes, assembled.feedback_differs, first.noted, first.found })) else if (then_block) |block|
+            self.printLasting("started again with {d} nodes' code, but a then in block {d} has nothing to resolve", .{ nodes, block })
+        else
+            self.printLasting("compiled, and started the chip again with {d} nodes' code", .{nodes});
     }
 
     /// Writes the editor's blocks to a file, which becomes theirs, returning
@@ -3600,6 +3607,16 @@ test "compiling colorForth in the editor starts the chip again with its code" {
     try t.press('L');
     try expect(try t.shows(29, "UnknownWord at nothing in block 0"));
     try expectEqualStrings("nothing", editor.current().?.text());
+
+    // and a then with nothing to resolve is noted
+    try t.press('x');
+    try t.press('$');
+    try t.press('a');
+    try t.pressWith('y', .{ .ctrl = true });
+    for ("then") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    try t.press('L');
+    try expect(try t.shows(29, "started again with 1 nodes' code, but a then in block 0 has nothing to resolve"));
 }
 
 test "the editor's commands save, open and start files" {

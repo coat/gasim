@@ -336,10 +336,7 @@ use host memory but for system variables, and node state kept across
 as block 1172's `resume` does; magenta variables defined outside the
 system's blocks; the names of blocks 34 and 36, which block 18 loads
 through `env` (`serial`); and boot descriptors (`+node /ram /p /b`), which
-arrayForth 3's `.blk` files have. Block 792's yellow `then`, whose `if` is in a
-comment, stops the 10BASE-T load block 720 of `OkadBack.cf`, though
-arrayForth 2, with no check on its stack, went past it, and with it
-polyFORTH's 360, which loads 720 last. In the editor: the
+arrayForth 3's `.blk` files have. In the editor: the
 selected node's stacks beside it, and finding a word's definition across
 blocks.
 
