@@ -9,6 +9,8 @@
 port: Port = .{},
 /// where input comes from; without a queue, only what is given with `give`
 input: ?Queue = null,
+/// bytes to read before any from `input`, such as input a snapshot kept
+preload: []const u8 = &.{},
 /// input taken from `input` in one go, or given, but not yet read by the node
 taken: [512]u8 = undefined,
 taken_start: u16 = 0,
@@ -24,6 +26,9 @@ waiting: std.atomic.Value(bool) = .init(false),
 used: bool = false,
 
 const Console = @This();
+
+/// not what a console was, but where this process has it
+pub const snapshot_skip = .{ "input", "output", "interrupted", "waiting" };
 
 /// a queue of input, closed at the end of it, and the `Io` it is used with
 pub const Queue = struct {
@@ -120,6 +125,14 @@ pub fn testInput(buffer: []u8, bytes: []const u8) !Io.Queue(u8) {
 /// Takes as much input as has arrived, waiting for some if `wait` is set.
 /// Returns false if there is none, or at the end of input.
 fn take(self: *Console, wait: bool) !bool {
+    if (self.preload.len > 0) {
+        const len = @min(self.preload.len, self.taken.len);
+        @memcpy(self.taken[0..len], self.preload[0..len]);
+        self.preload = self.preload[len..];
+        self.taken_start = 0;
+        self.taken_end = @intCast(len);
+        return true;
+    }
     const input = self.input orelse return false;
     var got = input.queue.get(input.io, &self.taken, 0) catch |err| switch (err) {
         error.Closed => return false,

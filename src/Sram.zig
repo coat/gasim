@@ -39,6 +39,9 @@ high: [2]Timeline(bool) = .{ .{ .before = false }, .{ .before = false } },
 
 const Sram = @This();
 
+/// which `snapshot` saves as the few that are not zero
+pub const snapshot_skip = .{"words"};
+
 /// the words of the EVB002's SRAM
 pub const evb002_words = 1 << 20;
 
@@ -150,8 +153,8 @@ fn Timeline(comptime T: type) type {
     return struct {
         /// what it was before the oldest change kept
         before: T,
-        times: [capacity]u64 = undefined,
-        values: [capacity]T = undefined,
+        times: [capacity]u64 = @splat(0),
+        values: [capacity]T = @splat(std.mem.zeroes(T)),
         start: u8 = 0,
         len: u8 = 0,
 

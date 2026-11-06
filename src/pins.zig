@@ -66,8 +66,8 @@ pub const Resolver = struct {
 pub const History = struct {
     /// the drive before the oldest change kept
     before: Drive = .{ .strength = .weak },
-    times: [capacity]u64 = undefined,
-    drives: [capacity]Drive = undefined,
+    times: [capacity]u64 = @splat(0),
+    drives: [capacity]Drive = @splat(.{}),
     start: u8 = 0,
     len: u8 = 0,
 
@@ -142,6 +142,9 @@ pub const Pin = struct {
 };
 
 pub const Net = struct {
+    /// how the net is wired, which a snapshot's machine is wired as again
+    pub const snapshot_skip = .{ "first", "count", "pull", "device" };
+
     /// the first of the pins on it, which `Pin.next` goes on from
     first: u16,
     count: u16 = 1,
