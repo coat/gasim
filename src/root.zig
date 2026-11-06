@@ -24,6 +24,7 @@ pub const Sync = @import("Sync.zig");
 pub const disassembler = @import("disassembler.zig");
 pub const ga144 = @import("ga144.zig");
 pub const rom = @import("rom.zig");
+pub const snapshot = @import("snapshot.zig");
 pub const streamer = @import("streamer.zig");
 
 const f18 = @import("f18.zig");
@@ -47,6 +48,7 @@ test {
     _ = @import("port.zig");
     _ = @import("rom.zig");
     _ = @import("Serdes.zig");
+    _ = @import("snapshot.zig");
     _ = @import("Spec.zig");
     _ = @import("streamer.zig");
     _ = @import("stack.zig");

@@ -132,6 +132,10 @@ pub const Instruction = packed struct(Word) {
 
 /// An F18A computer
 pub const Computer = struct {
+    /// where this process has them, which a snapshot's nodes are attached
+    /// to again
+    pub const snapshot_skip = .{ "ports", "pin_device", "bus_device" };
+
     pub const Transfers = struct {
         read: port.Select = .empty,
         written: port.Select = .empty,

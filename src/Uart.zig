@@ -51,6 +51,9 @@ used: bool = false,
 
 const Uart = @This();
 
+/// not what a UART was, but where this process has it
+pub const snapshot_skip = .{ "input", "output", "interrupted", "waiting" };
+
 pub const Frame = struct {
     byte: u8,
     start: u64,
@@ -149,6 +152,14 @@ pub fn service(self: *Uart, now: u64) !bool {
     // sent without gaps between them
     if (try self.take(now, false)) serviced = true;
     return serviced;
+}
+
+/// Adds bytes to send after `preload`, as arriving at the node's time `now`,
+/// so that a line idle until then does not send them in the past
+pub fn addPreload(self: *Uart, arena: Allocator, bytes: []const u8, now: u64) Allocator.Error!void {
+    if (bytes.len == 0) return;
+    if (!self.hasByte()) self.arrived = now;
+    self.preload = try std.mem.concat(arena, u8, &.{ self.preload, bytes });
 }
 
 /// Waits for input, with nothing left to send. Returns false at the end of
@@ -272,6 +283,20 @@ test "receives what the node sends" {
     try expect(uart.used);
 }
 
+test "input added to an idle line is sent from then" {
+    var buffer: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    var uart: Uart = .{ .bit_time = 10, .output = &writer };
+    try uart.addPreload(std.testing.allocator, "", 500);
+    try std.testing.expectEqual(0, uart.arrived);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try uart.addPreload(arena.allocator(), "\x01", 500);
+    try std.testing.expectEqual(500, uart.arrived);
+    // the start bit is at 500, not long past
+    try std.testing.expectEqual(500, uart.nextRxEdge(0).?);
+}
+
 test "input arriving on an idle line is sent from when it arrived" {
     var writer: Io.Writer = .fixed(&.{});
     var input_buffer: [1]u8 = undefined;
@@ -291,6 +316,7 @@ const pins = @import("pins.zig");
 const Console = @import("Console.zig");
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
