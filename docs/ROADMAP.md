@@ -255,7 +255,23 @@ done.
    step 5), with `pFDISK.blk` served as the serial disk its terminal emulator
    normally provides (DB006 §5.5). Its license only covers GreenArrays'
    chips, so it stays bring-your-own-distribution, and GreenArrays should be
-   asked first. gasim would never ship it.
+   asked first. gasim would never ship it. As DB006 §5.2.2.2 has it:
+   - The VM described: gasim's arrayForth assembles the stock code (block
+     2280, `STOCK`, which needs `DO-ROM`) and describes the VM in blocks
+     1981 and 1982, which need CONFIG's block names (1562), the chip's
+     `nns` and `b-nn` (block 1564) and the STREAMER's `?RAM`.
+   - Sent as `1665 LOAD` sends it, on port A: block 1666's stream, which
+     wires 708 down to 108 and loads the SRAM cluster; `!NUCLEUS`, a
+     frame of the nucleus, the first 9 blocks of `pFDISK.blk`, for 108 to
+     write to the SRAM (block 1638); then block 1665's stream, without a
+     reset.
+   - saneFORTH's part on port B (4THDISK block 587, pFDISK block 2512):
+     the terminal, and the serial disk, where an escape `80` from the chip
+     gets `04`, then a function (0 read, 1 write, 2–5 timer services) and
+     a block number, high byte first, and the 1 KB block to or from
+     `pFDISK.blk` (blocks 0 to 4799, at the chip's `20 DRIVE`).
+   - pF/144 greeting on a space bar, `pF/G144…  hi`, and `20 DRIVE HI`
+     loading block 9 from the serial disk.
 
 Later: the target chip driven from pF/144's IDE (`HOST`, `TARGET`,
 `BRIDGE`); eForth, which the EVB001 shipped in flash, as arrayForth 2's
@@ -321,10 +337,15 @@ as block 1172's `resume` does; magenta variables defined outside the
 system's blocks; the names of blocks 34 and 36, which block 18 loads
 through `env` (`serial`); `/root` and the IDE's other words around boot
 descriptors; and the chip configuration's words, such as `nns` and
-`n-nn`, which polyFORTH's top descriptor block 362 uses. polyFORTH's
-descriptors (blocks 364–368 and 266) compile with its code but don't
-boot: block 394 ends at an `exit` before its `1705 bin`, so the bin node
-205's descriptor loads is never saved, in both images. In the editor: the
+`n-nn`, which polyFORTH's top descriptor block 362 uses; and the host
+control words `-next`, `*next`, `*end`, `u+`, `+!` and `?`, which fail
+when a word using them runs. polyFORTH's descriptors (blocks 364–368 and
+266) compile with its code but don't boot, nor would they in arrayForth 2:
+block 394 ends at an `exit` before its `1705 bin`, so the bin node 205's
+descriptor loads is never saved, in all three images installed here, and its
+nucleus, which block 444's node 705 copies from flash to the SRAM, isn't
+built from these images. That is polyFORTH mark 1 for the EVB001;
+GreenArrays' polyFORTH, pF/144, is arrayForth 3's (step 6). In the editor: the
 selected node's stacks beside it, and finding a word's definition across
 blocks.
 
