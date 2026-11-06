@@ -111,7 +111,7 @@ There's a built-in colorForth editor inspired by AshleyF's
 [Color](https://github.com/AshleyF/Color) editor. Open a .cf file to start in
 the editor (`gasim examples/hello.cf`), or hit alt+6 in the TUI to edit a new
 file of blocks, and `:w`, `:e` and `:new` to save, open and start files. To
-output colorForth .cf binary files as text, try `gasim blocks
+output colorForth .cf binary files as text, try `gasim cf text
 examples/hello.cf`. 
 
 More info - like key bindings - in the [colorForth
@@ -134,6 +134,28 @@ hello
 Check out the [arrayForth documentation](docs/arrayForth.md) for a
 more info.
 
+
+### Without a terminal
+
+Everything the TUI does can be done with commands, for agents, scripts and CI.
+The chip's state is a file: each command reads one snapshot and writes another,
+and `--json` makes stdout one object.
+
+```
+$ gasim start examples/hello.ga -o 0.snap
+$ gasim run --from 0.snap --to 1.snap --break 000:004 --json
+{"stop":"breakpoint","node":"000","address":"004","steps":148,"time_ps":34800,"output":"","snapshot":"1.snap"}
+$ gasim show 1.snap 000 --mem --count 2
+$ gasim step --from 1.snap --to 2.snap --node 000 --count 3
+$ gasim run --from 2.snap --json
+{"stop":"settled","steps":682,"time_ps":267987600,"output":"llo, world!\n"}
+```
+
+A run exits 0 when every node is waiting, 3 at a breakpoint, 4 at a watch, 5 at
+`--max-steps` or `--max-time`, and 128 and the signal if one stopped it.
+`gasim test` checks what programs should do, `gasim cf pack` writes colorForth
+from text, and `gasim help <command>` says what each takes. See
+[docs/cli.md](docs/cli.md).
 
 ### Options
 

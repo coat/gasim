@@ -1,110 +1,5 @@
 //! gasim
 
-const usage =
-    \\usage: gasim [options] [program.ga | program.af | program.blk | source.cf]
-    \\       gasim run [options] <program.ga | program.af | program.blk | source.cf>
-    \\       gasim aforth [options] [program.ga | program.af | program.blk | source.cf]
-    \\       gasim blocks [--load <block>]... <source.cf>
-    \\
-    \\Opens the chip in a terminal user interface, with the program loaded if
-    \\there is one, reading .af files as arrayForth 3 source and .blk files as
-    \\blocks of it. With run, or when stdin or stdout is not a terminal, runs
-    \\the program instead with the console on stdin and stdout, until every
-    \\node is waiting, or one reaches a breakpoint or makes a watched transfer.
-    \\With --listing, writes the assembled program instead. A .cf file of
-    \\colorForth blocks, such as an arrayForth 2 image, is compiled as
-    \\arrayForth 2 compiles F18 code, from block 0 or the blocks --load
-    \\names. The interface opens it in its editor instead, compiling it at
-    \\the start only with --load, and creates it if it does not exist.
-    \\Without one, the editor starts a new file, to name when it is saved.
-    \\
-    \\With aforth, reads lines of arrayForth 3 from stdin and interprets them,
-    \\to assemble code and act on the chip with the words of arrayForth 3's
-    \\IDE, such as 708 NODE UPD, after loading the program if there is one.
-    \\
-    \\With blocks, writes the colorForth source in a file of blocks as text,
-    \\each block that holds any, or those --load names. arrayForth 2 images
-    \\are decompressed, and the kernel's blocks before block 18 left out.
-    \\
-    \\options:
-    \\  --board <file>             with run, the board around the chips,
-    \\                             described in a board file, such as
-    \\                             src/boards/evb002.zon, or evb002 for that,
-    \\                             with stdin and stdout on a serial port.
-    \\                             Nodes of chips after the first are
-    \\                             numbered with the chip, such as 1.708.
-    \\  --usb <port>               the board's serial port on stdin and stdout
-    \\                             (default its first not on a pty, such as A)
-    \\  --pty <port>[=<link>]      put one of the board's serial ports on a
-    \\                             pseudo-terminal, such as for arrayForth 3
-    \\                             under Wine, saying its path, and making a
-    \\                             symbolic link to it at <link> if given,
-    \\                             such as ~/.wine/dosdevices/com3. Can be
-    \\                             given more than once. stdin and stdout
-    \\                             are then on --usb's port, or none, and
-    \\                             the run goes on until ctrl+c.
-    \\  --jumper <name>=on|off     set one of the board's jumpers otherwise
-    \\                             than as shipped, such as J26=off. Can be
-    \\                             given more than once.
-    \\  --flash <file>             with run, the contents of the board's SPI
-    \\                             flash, up to 16 MB, erased past the end.
-    \\                             The EVB002's host 705 boots from it with
-    \\                             --jumper J26=off (NO BOOT), and the ROM.
-    \\  --chip <file>              the chip, described in a chip file, such as
-    \\                             src/chips/ga144.zon (default the GA144)
-    \\  --layout <rows>x<columns>  a chip of that size, of basic nodes with no
-    \\                             pins, instead of the GA144
-    \\  --console <node>:<port>    where the console is attached (default 000:up)
-    \\  --rom <path>               ROM to load into the nodes: a dump of it, or
-    \\                             arrayForth 3's disk (sF/pFDISK.blk) or the
-    \\                             directory it is installed in, such as
-    \\                             GreenArrays, to assemble it from. Without
-    \\                             it, the ROM last assembled, or assembled
-    \\                             from arrayForth 3 installed in C:\GreenArrays
-    \\                             or Wine's C: drive, if it is.
-    \\  --uart <node>[:<baud>]      with run, put stdin and stdout on a UART on
-    \\                             the node's pins 17 and 1 instead of the
-    \\                             console, as USB serial ports are wired to
-    \\                             node 708 on GreenArrays' evaluation boards,
-    \\                             with both lines inverted (default 921600
-    \\                             baud). Bytes from a host such as ga-tools
-    \\                             boot node 708 from ROM.
-    \\  --boot                     load programs with a boot stream through the
-    \\                             SERDES port of node 001, or with --uart,
-    \\                             through the UART to the node's ROM, before
-    \\                             stdin. This needs ROM. An arrayForth 3
-    \\                             source's STREAM[ ... ]STREAM is laid out
-    \\                             as arrayForth 3's STREAMER does: from 708,
-    \\                             with --uart, from 705, packed into the
-    \\                             --board's SPI flash, such as with --board
-    \\                             evb002 --jumper J26=off, or from 300, with
-    \\                             run and no --board, clocked into its pins 17
-    \\                             and 1 as a synchronous line's master does.
-    \\                             A stream from 207 is pF/144's to send.
-    \\  --break <node>:<address>   stop when the node is about to fetch the word
-    \\                             at the address, in hex, such as 105:003. Can
-    \\                             be given more than once.
-    \\  --watch <node>:<port>[:read|:write]
-    \\                             stop when the node reads from or writes to the
-    \\                             port, such as 105:right:write. Can be given
-    \\                             more than once.
-    \\  --trace                    with run, write a line to stderr for each
-    \\                             word a node executes
-    \\  --why                      with run, say what each node is waiting on
-    \\                             once every node is waiting
-    \\  --stats                    with run, say how many steps the nodes took
-    \\                             (each word run, or tried while waiting on a
-    \\                             port), how fast, and how long that is on
-    \\                             the chip
-    \\  --load <block>             with a .blk or .cf file, the block to load
-    \\                             (default 0). Can be given more than once, to
-    \\                             load blocks such as configuration first.
-    \\                             With blocks, a block to write.
-    \\  --listing                  write each node's words with their
-    \\                             disassembly and source lines to stdout,
-    \\                             instead of running
-;
-
 const max_source_len = 64 * 1024;
 
 /// the most a .blk file may hold, which is more than arrayForth 3's disks
@@ -115,11 +10,18 @@ var links: [Chip.max_uarts]struct { link: [:0]const u8, target: []const u8 } = u
 var links_len: usize = 0;
 /// written by ctrl+c, to ring the doorbell a run with ptys waits on
 var interrupt_pipe: ?posix.fd_t = null;
+/// the signal that stopped the run
+var interrupt_signal: std.atomic.Value(u8) = .init(0);
+/// milliseconds on the clock when it did
+var interrupted_at: i64 = 0;
+/// a signal this soon after the first is the same one: `timeout` sends its
+/// signal to gasim, and then to the group gasim is in
+const repeat_ms = 500;
+/// how long a signal leaves a run to stop and say so
+const signal_grace: Io.Duration = .fromSeconds(2);
 
 /// what ctrl+c stops: the console, or the UART
 var interruptible: ?struct { interrupted: *std.atomic.Value(bool), waiting: *std.atomic.Value(bool) } = null;
-
-const Command = enum { run, tui, aforth, blocks };
 
 /// restores the terminal from the user interface before reporting a panic
 pub const panic = std.debug.FullPanic(struct {
@@ -129,161 +31,371 @@ pub const panic = std.debug.FullPanic(struct {
     }
 }.call);
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
+    report.io = io;
 
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    const command = commandOf(args, try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io));
-
-    var chip_path: ?[]const u8 = null;
-    var board_path: ?[]const u8 = null;
-    var usb: ?[]const u8 = null;
-    var pty_ports: [Chip.max_uarts]struct { name: []const u8, link: ?[]const u8 } = undefined;
-    var pty_len: usize = 0;
-    var settings: [32]gasim.Board.Setting = undefined;
-    var settings_len: usize = 0;
-    var flash_path: ?[]const u8 = null;
-    var layout_given: ?Chip.Layout = null;
-    var console_node: u16 = 0;
-    var console_port: Direction = .up;
-    var console_given = false;
-    var uart_node: ?u16 = null;
-    var uart_baud: u32 = 921600;
-    var path: ?[]const u8 = null;
-    var rom_path: ?[]const u8 = null;
-    var boot = false;
-    var trace = false;
-    var why = false;
-    var stats = false;
-    var listing = false;
-    var loads: [16]u32 = undefined;
-    var loads_len: usize = 0;
-    var breakpoints: [Chip.max_breakpoints]struct { node: u16, address: u9 } = undefined;
-    var breakpoints_len: usize = 0;
-    var watches: [Chip.max_watches]struct { node: u16, direction: Direction, read: bool, write: bool } = undefined;
-    var watches_len: usize = 0;
-    var i: usize = if (named(args)) 2 else 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--board") or std.mem.eql(u8, arg, "--usb") or std.mem.eql(u8, arg, "--pty") or std.mem.eql(u8, arg, "--jumper") or std.mem.eql(u8, arg, "--flash") or std.mem.eql(u8, arg, "--chip") or std.mem.eql(u8, arg, "--layout") or std.mem.eql(u8, arg, "--console") or std.mem.eql(u8, arg, "--rom") or std.mem.eql(u8, arg, "--break") or std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "--load") or std.mem.eql(u8, arg, "--uart")) {
-            i += 1;
-            if (i == args.len) fatal("{s} needs a value\n{s}", .{ arg, usage });
-            const value = args[i];
-            if (std.mem.eql(u8, arg, "--rom")) {
-                rom_path = value;
-            } else if (std.mem.eql(u8, arg, "--load")) {
-                if (loads_len == loads.len) fatal("more than {d} blocks to load", .{loads.len});
-                loads[loads_len] = std.fmt.parseInt(u32, value, 10) catch fatal("invalid block '{s}'", .{value});
-                loads_len += 1;
-            } else if (std.mem.eql(u8, arg, "--break")) {
-                const colon = std.mem.indexOfScalar(u8, value, ':') orelse
-                    fatal("invalid breakpoint '{s}', expected for example 105:003", .{value});
-                if (breakpoints_len == breakpoints.len) fatal("more than {d} breakpoints", .{breakpoints.len});
-                breakpoints[breakpoints_len] = .{
-                    .node = Chip.parseNode(value[0..colon]) catch
-                        fatal("invalid breakpoint node '{s}'", .{value[0..colon]}),
-                    .address = std.fmt.parseInt(u9, value[colon + 1 ..], 16) catch
-                        fatal("invalid breakpoint address '{s}', expected 000 to 1ff", .{value[colon + 1 ..]}),
-                };
-                breakpoints_len += 1;
-            } else if (std.mem.eql(u8, arg, "--watch")) {
-                var parts = std.mem.splitScalar(u8, value, ':');
-                const node = parts.first();
-                const direction = parts.next() orelse
-                    fatal("invalid watch '{s}', expected for example 105:right or 105:right:write", .{value});
-                const kind = parts.next();
-                if (parts.next() != null) fatal("invalid watch '{s}', expected for example 105:right or 105:right:write", .{value});
-                if (kind) |k| if (!std.mem.eql(u8, k, "read") and !std.mem.eql(u8, k, "write"))
-                    fatal("invalid watch '{s}', expected read or write after the port", .{value});
-                if (watches_len == watches.len) fatal("more than {d} watches", .{watches.len});
-                watches[watches_len] = .{
-                    .node = Chip.parseNode(node) catch fatal("invalid watch node '{s}'", .{node}),
-                    .direction = std.meta.stringToEnum(Direction, direction) orelse
-                        fatal("invalid watch port '{s}', expected right, down, left or up", .{direction}),
-                    .read = kind == null or std.mem.eql(u8, kind.?, "read"),
-                    .write = kind == null or std.mem.eql(u8, kind.?, "write"),
-                };
-                watches_len += 1;
-            } else if (std.mem.eql(u8, arg, "--uart")) {
-                var parts = std.mem.splitScalar(u8, value, ':');
-                const node = parts.first();
-                uart_node = Chip.parseNode(node) catch fatal("invalid UART node '{s}'", .{node});
-                if (parts.next()) |baud| {
-                    uart_baud = std.fmt.parseInt(u32, baud, 10) catch fatal("invalid baud '{s}'", .{baud});
-                    if (uart_baud == 0) fatal("invalid baud '{s}'", .{baud});
-                }
-                if (parts.next() != null) fatal("invalid UART '{s}', expected for example 708 or 708:460800", .{value});
-            } else if (std.mem.eql(u8, arg, "--chip")) {
-                chip_path = value;
-            } else if (std.mem.eql(u8, arg, "--board")) {
-                board_path = value;
-            } else if (std.mem.eql(u8, arg, "--usb")) {
-                usb = value;
-            } else if (std.mem.eql(u8, arg, "--pty")) {
-                if (!Pty.supported) fatal("--pty needs pseudo-terminals, which this system does not have", .{});
-                if (pty_len == pty_ports.len) fatal("more than {d} --pty ports", .{pty_ports.len});
-                const equals = std.mem.indexOfScalar(u8, value, '=');
-                pty_ports[pty_len] = .{ .name = value[0 .. equals orelse value.len], .link = if (equals) |e| value[e + 1 ..] else null };
-                pty_len += 1;
-            } else if (std.mem.eql(u8, arg, "--jumper")) {
-                const equals = std.mem.indexOfScalar(u8, value, '=') orelse
-                    fatal("invalid jumper '{s}', expected for example J26=off", .{value});
-                const state = value[equals + 1 ..];
-                const on = if (std.mem.eql(u8, state, "on")) true else if (std.mem.eql(u8, state, "off")) false else fatal("invalid jumper '{s}', expected on or off after =", .{value});
-                if (settings_len == settings.len) fatal("too many --jumper settings, at most {d}", .{settings.len});
-                settings[settings_len] = .{ .name = value[0..equals], .on = on };
-                settings_len += 1;
-            } else if (std.mem.eql(u8, arg, "--flash")) {
-                flash_path = value;
-            } else if (std.mem.eql(u8, arg, "--layout")) {
-                layout_given = Chip.Layout.parse(value) catch fatal("invalid layout '{s}', expected for example 8x18", .{value});
-            } else {
-                console_given = true;
-                const colon = std.mem.indexOfScalar(u8, value, ':') orelse
-                    fatal("invalid console '{s}', expected for example 000:up", .{value});
-                console_node = Chip.parseNode(value[0..colon]) catch
-                    fatal("invalid console node '{s}'", .{value[0..colon]});
-                console_port = std.meta.stringToEnum(Direction, value[colon + 1 ..]) orelse
-                    fatal("invalid console port '{s}', expected right, down, left or up", .{value[colon + 1 ..]});
-            }
-        } else if (std.mem.eql(u8, arg, "--boot")) {
-            boot = true;
-        } else if (std.mem.eql(u8, arg, "--trace")) {
-            trace = true;
-        } else if (std.mem.eql(u8, arg, "--why")) {
-            why = true;
-        } else if (std.mem.eql(u8, arg, "--stats")) {
-            stats = true;
-        } else if (std.mem.eql(u8, arg, "--listing")) {
-            listing = true;
-        } else if (path == null and !std.mem.startsWith(u8, arg, "-")) {
-            path = arg;
-        } else fatal(usage, .{});
+    for (args[1..]) |arg| if (std.mem.eql(u8, arg, "--json")) {
+        report.json = true;
+    };
+    const terminal = try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io);
+    const options = try arena.create(Options);
+    options.* = cli_options.parse(arena, args, terminal);
+    const o = options;
+    const command = o.command;
+    switch (command) {
+        .help => return writeOut(io, cli_options.helpText(o.topic)),
+        .version => return writeOut(io, build_options.version ++ "\n"),
+        .cf_pack => return packText(io, arena, o),
+        .cf_expand => return expandImage(io, arena, o),
+        .@"test" => return spec_file.run(io, arena, init.environ_map, o.specs, o.json),
+        else => {},
     }
+    if (command == .tui and !terminal) report.usage("tui needs stdin and stdout to be a terminal", .{});
+    return simulate(init, arena, o) catch |err| switch (err) {
+        // a reader such as head that has what it wants
+        error.WriteFailed => report.status_error,
+        else => |e| fatal("{t}", .{e}),
+    };
+}
+
+/// Says what a command wrote, with --json
+fn writeWritten(io: Io, path: []const u8, blocks: usize) !void {
+    var buffer: [1024]u8 = undefined;
+    var file_writer: Io.File.Writer = .initStreaming(.stdout(), io, &buffer);
+    const writer = &file_writer.interface;
+    var jw: std.json.Stringify = .{ .writer = writer };
+    try jw.beginObject();
+    try jw.objectField("stop");
+    try jw.write("done");
+    try jw.objectField("file");
+    try report.bytes(&jw, path);
+    try jw.objectField("blocks");
+    try jw.write(blocks);
+    try jw.endObject();
+    try writer.writeByte('\n');
+    try writer.flush();
+}
+
+/// Reads a file of blocks, decompressed if it is a compressed arrayForth 2
+/// image, or nothing if it does not exist yet and `new` allows that
+fn readBlocks(io: Io, arena: Allocator, path: []const u8, new: bool) ![]u8 {
+    const colorforth = gasim.colorforth;
+    const read = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_blocks_len)) catch |err| switch (err) {
+        error.FileNotFound => if (new) "" else fatal("{s}: {t}", .{ path, err }),
+        else => fatal("{s}: {t}", .{ path, err }),
+    };
+    const blocks = colorforth.compressedBlocks(read) orelse {
+        const file = try arena.alloc(u8, colorforth.blockCount(read) * colorforth.block_size);
+        @memset(file, 0);
+        @memcpy(file[0..read.len], read);
+        return file;
+    };
+    if (blocks * colorforth.block_size > max_blocks_len) fatal("{s}: has too many blocks", .{path});
+    const file = try arena.alloc(u8, blocks * colorforth.block_size);
+    colorforth.decompress(read, file) catch |err| fatal("{s}: {t}", .{ path, err });
+    return file;
+}
+
+/// Writes text as blocks, into those of `--into` if there is one
+fn packText(io: Io, arena: Allocator, o: *const Options) !u8 {
+    const colorforth = gasim.colorforth;
+    const source = o.path orelse usage("cf pack needs text, or - for stdin", .{});
+    const text = if (std.mem.eql(u8, source, "-")) text: {
+        var buffer: [4096]u8 = undefined;
+        var stdin: Io.File.Reader = .init(.stdin(), io, &buffer);
+        break :text stdin.interface.allocRemaining(arena, .limited(max_blocks_len)) catch |err| fatal("stdin: {t}", .{err});
+    } else Io.Dir.cwd().readFileAlloc(io, source, arena, .limited(max_blocks_len)) catch |err| fatal("{s}: {t}", .{ source, err });
+
+    var blocks: std.ArrayList(u8) = .empty;
+    if (o.into) |into| try blocks.appendSlice(arena, try readBlocks(io, arena, into, true));
+    const reader = try arena.create(colorforth.TextReader);
+    reader.* = .init(text);
+    while (true) {
+        const block = reader.next() catch |err| fatal("{s}:{d}: {t} at '{s}'", .{ source, reader.line, err, reader.word }) orelse break;
+        if (block.number >= max_blocks_len / colorforth.block_size) fatal("{s}:{d}: block {d} is past the most a file holds", .{ source, reader.line, block.number });
+        const end = (block.number + 1) * colorforth.block_size;
+        if (end > blocks.items.len) try blocks.appendNTimes(arena, 0, end - blocks.items.len);
+        colorforth.encode(block.tokens, blocks.items[block.number * colorforth.block_size ..][0..colorforth.block_size]) catch |err|
+            fatal("{s}: block {d}: {t}", .{ source, block.number, err });
+    }
+    const path = o.output orelse o.into.?;
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = blocks.items }) catch |err| fatal("{s}: {t}", .{ path, err });
+    if (o.json) try writeWritten(io, path, blocks.items.len / colorforth.block_size);
+    return 0;
+}
+
+/// Writes a compressed arrayForth 2 image uncompressed
+fn expandImage(io: Io, arena: Allocator, o: *const Options) !u8 {
+    const colorforth = gasim.colorforth;
+    const source = o.path orelse usage("cf expand needs an image", .{});
+    const read = Io.Dir.cwd().readFileAlloc(io, source, arena, .limited(max_blocks_len)) catch |err| fatal("{s}: {t}", .{ source, err });
+    if (colorforth.compressedBlocks(read) == null) fatal("{s}: is not a compressed arrayForth 2 image", .{source});
+    const blocks = try readBlocks(io, arena, source, false);
+    const path = o.output.?;
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = blocks }) catch |err| fatal("{s}: {t}", .{ path, err });
+    if (o.json) try writeWritten(io, path, blocks.len / colorforth.block_size);
+    return 0;
+}
+
+/// a snapshot read as far as what the machine was, to build it, and its
+/// chip's state to read into that
+const Loaded = struct {
+    machine: gasim.snapshot.Machine,
+    reader: *Io.Reader,
+};
+
+/// the most a snapshot may take, with a flash and an SRAM all in use
+const max_snapshot_len = 256 * 1024 * 1024;
+
+fn readSnapshot(io: Io, arena: Allocator, path: []const u8) !Loaded {
+    const bytes = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_snapshot_len)) catch |err| fatal("{s}: {t}", .{ path, err });
+    const reader = try arena.create(Io.Reader);
+    reader.* = .fixed(bytes);
+    const machine = gasim.snapshot.readMachine(reader, arena) catch |err| switch (err) {
+        error.OtherVersion => fatal("{s}: is a snapshot from another gasim", .{path}),
+        error.Invalid, error.EndOfStream => fatal("{s}: is not a snapshot", .{path}),
+        else => |e| return e,
+    };
+    return .{ .machine = machine, .reader = reader };
+}
+
+/// Sets options as a snapshot's machine was set up
+fn takeMachine(o: *Options, m: gasim.snapshot.Machine) void {
+    if (m.board.len > 0) o.board_path = m.board;
+    if (m.board_text.len > 0) o.board_text = m.board_text;
+    if (m.chip_text.len > 0) o.chip_text = m.chip_text;
+    if (m.rows > 0) o.layout = .{ .rows = m.rows, .columns = m.columns };
+    for (m.settings, 0..) |setting, i| o.settings[i] = .{ .name = setting.name, .on = setting.on };
+    o.settings_len = m.settings.len;
+    o.console_node = m.console_node;
+    o.console_port = m.console_port;
+    // which a board's serial port says otherwise
+    if (m.board.len == 0) o.uart_node = m.uart_node;
+    o.uart_baud = m.uart_baud;
+    if (m.usb.len > 0) o.usb = m.usb;
+}
+
+/// Writes a snapshot beside `path` and then moves it there, as `path` can be
+/// the only copy of what it was read from
+fn writeSnapshot(io: Io, arena: Allocator, path: []const u8, machine: gasim.snapshot.Machine, chip: *const Chip, devices: gasim.snapshot.Devices) !void {
+    const temporary = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
+    const file = Io.Dir.cwd().createFile(io, temporary, .{}) catch |err| fatal("{s}: {t}", .{ temporary, err });
+    var buffer: [65536]u8 = undefined;
+    var file_writer: Io.File.Writer = .initStreaming(file, io, &buffer);
+    gasim.snapshot.write(&file_writer.interface, machine, chip, devices) catch |err| fatal("{s}: {t}", .{ temporary, err });
+    file_writer.interface.flush() catch |err| fatal("{s}: {t}", .{ temporary, err });
+    file.close(io);
+    Io.Dir.rename(.cwd(), temporary, .cwd(), path, io) catch |err| fatal("{s}: {t}", .{ path, err });
+}
+
+fn writeStarted(writer: *Io.Writer, path: []const u8) !void {
+    var jw: std.json.Stringify = .{ .writer = writer };
+    try jw.beginObject();
+    try jw.objectField("stop");
+    try jw.write("done");
+    try jw.objectField("snapshot");
+    try report.bytes(&jw, path);
+    try jw.endObject();
+    try writer.writeByte('\n');
+    try writer.flush();
+}
+
+/// how far `step` got
+const Stepped = struct {
+    /// the last node stepped
+    last: ?u16 = null,
+    /// every node is waiting
+    settled: bool = false,
+};
+
+/// Takes the steps or rounds the options say, up to a stop, as the keys of
+/// the terminal user interface do
+fn stepChip(chip: *Chip, o: *const Options, layout: Chip.Layout) !Stepped {
+    var stepped: Stepped = .{};
+    var hits_left = o.hits;
+    chip.hit = null;
+    const node: ?u16 = if (o.step_node) |n| layout.index(n) orelse usage("--node {f} is not in {f}", .{ Chip.nodeName(n), layout }) else null;
+    for (0..o.rounds orelse o.count orelse 1) |_| {
+        if (chip.interrupted()) break;
+        if (o.rounds != null) {
+            stepped.settled = !try chip.advance();
+        } else if (node) |i| {
+            _ = try chip.service();
+            chip.stepNode(i);
+            stepped.last = i;
+        } else {
+            stepped.last = try chip.stepNext() orelse {
+                stepped.settled = true;
+                break;
+            };
+        }
+        if (stepped.settled) break;
+        if (chip.hit != null) {
+            if (hits_left <= 1) break;
+            hits_left -= 1;
+            chip.hit = null;
+        }
+    }
+    try chip.flushOutput();
+    return stepped;
+}
+
+/// the nodes `show` is about, by index, or every one
+fn shownNodes(arena: Allocator, chip: *const Chip, o: *const Options) ![]const u16 {
+    const indices = try arena.alloc(u16, if (o.nodes.len > 0) o.nodes.len else chip.nodes.len);
+    for (indices, 0..) |*index, k| index.* = if (o.nodes.len > 0)
+        chip.layout.index(o.nodes[k]) orelse usage("node {f} is not in {f}", .{ Chip.nodeName(o.nodes[k]), chip.layout })
+    else
+        @intCast(k);
+    return indices;
+}
+
+/// Says what is in a snapshot, as the options ask
+fn show(arena: Allocator, writer: *Io.Writer, chip: *const Chip, o: *const Options) !void {
+    const indices = try shownNodes(arena, chip, o);
+    const first: u9 = o.at orelse if (o.rom_words) 0x80 else 0;
+    const span: report.Span = .{ .first = first, .count = o.count orelse 64 };
+    if (o.json) {
+        var jw: std.json.Stringify = .{ .writer = writer };
+        try jw.beginObject();
+        try jw.objectField("steps");
+        try jw.write(chip.steps);
+        try jw.objectField("time_ps");
+        try jw.write(report.chipTime(chip));
+        try jw.objectField("nodes");
+        try jw.beginArray();
+        for (indices) |i| if (o.nodes.len > 0) {
+            try report.node(&jw, chip, i);
+        } else {
+            try jw.beginObject();
+            try jw.objectField("node");
+            try report.nodeNumber(&jw, chip.layout.nodeNumber(i));
+            try report.statusFields(&jw, &chip.nodes[i]);
+            try jw.objectField("p");
+            try report.hex(&jw, @as(u10, @bitCast(chip.nodes[i].p)), 3);
+            try jw.endObject();
+        };
+        try jw.endArray();
+        if (o.mem) {
+            try jw.objectField("memory");
+            try jw.beginArray();
+            for (indices) |i| {
+                try jw.beginObject();
+                try jw.objectField("node");
+                try report.nodeNumber(&jw, chip.layout.nodeNumber(i));
+                try jw.objectField("words");
+                try report.memory(&jw, &chip.nodes[i], span);
+                try jw.endObject();
+            }
+            try jw.endArray();
+        }
+        if (o.ports) {
+            try jw.objectField("ports");
+            try jw.beginArray();
+            for (indices) |i| try report.ports(&jw, chip, i);
+            try jw.endArray();
+        }
+        try jw.endObject();
+        try writer.writeByte('\n');
+    } else {
+        for (indices) |i| {
+            if (o.nodes.len > 0) {
+                try report.nodeText(writer, chip, i);
+            } else if (!o.mem and !o.ports) {
+                const n = &chip.nodes[i];
+                const name = Chip.nodeName(chip.layout.nodeNumber(i));
+                try writer.print("{f} {x:0>3} ", .{ name, @as(u10, @bitCast(n.p)) });
+                switch (n.status()) {
+                    .running => try writer.writeAll("running\n"),
+                    .code => |a| try writer.print("code {s}\n", .{ioName(a)}),
+                    .reading => |a| try writer.print("reading {s}\n", .{ioName(a)}),
+                    .writing => |a| try writer.print("writing {s}\n", .{ioName(a)}),
+                }
+            }
+            if (o.mem) {
+                if (o.nodes.len != 1) try writer.print("node {f}\n", .{Chip.nodeName(chip.layout.nodeNumber(i))});
+                try report.memoryText(writer, &chip.nodes[i], span);
+            }
+            if (o.ports) try report.portsText(writer, chip, i);
+        }
+    }
+    try writer.flush();
+}
+
+/// Writes text to stdout, for a command to end with
+fn writeOut(io: Io, text: []const u8) !u8 {
+    var buffer: [4096]u8 = undefined;
+    var file_writer: Io.File.Writer = .initStreaming(.stdout(), io, &buffer);
+    try file_writer.interface.writeAll(text);
+    try file_writer.interface.flush();
+    return 0;
+}
+
+/// Sets the chip up as the options say, and does what the command does with
+/// it, returning the status to exit with
+fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8 {
+    const io = init.io;
+    const loaded: ?Loaded = if (given.from) |p| try readSnapshot(io, arena, p) else null;
+    var from_snapshot = given.*;
+    if (loaded) |l| {
+        takeMachine(&from_snapshot, l.machine);
+        // which the interface does not go back with
+        if (given.command == .tui and (l.machine.flash or l.machine.sram or l.machine.sync))
+            usage("{s}: tui cannot go back with its flash, SRAM or synchronous line, so it needs run or step", .{given.from.?});
+    }
+    const o = &from_snapshot;
+    const command = o.command;
+    const listing = command == .listing;
+    var chip_path = o.chip_path;
+    const board_path = o.board_path;
+    const usb = o.usb;
+    const pty_ports = &o.pty_ports;
+    const pty_len = o.pty_len;
+    const settings = &o.settings;
+    const settings_len = o.settings_len;
+    const flash_path = o.flash_path;
+    const layout_given = o.layout;
+    const console_node = o.console_node;
+    const console_port = o.console_port;
+    const console_given = o.console_given;
+    var uart_node = o.uart_node;
+    var uart_baud = o.uart_baud;
+    const path = o.path;
+    const rom_path = o.rom_path;
+    const boot = o.boot;
+    const trace = o.trace;
+    const why = o.why;
+    const stats = o.stats;
+    var loads = o.loads;
+    var loads_len = o.loads_len;
+    const breakpoints = &o.breakpoints;
+    const breakpoints_len = o.breakpoints_len;
+    const watches = &o.watches;
+    const watches_len = o.watches_len;
     // the board, its chip, and the serial port on stdin and stdout, which is
     // as --uart is
     if (board_path != null) {
-        if (chip_path != null or layout_given != null) fatal("--board gives the chip, so --chip and --layout cannot", .{});
-        if (uart_node != null) fatal("--board puts its serial port on stdin and stdout, so --uart cannot", .{});
-        if (command == .blocks) fatal("blocks reads a file of blocks, so it has no board for --board", .{});
-    } else if (usb != null or settings_len > 0 or pty_len > 0 or flash_path != null) fatal("--usb, --pty, --jumper and --flash need --board", .{});
-    const board: ?gasim.Board = if (board_path) |p| readBoard(io, arena, init.gpa, p) else null;
+        if (chip_path != null or layout_given != null) usage("--board gives the chip, so --chip and --layout cannot", .{});
+        if (uart_node != null) usage("--board puts its serial port on stdin and stdout, so --uart cannot", .{});
+    } else if (usb != null or settings_len > 0 or pty_len > 0 or flash_path != null) usage("--usb, --pty, --jumper and --flash need --board", .{});
+    var board_text: []const u8 = o.board_text orelse "";
+    var chip_text: []const u8 = o.chip_text orelse "";
+    const board: ?gasim.Board = if (board_path) |p| readBoard(io, arena, init.gpa, p, &board_text) else null;
     if (board) |b| {
         // the terminal user interface and arrayForth 3 know one chip
-        if (b.chips > 1 and command != .run and !listing) fatal("--board with more than one chip needs run", .{});
+        if (b.chips > 1 and (command == .tui or command == .aforth)) usage("--board with more than one chip needs run", .{});
         for (settings[0..settings_len]) |setting| {
             for (b.jumpers) |j| {
                 if (std.mem.eql(u8, j.name, setting.name)) break;
-            } else fatal("--jumper {s}: {s} has no such jumper", .{ setting.name, b.name });
+            } else usage("--jumper {s}: {s} has no such jumper", .{ setting.name, b.name });
         }
         // relative to the board file, unless absolute
-        chip_path = if (std.mem.eql(u8, b.chip, "ga144")) null else try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(board_path.?) orelse ".", b.chip });
-        if (b.serial.len > 0 and console_given) fatal("--board puts its serial port on stdin and stdout, so there is no console for --console", .{});
-        if (flash_path != null and b.flash == null) fatal("--flash: {s} has no SPI flash", .{b.name});
-        // the flash is not in the chip's snapshots, which the interface
-        // restarts from
-        if (flash_path != null and command != .run) fatal("--flash needs run", .{});
+        if (loaded == null) chip_path = if (std.mem.eql(u8, b.chip, "ga144")) null else try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(board_path.?) orelse ".", b.chip });
+        if (b.serial.len > 0 and console_given) usage("--board puts its serial port on stdin and stdout, so there is no console for --console", .{});
+        if (flash_path != null and b.flash == null) usage("--flash: {s} has no SPI flash", .{b.name});
     }
     var flash: gasim.Flash = .init(if (flash_path) |p| Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(gasim.Flash.max_len + 1)) catch |err| switch (err) {
         error.StreamTooLong => fatal("--flash {s} is larger than a flash's 16 MB", .{p}),
@@ -292,41 +404,44 @@ pub fn main(init: std.process.Init) !void {
     // the ports on ptys, and the one on stdin and stdout, if any
     const ptys = pty_ports[0..pty_len];
     for (ptys, 0..) |p, k| {
-        if (board.?.serialPort(p.name) == null) fatal("--pty {s}: {s} has no such serial port", .{ p.name, board.?.name });
-        for (ptys[0..k]) |other| if (std.mem.eql(u8, other.name, p.name)) fatal("--pty {s} is given twice", .{p.name});
-        if (usb) |name| if (std.mem.eql(u8, name, p.name)) fatal("--usb {s} puts port {s} on stdin and stdout, so --pty cannot", .{ name, name });
+        if (board.?.serialPort(p.name) == null) usage("--pty {s}: {s} has no such serial port", .{ p.name, board.?.name });
+        for (ptys[0..k]) |other| if (std.mem.eql(u8, other.name, p.name)) usage("--pty {s} is given twice", .{p.name});
+        if (usb) |name| if (std.mem.eql(u8, name, p.name)) usage("--usb {s} puts port {s} on stdin and stdout, so --pty cannot", .{ name, name });
         const s = board.?.serialPort(p.name).?;
         if (!board.?.jumperOn(s.rx.jumper, settings[0..settings_len]) and !board.?.jumperOn(s.tx.jumper, settings[0..settings_len]))
-            fatal("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches its pty", .{s.name});
+            usage("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches its pty", .{s.name});
     }
-    if (pty_len > 0 and command != .run and !listing) fatal("--pty needs run", .{});
-    if (pty_len == pty_ports.len and usb != null) fatal("more than {d} serial ports, with --usb's", .{Chip.max_uarts});
+    if (pty_len == pty_ports.len and usb != null) usage("more than {d} serial ports, with --usb's", .{Chip.max_uarts});
     // with ptys, stdin and stdout are on a port only if --usb says
     const serial: ?gasim.Board.Serial = if (board) |b| port: {
-        if (usb) |name| break :port b.serialPort(name) orelse fatal("--usb {s}: {s} has no such serial port", .{ name, b.name });
+        if (usb) |name| break :port b.serialPort(name) orelse usage("--usb {s}: {s} has no such serial port", .{ name, b.name });
         break :port if (b.serial.len > 0 and pty_len == 0) b.serial[0] else null;
     } else null;
     if (board != null and serial == null and pty_len > 0) {
-        if (boot) fatal("--boot sends through the port on stdin and stdout, which --pty leaves on none without --usb", .{});
-        if (console_given) fatal("--board with --pty has no console for --console", .{});
+        if (o.input != .stdin) usage("--input has nothing to read it, with --pty and no --usb", .{});
+        if (boot) usage("--boot sends through the port on stdin and stdout, which --pty leaves on none without --usb", .{});
+        if (console_given) usage("--board with --pty has no console for --console", .{});
     }
     if (serial) |s| {
         const on = settings[0..settings_len];
         const rx = board.?.jumperOn(s.rx.jumper, on);
         const tx = board.?.jumperOn(s.tx.jumper, on);
-        if (!rx and !tx) fatal("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches stdin or stdout", .{s.name});
-        if (!rx and (boot or path == null))
-            fatal("--jumper {s}=off leaves port {s}'s rx unconnected, so nothing can boot node {f} from it", .{ s.rx.jumper.?, s.name, Chip.nodeName(s.rx.ref().node) });
+        if (!rx and !tx) usage("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches stdin or stdout", .{s.name});
+        if (!rx and (boot or path == null) and loaded == null)
+            usage("--jumper {s}=off leaves port {s}'s rx unconnected, so nothing can boot node {f} from it", .{ s.rx.jumper.?, s.name, Chip.nodeName(s.rx.ref().node) });
         uart_node = if (rx) s.rx.ref().node else s.tx.ref().node;
         uart_baud = s.baud;
     }
     // for messages, what put stdin and stdout on a UART
     const uart_option = if (board != null) "--board" else "--uart";
-    if (path == null and needsProgram(command, listing, uart_node != null or pty_len > 0)) fatal(usage, .{});
-    if (command == .blocks) return writeBlocks(io, arena, path.?, loads[0..loads_len]);
-    if (chip_path != null and layout_given != null) fatal("--chip and --layout both give the chip", .{});
-    const spec: gasim.Spec = if (chip_path) |p|
-        readChip(io, arena, init.gpa, p)
+    if (path == null and loaded == null and needsProgram(command, uart_node != null or pty_len > 0)) usage("{s} needs a program: gasim help {s} says more", .{ command.name(), command.name() });
+    if (command == .blocks) {
+        try writeBlocks(io, arena, path.?, loads[0..loads_len]);
+        return 0;
+    }
+    if (chip_path != null and layout_given != null) usage("--chip and --layout both give the chip", .{});
+    const spec: gasim.Spec = if (chip_path != null or chip_text.len > 0)
+        readChip(io, arena, init.gpa, chip_path orelse "the snapshot's chip", &chip_text)
     else if (layout_given) |l|
         .{ .rows = l.rows, .columns = l.columns }
     else
@@ -347,15 +462,12 @@ pub fn main(init: std.process.Init) !void {
     // compiles at the start with --load
     const colorforth = std.mem.endsWith(u8, source_path, ".cf");
     const compile_colorforth = colorforth and (loads_len > 0 or command != .tui);
-    if (!listing and trace and command == .tui) fatal("--trace needs run, as the terminal user interface uses stderr's terminal", .{});
-    if (!listing and why and command == .tui) fatal("--why needs run, as the terminal user interface shows what nodes wait on", .{});
-    if (!listing and stats and command != .run) fatal("--stats needs run", .{});
-    if (!listing and uart_node != null and command != .run) fatal("{s} needs run, as stdin and stdout are its serial port's", .{if (board != null) "--board" else "--uart"});
-    if (uart_node != null and console_given) fatal("--uart puts stdin and stdout on the UART, so there is no console for --console", .{});
-    if (uart_node != null and boot and path == null) fatal("--boot needs a program to send node {f}", .{Chip.nodeName(uart_node.?)});
+    if (uart_node != null and (command == .tui or command == .aforth)) usage("{s} needs run, as stdin and stdout are its serial port's", .{if (loaded != null) "the snapshot's serial port" else if (board != null) "--board" else "--uart"});
+    if (uart_node != null and console_given) usage("--uart puts stdin and stdout on the UART, so there is no console for --console", .{});
+    if (uart_node != null and boot and path == null) usage("--boot needs a program to send node {f}", .{Chip.nodeName(uart_node.?)});
 
     const blocks = std.mem.endsWith(u8, source_path, ".blk");
-    if (loads_len > 0 and !blocks and !colorforth) fatal("--load needs a .blk or .cf file of blocks", .{});
+    if (loads_len > 0 and !blocks and !colorforth) usage("--load needs a .blk or .cf file of blocks", .{});
     if (loads_len == 0) {
         loads[0] = 0;
         loads_len = 1;
@@ -384,10 +496,11 @@ pub fn main(init: std.process.Init) !void {
     var chip: Chip = try .initChips(init.gpa, spec, layout.chips);
     defer chip.deinit(init.gpa);
 
-    const roms = readRom(io, arena, init.environ_map, rom_path);
+    // a snapshot's nodes hold theirs
+    const roms = if (loaded != null and path == null) null else readRom(io, arena, init.environ_map, rom_path);
     // which readRom checks for
     if (roms) |r| chip.loadRom(r) catch unreachable;
-    if (uart_node != null and path == null and roms == null)
+    if (uart_node != null and path == null and roms == null and loaded == null)
         fatal("--uart without a program needs a ROM, for node {f} to boot from its input (see --rom)", .{Chip.nodeName(uart_node.?)});
     if (flash_path != null and roms == null) std.log.warn("--flash without a ROM: no node boots from the flash (see --rom)", .{});
 
@@ -398,15 +511,19 @@ pub fn main(init: std.process.Init) !void {
     // the prompt, and the console with it, write here
     var aforth_buffer: [4096]u8 = undefined;
     var aforth_writer: Io.File.Writer = .init(.stdout(), io, &aforth_buffer);
+    // or with --json, here, and the console apart
+    var aforth_captured: Io.Writer.Allocating = .init(arena);
+    const aforth_out = if (o.json) &aforth_captured.writer else &aforth_writer.interface;
+    var captured: Io.Writer.Allocating = .init(arena);
     // and the terminal user interface's forth panel here
     var forth_buffer: [tui.forth_capacity]u8 = undefined;
     var forth_output: Io.Writer = .fixed(&forth_buffer);
     // arrayForth 3 at the prompt or in the forth panel keeps the bins and
     // labels of an arrayForth 3 program
-    const session: ?*gasim.arrayforth.Session = if (command != .run) session: {
+    const session: ?*gasim.arrayforth.Session = if (command == .tui or command == .aforth) session: {
         const session = try arena.create(gasim.arrayforth.Session);
         session.* = .init(program_buffer, descriptor_buffer, &diagnostic, .{
-            .out = if (command == .tui) &forth_output else &aforth_writer.interface,
+            .out = if (command == .tui) &forth_output else aforth_out,
             .chip = &chip,
             .blocks = if (blocks) file else null,
         });
@@ -454,7 +571,7 @@ pub fn main(init: std.process.Init) !void {
         }
         for (assembled.descriptors) |descriptor| try writer.print("\n{f}", .{descriptor});
         try writer.flush();
-        return;
+        return 0;
     }
     // boot descriptors say what to load into nodes and how to start them,
     // as a stream's frame does even if it describes no node. Without them,
@@ -477,8 +594,8 @@ pub fn main(init: std.process.Init) !void {
         fatal("{s}'s stream has several frames, or /ROOT or FORWARD, which only --boot sends to the root's ROM, with --uart 708, a --board's flash for 705, or 300's synchronous line", .{source_path});
     // the flash is not in the chip's snapshots, which the interface
     // restarts from
-    if (flash_boot and command != .run) fatal("--boot from a board's flash needs run", .{});
-    if (sync_boot and command != .run) fatal("--boot through node 300's synchronous line needs run", .{});
+    if (flash_boot and (command == .tui or command == .aforth)) fatal("--boot from a board's flash needs run", .{});
+    if (sync_boot and (command == .tui or command == .aforth)) fatal("--boot through node 300's synchronous line needs run", .{});
     const descriptors = if (assembled.descriptors.len > 0 or assembled.stream != null) assembled.descriptors else own: {
         var count: usize = 0;
         for (programs) |program| if (program.bin == null) {
@@ -490,7 +607,7 @@ pub fn main(init: std.process.Init) !void {
     for (descriptors) |descriptor| if (layout.index(descriptor.node) == null)
         fatal("{s}: node {f} is not in {f}", .{ source_path, Chip.nodeName(descriptor.node), layout });
 
-    if (roms == null) for (descriptors) |descriptor| {
+    if (roms == null and loaded == null) for (descriptors) |descriptor| {
         for (descriptor.loads[0..descriptor.load_count]) |part| {
             const program = gasim.boot.findBin(programs, part.bin) orelse continue;
             if (program.rom_word) |word|
@@ -519,7 +636,9 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    var uart: gasim.Uart = .init(uart_baud, &stdout_file_writer.interface);
+    // the node's output, which an object says with --json
+    const run_output = if (o.json) &captured.writer else &stdout_file_writer.interface;
+    var uart: gasim.Uart = .init(uart_baud, run_output);
     // the serial ports on ptys, each with its UART, read on its own thread
     // as stdin is, ringing the doorbell that a run waiting for any input
     // waits on
@@ -606,8 +725,19 @@ pub fn main(init: std.process.Init) !void {
         error.NoSuchNode => unreachable,
     };
 
+    // what a snapshot says was going on, which reading it fills in
+    if (loaded) |l| {
+        if (l.machine.feeder) chip.attachFeeder(&feeder, 1, .up) catch fatal("the snapshot's boot stream needs node 001's up port", .{});
+        if (l.machine.sync) chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
+            fatal("the snapshot's synchronous line needs node 300's pins 17 and 1 ({t})", .{err});
+    }
+
     var stdin_buffer: [1024]u8 = undefined;
-    var stdin_file_reader: Io.File.Reader = .init(.stdin(), io, &stdin_buffer);
+    const input_file: Io.File = switch (o.input) {
+        .file => |p| Io.Dir.cwd().openFile(io, p, .{}) catch |err| fatal("--input {s}: {t}", .{ p, err }),
+        else => .stdin(),
+    };
+    var stdin_file_reader: Io.File.Reader = .init(input_file, io, &stdin_buffer);
     // the terminal user interface shows console output from here
     var screen_buffer: [tui.console_capacity]u8 = undefined;
     var screen: Io.Writer = .fixed(&screen_buffer);
@@ -617,12 +747,13 @@ pub fn main(init: std.process.Init) !void {
     var console: Console = .{
         .input = .{ .io = io, .queue = &input },
         .output = switch (command) {
-            .run => &stdout_file_writer.interface,
             .tui => &screen,
-            .aforth => &aforth_writer.interface,
-            .blocks => unreachable,
+            .aforth => if (o.json) &captured.writer else &aforth_writer.interface,
+            else => run_output,
         },
     };
+    var flash_attached = false;
+    var attached_sram: ?*gasim.Sram = null;
     if (board) |b| {
         var fault: gasim.Board.Fault = .none;
         var attachments: [Chip.max_uarts]gasim.Board.Attachment = undefined;
@@ -645,12 +776,14 @@ pub fn main(init: std.process.Init) !void {
             .node => |node| fatal("{s}: {f}: {t}", .{ board_path.?, Chip.nodeName(node), err }),
             .link => |link| fatal("{s}: SERDES {f} to {f}: {t}", .{ board_path.?, Chip.nodeName(link[0]), Chip.nodeName(link[1]), err }),
         };
-        if (flash_path != null or flash_boot) b.attachFlash(&chip, &flash, settings[0..settings_len]) catch |err|
+        flash_attached = flash_path != null or flash_boot or (loaded != null and loaded.?.machine.flash);
+        if (flash_attached) b.attachFlash(&chip, &flash, settings[0..settings_len]) catch |err|
             fatal("{s}: the SPI flash's pins: {t}", .{ board_path.?, err });
         // the SRAM, zeroed, which is not in the chip's snapshots, so only
         // for run, as a board of more than one chip such as the EVB002 is
-        if (b.sram) |m| if (command == .run) {
+        if (b.sram) |m| if (if (loaded) |l| l.machine.sram else command != .tui and command != .aforth) {
             const sram = try arena.create(gasim.Sram);
+            attached_sram = sram;
             const words = try arena.alloc(u16, m.words);
             @memset(words, 0);
             sram.* = .init(words);
@@ -666,7 +799,7 @@ pub fn main(init: std.process.Init) !void {
         };
         // booting from ROM waits for pin 17 through the port facing off the
         // chip, up on the top and bottom rows and left on the others
-        if (boot or path == null) {
+        if ((boot or path == null) and loaded == null) {
             if (spec.node(node).rom != .async_boot)
                 fatal("{s} without a program boots node {f} from its ROM, which is not an asynchronous boot ROM, as 708's is", .{ uart_option, Chip.nodeName(node) });
             if (chip.nodes[layout.index(node).?].wake_port == null)
@@ -677,12 +810,85 @@ pub fn main(init: std.process.Init) !void {
         error.PortConnected => fatal("console port {t} of node {f} is connected to another node", .{ console_port, Chip.nodeName(console_node) }),
     };
 
-    if (command == .aforth) return aforth.run(io, arena, &chip, session.?, &diagnostic, &aforth_writer.interface, .{
-        .edit = try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io),
-        .history = historyPath(io, arena, init.environ_map),
-    });
+    const devices: gasim.snapshot.Devices = .{ .flash = if (flash_attached) &flash else null, .sram = attached_sram };
+    if (loaded) |l| gasim.snapshot.readChip(l.reader, arena, &chip, devices) catch |err|
+        fatal("{s}: {t}", .{ given.from.?, err });
+    // the machine, as a snapshot says it
+    const settings_saved = try arena.alloc(gasim.snapshot.Machine.Setting, settings_len);
+    for (settings_saved, settings[0..settings_len]) |*saved, setting| saved.* = .{ .name = setting.name, .on = setting.on };
+    const machine: gasim.snapshot.Machine = .{
+        .board = board_path orelse "",
+        .board_text = board_text,
+        .chip_text = chip_text,
+        .rows = if (layout_given) |l| l.rows else 0,
+        .columns = if (layout_given) |l| l.columns else 0,
+        .settings = settings_saved,
+        .console_node = console_node,
+        .console_port = console_port,
+        .uart_node = if (board == null) uart_node else null,
+        .uart_baud = uart_baud,
+        .usb = usb orelse "",
+        .feeder = chip.feeder != null,
+        .sync = chip.sync != null,
+        .flash = flash_attached,
+        .sram = attached_sram != null,
+    };
+    // input for a session goes with its snapshot, after what it has kept
+    const session_input = (command == .run or command == .step) and (o.from != null or o.to != null);
+    if (session_input and o.input != .none) {
+        const more = stdin_file_reader.interface.allocRemaining(arena, .unlimited) catch |err| fatal("input: {t}", .{err});
+        if (uart_node != null) {
+            try uart.addPreload(arena, more, chip.nodes[chip.uarts.items[0].index].time);
+        } else console.preload = try std.mem.concat(arena, u8, &.{ console.preload, more });
+    }
 
-    if (command == .tui) return tui.run(io, init.gpa, init.environ_map, &chip, .{
+    if (command == .start) {
+        try writeSnapshot(io, arena, o.to.?, machine, &chip, devices);
+        if (o.json) try writeStarted(&stdout_file_writer.interface, o.to.?);
+        return 0;
+    }
+    if (command == .show) {
+        try show(arena, &stdout_file_writer.interface, &chip, o);
+        return 0;
+    }
+
+    if (command == .aforth) {
+        const edit = try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io) and o.lines_len == 0;
+        var stderr_lines_buffer: [1024]u8 = undefined;
+        var stderr_lines: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_lines_buffer);
+        var errors: Io.Writer.Allocating = .init(arena);
+        const failed = try aforth.run(io, arena, &chip, session.?, &diagnostic, aforth_out, .{
+            .edit = edit,
+            .history = historyPath(io, arena, init.environ_map),
+            .lines = o.lines[0..o.lines_len],
+            .errors = if (o.json) &errors.writer else if (edit) aforth_out else &stderr_lines.interface,
+            .settle = loaded == null,
+        });
+        if (o.to) |p| try writeSnapshot(io, arena, p, machine, &chip, devices);
+        if (o.json) {
+            var jw: std.json.Stringify = .{ .writer = &aforth_writer.interface };
+            try jw.beginObject();
+            try jw.objectField("stop");
+            try jw.write(if (failed) "error" else "done");
+            try jw.objectField("output");
+            try report.bytes(&jw, aforth_captured.written());
+            try jw.objectField("console");
+            try report.bytes(&jw, captured.written());
+            try jw.objectField("errors");
+            try report.bytes(&jw, errors.written());
+            if (o.to) |p| {
+                try jw.objectField("snapshot");
+                try report.bytes(&jw, p);
+            }
+            try jw.endObject();
+            try aforth_writer.interface.writeByte('\n');
+            try aforth_writer.interface.flush();
+        }
+        return if (failed) report.status_error else 0;
+    }
+
+    if (command == .tui) {
+        try tui.run(io, init.gpa, init.environ_map, &chip, .{
         .source_path = source_path,
         .console = &console,
         .console_node = console_node,
@@ -690,13 +896,30 @@ pub fn main(init: std.process.Init) !void {
         .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
         // without a .cf file, on a new file of blocks, to name when it is saved
         .colorforth = try editColorForth(arena, colorforth_blocks orelse try newColorForth(arena), if (colorforth) source_path else null),
-    });
+            .show_chip = loaded != null,
+        });
+        return 0;
+    }
 
     var stderr_buffer: [4096]u8 = undefined;
     // streaming, as std.log writes to stderr too: a positional writer would
     // write over its lines when stderr is a file
     var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
-    if (trace) chip.trace = &stderr_file_writer.interface;
+    var trace_buffer: [4096]u8 = undefined;
+    var trace_file_writer: Io.File.Writer = undefined;
+    if (o.trace_file) |p| trace_file_writer = .initStreaming(Io.Dir.cwd().createFile(io, p, .{}) catch |err| fatal("--trace-file {s}: {t}", .{ p, err }), io, &trace_buffer);
+    if (trace) chip.trace = if (o.trace_file != null) &trace_file_writer.interface else &stderr_file_writer.interface;
+    defer if (o.trace_file != null) trace_file_writer.interface.flush() catch {};
+    chip.trace_json = o.json;
+    if (o.trace_node) |node| chip.trace_only = layout.index(node) orelse
+        usage("--trace-node {f} is not in {f}", .{ Chip.nodeName(node), layout });
+    switch (o.show) {
+        .nodes => |nodes| for (nodes) |node| if (layout.index(node) == null)
+            usage("--show node {f} is not in {f}", .{ Chip.nodeName(node), layout }),
+        else => {},
+    }
+    if (o.max_steps) |steps| chip.step_limit = chip.steps +| steps;
+    if (o.max_time) |time| chip.time_limit = time;
     // what was traced up to an error or a breakpoint. Exiting without
     // returning skips this, so those paths flush first.
     defer stderr_file_writer.interface.flush() catch {};
@@ -706,7 +929,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .interrupted = &chip.uarts.items[0].device.interrupted, .waiting = &chip.uarts.items[0].device.waiting }
     else
         .{ .interrupted = &console.interrupted, .waiting = &console.waiting };
-    if (have_sigint) posix.sigaction(.INT, &.{
+    if (have_sigint) for ([_]posix.SIG{ .INT, .TERM }) |signal| posix.sigaction(signal, &.{
         .handler = .{ .handler = handleInterrupt },
         .mask = posix.sigemptyset(),
         .flags = 0,
@@ -715,7 +938,8 @@ pub fn main(init: std.process.Init) !void {
     // read stdin on its own thread, so the chip runs while it waits for
     // input, unless nothing is on it, as reading it in the background would
     // stop gasim
-    const stdin_used = !(board != null and serial == null and pty_len > 0);
+    const stdin_used = !(board != null and serial == null and pty_len > 0) and o.input != .none and !session_input;
+    if (o.input == .none or session_input) input.close(io);
     var reading = if (stdin_used) io.concurrent(readRinging, .{ io, &stdin_file_reader.interface, &input, if (pty_len > 0) &doorbell else null }) catch |err|
         fatal("cannot read input concurrently: {t}", .{err}) else null;
     errdefer if (reading) |*r| r.cancel(io) catch {};
@@ -730,20 +954,20 @@ pub fn main(init: std.process.Init) !void {
     }
     defer for (pty_reading[0..pty_len]) |*future| future.cancel(io) catch {};
     defer for (pty_writing[0..pty_len]) |*future| future.cancel(io) catch {};
-    // ctrl+c, as the run waits on the doorbell, rings it through a pipe,
-    // so that the run ends as it would otherwise
+    // a signal ends the run as it would otherwise, through a pipe, as it
+    // can only ring the doorbell or end the input from outside the handler
     var watching: ?Io.Future((error{ReadFailed} || Io.Cancelable)!void) = null;
     var pipe_buffer: [1]u8 = undefined;
     var pipe_reader: Io.File.Reader = undefined;
-    if (comptime Pty.supported) if (pty_len > 0) {
-        chip.doorbell = .{ .io = io, .queue = &doorbell };
+    if (comptime Pty.supported) {
+        if (pty_len > 0) chip.doorbell = .{ .io = io, .queue = &doorbell };
         var fds: [2]posix.fd_t = undefined;
         if (std.c.pipe(&fds) != 0) fatal("cannot make a pipe for ctrl+c", .{});
         pipe_reader = .initStreaming(.{ .handle = fds[0], .flags = .{ .nonblocking = false } }, io, &pipe_buffer);
-        watching = io.concurrent(ringOnInterrupt, .{ &pipe_reader.interface, io, &doorbell }) catch |err|
+        watching = io.concurrent(endOnInterrupt, .{ &pipe_reader.interface, io, if (pty_len > 0) &doorbell else null, &input }) catch |err|
             fatal("cannot read input concurrently: {t}", .{err});
         interrupt_pipe = fds[1];
-    };
+    }
     defer if (watching) |*w| w.cancel(io) catch {};
     // the links last, after everything that could fail, removed at the end
     // of the run, or by ctrl+c
@@ -755,13 +979,19 @@ pub fn main(init: std.process.Init) !void {
     defer removeLinks();
     stderr_file_writer.interface.flush() catch {};
     const started: Io.Timestamp = .now(io, .awake);
-    try chip.run();
-    if (stats) {
-        // after what was traced
-        const elapsed = started.durationTo(.now(io, .awake));
-        stderr_file_writer.interface.flush() catch {};
-        logStats(chip, elapsed);
+    var stepped: Stepped = .{};
+    if (command == .step) {
+        stepped = try stepChip(&chip, o, layout);
+    } else {
+        // stops before the last are gone past
+        var hits_left = o.hits;
+        while (true) {
+            try chip.run();
+            if (chip.hit == null or hits_left <= 1) break;
+            hits_left -= 1;
+        }
     }
+    const elapsed = started.durationTo(.now(io, .awake));
     for (ptys, 0..) |p, k| if (pty_devices[k].dropped > 0)
         std.log.warn("port {s}: {d} bytes were dropped, as nothing read them from {s}", .{ p.name, pty_devices[k].dropped, pty_devices[k].path });
     // stops a read blocked waiting for input that will no longer be taken
@@ -772,39 +1002,85 @@ pub fn main(init: std.process.Init) !void {
             fatal("stdin: {t}", .{stdin_file_reader.err.?});
         },
     };
-    if (chip.hit) |hit| {
-        // after what was traced up to it
-        stderr_file_writer.interface.flush() catch {};
-        const n = &chip.nodes[hit.index()];
-        std.log.info("{f}", .{hit.describe(layout)});
-        std.log.info("P {x:0>3}  T {x:0>5}  S {x:0>5}  R {x:0>5}  A {x:0>5}  B {x:0>3}", .{
-            @as(u10, @bitCast(n.p)),
-            @as(u18, @bitCast(n.data_stack.t)),
-            @as(u18, @bitCast(n.data_stack.s)),
-            @as(u18, @bitCast(n.return_stack.t)),
-            @as(u18, @bitCast(n.a)),
-            n.b,
-        });
-        return;
-    }
-    // the conventional status for a program stopped by SIGINT
-    if (interruptible.?.interrupted.load(.monotonic)) {
-        stderr_file_writer.interface.flush() catch {};
-        removeLinks();
-        std.process.exit(128 + @as(u8, @backingInt(posix.SIG.INT)));
-    }
-    if (why) logWaiting(chip);
-    if (chip.wiring.contention) |c| logContention(chip, c);
-    if (uart_node) |node| {
-        if (!uart.used) {
-            if (serial) |s| {
-                std.log.warn("port {s} ({f}.{d} in, {f}.{d} out) never carried a byte", .{ s.name, Chip.nodeName(s.rx.ref().node), s.rx.pin, Chip.nodeName(s.tx.ref().node), s.tx.pin });
-            } else std.log.warn("node {f} never sent a byte on the UART or woke on its input", .{Chip.nodeName(node)});
+    const stop: report.Stop = if (chip.hit) |hit| switch (hit) {
+        .breakpoint => .breakpoint,
+        .watch => .watch,
+    } else if (chip.limited) .limit else if (interruptible.?.interrupted.load(.monotonic)) .interrupted else if (command == .step and !stepped.settled) .step else .settled;
+    // after what was traced up to it
+    stderr_file_writer.interface.flush() catch {};
+
+    if (o.to) |p| try writeSnapshot(io, arena, p, machine, &chip, devices);
+
+    if (o.json) {
+        const seconds = @as(f64, @floatFromInt(elapsed.toNanoseconds())) / 1e9;
+        const writer = &stdout_file_writer.interface;
+        var jw: std.json.Stringify = .{ .writer = writer };
+        try jw.beginObject();
+        try report.stopFields(&jw, &chip, stop);
+        try jw.objectField("steps");
+        try jw.write(chip.steps);
+        try jw.objectField("time_ps");
+        try jw.write(report.chipTime(&chip));
+        try jw.objectField("output");
+        try report.bytes(&jw, captured.written());
+        if (stepped.last) |i| {
+            try jw.objectField("stepped");
+            try report.nodeNumber(&jw, layout.nodeNumber(i));
         }
-    } else if (!console.used) {
-        // most likely the console is on a port the program does not use
-        std.log.warn("node {f} never used the console on its {t} port", .{ Chip.nodeName(console_node), console_port });
+        if (o.to) |p| {
+            try jw.objectField("snapshot");
+            try report.bytes(&jw, p);
+        }
+        if (stats) {
+            try jw.objectField("seconds");
+            try jw.write(seconds);
+        }
+        if (why) {
+            try jw.objectField("waiting");
+            try report.waiting(&jw, &chip);
+        }
+        if (o.show != .none) {
+            try jw.objectField("nodes");
+            try jw.beginArray();
+            switch (o.show) {
+                .none => {},
+                .all => for (0..chip.nodes.len) |i| try report.node(&jw, &chip, @intCast(i)),
+                .nodes => |nodes| for (nodes) |node| try report.node(&jw, &chip, layout.index(node).?),
+            }
+            try jw.endArray();
+        }
+        try jw.endObject();
+        try writer.writeByte('\n');
+        try writer.flush();
+    } else {
+        if (stats) logStats(chip, elapsed);
+        if (chip.hit) |hit| {
+            std.log.info("{f}", .{hit.describe(layout)});
+            logRegisters(&chip.nodes[hit.index()]);
+        }
+        if (stepped.last) |i| std.log.info("stepped node {f}", .{Chip.nodeName(layout.nodeNumber(i))});
+        if (stop == .limit) std.log.info("stopped at a limit, after {d} steps and {d} ps of the chip's time", .{ chip.steps, report.chipTime(&chip) });
+        if (why) logWaiting(chip);
+        switch (o.show) {
+            .none => {},
+            .all => for (0..chip.nodes.len) |i| logNode(&chip, @intCast(i)),
+            .nodes => |nodes| for (nodes) |node| logNode(&chip, layout.index(node).?),
+        }
     }
+    if (chip.wiring.contention) |c| logContention(chip, c);
+    if (stop == .settled) {
+        if (uart_node) |node| {
+            if (!uart.used) {
+                if (serial) |s| {
+                    std.log.warn("port {s} ({f}.{d} in, {f}.{d} out) never carried a byte", .{ s.name, Chip.nodeName(s.rx.ref().node), s.rx.pin, Chip.nodeName(s.tx.ref().node), s.tx.pin });
+                } else std.log.warn("node {f} never sent a byte on the UART or woke on its input", .{Chip.nodeName(node)});
+            }
+        } else if (!console.used) {
+            // most likely the console is on a port the program does not use
+            std.log.warn("node {f} never used the console on its {t} port", .{ Chip.nodeName(console_node), console_port });
+        }
+    }
+    return stop.status(interrupt_signal.load(.monotonic));
 }
 
 /// Reads input into `input`, as `Console.readInput` does, ringing
@@ -830,13 +1106,25 @@ fn readRinging(io: Io, reader: *Io.Reader, input: *Io.Queue(u8), doorbell: ?*Io.
     }
 }
 
-/// Rings the doorbell once ctrl+c writes to the pipe
-fn ringOnInterrupt(pipe: *Io.Reader, io: Io, doorbell: *Io.Queue(u8)) (error{ReadFailed} || Io.Cancelable)!void {
+/// Once a signal writes to the pipe, rings the doorbell, or without one ends
+/// the input, for a run waiting for either, and ends gasim if it has not
+/// ended in `signal_grace`, as it can be stuck writing where nothing reads
+fn endOnInterrupt(pipe: *Io.Reader, io: Io, doorbell: ?*Io.Queue(u8), input: *Io.Queue(u8)) (error{ReadFailed} || Io.Cancelable)!void {
     _ = pipe.takeByte() catch |err| switch (err) {
         error.EndOfStream => return,
         else => |e| return e,
     };
-    _ = doorbell.put(io, &.{0}, 0) catch {};
+    if (doorbell) |bell| {
+        _ = bell.put(io, &.{0}, 0) catch {};
+    } else input.close(io);
+    try io.sleep(signal_grace, .awake);
+    const signal: posix.SIG = @fromBackingInt(@intCast(interrupt_signal.load(.monotonic)));
+    posix.sigaction(signal, &.{
+        .handler = .{ .handler = posix.SIG.DFL },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    }, null);
+    posix.raise(signal) catch {};
 }
 
 /// whether `link` is a symbolic link to `target`, with only calls safe in a
@@ -877,23 +1165,10 @@ fn makeLink(io: Io, link: []const u8, path: []const u8) void {
     Io.Dir.cwd().symLink(io, path, link, .{}) catch |err| fatal("--pty: {s}: {t}", .{ link, err });
 }
 
-/// whether the arguments start with a command, run, aforth or blocks
-fn named(args: []const []const u8) bool {
-    return args.len > 1 and (std.mem.eql(u8, args[1], "run") or std.mem.eql(u8, args[1], "aforth") or std.mem.eql(u8, args[1], "blocks"));
-}
-
-/// The command the arguments start with, or without one the terminal user
-/// interface, unless stdin or stdout is not a terminal: a pipe or file wants
-/// plain output rather than a user interface
-fn commandOf(args: []const []const u8, terminal: bool) Command {
-    if (named(args)) return std.meta.stringToEnum(Command, args[1]).?;
-    return if (terminal) .tui else .run;
-}
-
 /// only the terminal user interface and the prompt start without a program,
 /// and a run with a UART, which input can boot
-fn needsProgram(command: Command, listing: bool, uart: bool) bool {
-    return (command == .run and !uart) or command == .blocks or listing;
+fn needsProgram(command: Command, uart: bool) bool {
+    return ((command == .run or command == .start) and !uart) or command == .blocks or command == .listing;
 }
 
 /// the blocks an arrayForth 2 image has, which a file opened in the editor
@@ -1010,6 +1285,10 @@ fn writeBlocks(io: Io, arena: Allocator, path: []const u8, loads: []const u32) !
             separate = true;
             continue;
         };
+        var encoded: [colorforth.block_size]u8 = undefined;
+        if (colorforth.encode(decoded, &encoded)) {
+            if (!std.mem.eql(u8, &encoded, &block)) std.log.warn("{s}: block {d} holds more than its source, which text leaves out", .{ path, n });
+        } else |_| std.log.warn("{s}: block {d} holds more than its source, which text leaves out", .{ path, n });
         if (decoded.len == 0 and loads.len == 0) continue;
         try writer.print("{s}block {d}\n", .{ if (separate) "\n" else "", n });
         separate = true;
@@ -1021,8 +1300,7 @@ fn writeBlocks(io: Io, arena: Allocator, path: []const u8, loads: []const u32) !
 /// Steps taken, how fast, and the time on the chip, which is as far as any
 /// node has got
 fn logStats(chip: Chip, elapsed: Io.Duration) void {
-    var time: u64 = 0;
-    for (chip.nodes) |n| time = @max(time, n.time);
+    const time = report.chipTime(&chip);
     const seconds = @as(f64, @floatFromInt(elapsed.toNanoseconds())) / 1e9;
     const steps: f64 = @floatFromInt(chip.steps);
     std.log.info("{d} steps in {d:.3} s, {d:.1}M steps/s, and {d:.3} ms of the chip's time", .{
@@ -1031,6 +1309,23 @@ fn logStats(chip: Chip, elapsed: Io.Duration) void {
         if (seconds > 0) steps / seconds / 1e6 else 0,
         @as(f64, @floatFromInt(time)) / 1e9,
     });
+}
+
+/// Says a node's registers
+fn logRegisters(n: *const gasim.Computer) void {
+    var buffer: [128]u8 = undefined;
+    var text: Io.Writer = .fixed(&buffer);
+    report.registersText(&text, n) catch unreachable;
+    std.log.info("{s}", .{std.mem.trimEnd(u8, text.buffered(), "\n")});
+}
+
+/// Says what a node is doing, its registers and its stacks
+fn logNode(chip: *const Chip, i: u16) void {
+    var buffer: [512]u8 = undefined;
+    var text: Io.Writer = .fixed(&buffer);
+    report.nodeText(&text, chip, i) catch unreachable;
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text.buffered(), "\n"), '\n');
+    while (lines.next()) |line| std.log.info("{s}", .{line});
 }
 
 /// Warns of pins driven both ways on the same net, naming the nodes on it
@@ -1055,8 +1350,7 @@ fn logWaiting(chip: Chip) void {
         switch (status) {
             .running => std.log.info("node {f} running", .{Chip.nodeName(number)}),
             inline .code, .reading, .writing => |address, waiting| {
-                const ports = gasim.port.select(address) orelse gasim.port.Select.empty;
-                if (ports.count() > 1 and (waiting == .code or n.word_address.rom)) {
+                if (report.isIdle(&n)) {
                     idle += 1;
                     continue;
                 }
@@ -1175,30 +1469,42 @@ fn dataPath(arena: Allocator, environ: *const std.process.Environ.Map, name: []c
     return std.fs.path.join(arena, &.{ dir, name }) catch null;
 }
 
-/// Stops the console or UART so its output is flushed. While it is blocked waiting
-/// for input there is nothing to flush, so ctrl+c terminates as usual, as it
-/// does when pressed a second time, unless the run waits on a doorbell,
-/// which the pipe rings.
-fn handleInterrupt(_: posix.SIG) callconv(.c) void {
+/// Stops the console or UART so its output is flushed and the run says how it
+/// ended. A signal again later ends gasim at once. Where the pipe to
+/// `endOnInterrupt` is, that ends a run waiting for input; without it, there
+/// is nothing to flush then, so a signal ends gasim at once.
+fn handleInterrupt(signal: posix.SIG) callconv(.c) void {
     const device = interruptible orelse return;
     const again = device.interrupted.swap(true, .monotonic);
-    if (comptime Pty.supported) if (!again) if (interrupt_pipe) |fd| {
-        _ = std.c.write(fd, "x", 1);
-        return;
-    };
+    if (!again) interrupt_signal.store(@intCast(@backingInt(signal)), .monotonic);
+    if (comptime Pty.supported) {
+        if (!again) interrupted_at = milliseconds();
+        if (again and milliseconds() - interrupted_at < repeat_ms) return;
+        if (!again) if (interrupt_pipe) |fd| {
+            _ = std.c.write(fd, "x", 1);
+            return;
+        };
+    }
     if (device.waiting.load(.acquire) or again) {
         // as readlink and unlink are safe to do here, with ptys
         if (comptime Pty.supported)
             for (links[0..links_len]) |l| if (pointsAt(l.link, l.target)) {
                 _ = std.c.unlink(l.link);
             };
-        posix.sigaction(.INT, &.{
+        posix.sigaction(signal, &.{
             .handler = .{ .handler = posix.SIG.DFL },
             .mask = posix.sigemptyset(),
             .flags = 0,
         }, null);
-        posix.raise(.INT) catch {};
+        posix.raise(signal) catch {};
     }
+}
+
+/// the time, which is safe to read in a signal handler
+fn milliseconds() i64 {
+    var time: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &time);
+    return @as(i64, time.sec) * 1000 + @divTrunc(@as(i64, time.nsec), 1_000_000);
 }
 
 /// where aforth keeps its history: in gasim under XDG_STATE_HOME, or
@@ -1296,31 +1602,33 @@ fn layOut(arena: Allocator, layout: Chip.Layout, assembled: gasim.arrayforth.Ass
 
 /// Reads a board file, or the EVB002's for evb002, exiting with what is
 /// wrong with it if anything is. It is checked once its chip is read.
-fn readBoard(io: Io, arena: Allocator, gpa: Allocator, path: []const u8) gasim.Board {
+fn readBoard(io: Io, arena: Allocator, gpa: Allocator, path: []const u8, kept: *[]const u8) gasim.Board {
     if (std.mem.eql(u8, path, "evb002")) return .evb002;
-    const text = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch |err| fatal("{s}: {t}", .{ path, err });
+    const text = if (kept.len > 0) kept.* else Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch |err| fatal("{s}: {t}", .{ path, err });
+    kept.* = text;
     const source = arena.dupeSentinel(u8, text, 0) catch fatal("out of memory", .{});
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     return gasim.Board.parse(gpa, arena, source, &diagnostics) catch |err| switch (err) {
         error.OutOfMemory => fatal("out of memory", .{}),
         error.ParseZon => {
             diagnostics.log(path);
-            std.process.exit(1);
+            fatal("{s}: does not parse", .{path});
         },
     };
 }
 
 /// Reads and checks a chip file, exiting with what is wrong with it if
 /// anything is
-fn readChip(io: Io, arena: Allocator, gpa: Allocator, path: []const u8) gasim.Spec {
-    const text = Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch |err| fatal("{s}: {t}", .{ path, err });
+fn readChip(io: Io, arena: Allocator, gpa: Allocator, path: []const u8, kept: *[]const u8) gasim.Spec {
+    const text = if (kept.len > 0) kept.* else Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 20)) catch |err| fatal("{s}: {t}", .{ path, err });
+    kept.* = text;
     const source = arena.dupeSentinel(u8, text, 0) catch fatal("out of memory", .{});
     var diagnostics: std.zon.parse.Diagnostics = undefined;
     const spec = gasim.Spec.parse(gpa, arena, source, &diagnostics) catch |err| switch (err) {
         error.OutOfMemory => fatal("out of memory", .{}),
         error.ParseZon => {
             diagnostics.log(path);
-            std.process.exit(1);
+            fatal("{s}: does not parse", .{path});
         },
     };
     var bad_node: ?u16 = null;
@@ -1341,7 +1649,8 @@ fn readChip(io: Io, arena: Allocator, gpa: Allocator, path: []const u8) gasim.Sp
 
 const have_sigint = builtin.os.tag != .windows and builtin.os.tag != .wasi;
 
-const fatal = std.process.fatal;
+const fatal = report.fatal;
+const usage = report.usage;
 
 const builtin = @import("builtin");
 const std = @import("std");
@@ -1349,7 +1658,6 @@ const Io = std.Io;
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
-const expectEqual = std.testing.expectEqual;
 
 const gasim = @import("gasim");
 const assembler = gasim.assembler;
@@ -1359,28 +1667,31 @@ const Direction = gasim.Direction;
 const ga144 = gasim.ga144;
 const ioName = gasim.disassembler.ioName;
 const aforth = @import("aforth.zig");
+const build_options = @import("build_options");
+const cli_options = @import("options.zig");
+const Command = cli_options.Command;
+const Options = cli_options.Options;
+const report = @import("report.zig");
+const spec_file = @import("spec.zig");
 const tui = @import("tui.zig");
 const Pty = @import("pty.zig");
 const vaxis = @import("vaxis");
 
 test {
     _ = aforth;
+    _ = cli_options;
+    _ = report;
+    _ = spec_file;
     _ = tui;
     _ = Pty;
 }
 
 test "the terminal user interface and the prompt start without a program" {
-    try expectEqual(.tui, commandOf(&.{"gasim"}, true));
-    try expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, true));
-    try expect(!needsProgram(.tui, false, false));
-    try expect(!needsProgram(.aforth, false, false));
+    try expect(!needsProgram(.tui, false));
+    try expect(!needsProgram(.aforth, false));
     // but running a program, or listing one, needs one
-    try expectEqual(.run, commandOf(&.{ "gasim", "run" }, true));
-    try expect(needsProgram(.run, false, false));
-    try expect(needsProgram(.tui, true, false));
+    try expect(needsProgram(.run, false));
+    try expect(needsProgram(.listing, false));
     // except a run with a UART, booted from its input
-    try expect(!needsProgram(.run, false, true));
-    // as does a pipe or file, which runs it
-    try expectEqual(.run, commandOf(&.{"gasim"}, false));
-    try expectEqual(.aforth, commandOf(&.{ "gasim", "aforth" }, false));
+    try expect(!needsProgram(.run, true));
 }

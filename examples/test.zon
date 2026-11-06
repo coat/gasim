@@ -1,0 +1,13 @@
+// What the examples should do, for `gasim test examples/test.zon`
+.{
+    .{ .program = "hello.ga", .output = "Hello, world!\n", .nodes = .{
+        .{ .node = "000", .t = 0, .b = 0x175, .ram = .{.{ .address = 8, .word = 0x48 }} },
+    } },
+    .{ .name = "hello, stopped", .program = "hello.ga", .args = .{ "--break", "000:004" }, .stop = .breakpoint, .output = "" },
+    .{ .name = "hello, in a few steps", .program = "hello.ga", .max_steps = 10, .stop = .limit },
+    .{ .program = "hello.cf", .output = "Hello, world!\n" },
+    .{ .program = "hello.af", .output = "Hello, world!\n" },
+    .{ .program = "echo.ga", .input = "echo me\n", .output = "echo me\n" },
+    .{ .program = "upcase.ga", .input = "Hello\n", .output = "HELLO\n" },
+    .{ .name = "hello through a UART", .program = "uart.ga", .args = .{ "--uart", "708" }, .output = "Hello, world!\n" },
+}
