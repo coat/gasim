@@ -112,8 +112,9 @@ of the SRAM cluster: `[sram load`. Boot descriptors say what to load into
 nodes and how to start them, as arrayForth 3's do but with single
 numbers: `n +node` picks node n, and leaves F18 code, `bin /ram` loads all
 of its RAM, `a n bin /part` n words at a, in place of the loads before,
-`x /a`, `x /b`, `x /io` and `a /p` set its registers, and `v1 … vn n
-/stack` its stack, as block 266 describes the SRAM cluster's nodes:
+`x /a`, `x /b`, `x /io` and `a /p` set its registers, `v1 … vn n
+/stack` its stack and `v1 … vn n /rstack` its return stack, as block 266
+describes the SRAM cluster's nodes:
 `[107 +node 1614 /ram down /b`. A program with them is set up as they
 say, by `gasim run` and by `L`, which sets the code compiled up first and
 leaves out a node whose bin was not saved. `spispeed`, `spicmd` and `spiadr`
@@ -145,7 +146,20 @@ of a structure that has one too many. Between `host` and
 words as yellow ones and pushes its numbers, such as `:r-l- ]$1f5 lit ;`,
 a macro for a literal, and one with no words before the next falls
 through into it, as `:head :pipe [1112 ]load ;`, until `empty` forgets
-the words defined since `mark`. Yellow words in a definition run as it is
+the words defined since `mark`. One defined outside `host`, as a loader's
+block defines its words in x86 code, such as block 228's `+wire`, is
+there for the blocks loaded after it, until `reclaim` or `empty`, but F18
+code's words and colorForth's own, such as `dup`, come before it. Each
+load given to the compiler starts outside F18 code,
+though a block loaded from F18 code goes on in its node. Host words branch
+and loop as x86 colorForth compiles them, as block 230's `?rl` and `+dx`
+do: `for`, `next` and `i`; `push` and `pop`; `if` and `-if`, and `begin`
+with `end`, `until`, `-until`, `while` and `-while`, which test the flags
+of the last `+`, `and`, `or`, `negate`, `2*` or `2/`; and a `;` that
+returns, with the green words after it, such as `then`, going on in the
+word. One defined outside `host` whose control words don't match, as F18
+code's can, such as a ROM source's `begin … unext`, fails only when it
+runs. Yellow words in a definition run as it is
 defined, and the next green word compiles the number they leave, as
 colorForth does: `:seven [3 4 + ]lit ;`. There, and in host words, `@` and
 `!` fetch and store, such as an image's system variables, which leave

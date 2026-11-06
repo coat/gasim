@@ -314,16 +314,17 @@ new feature should come with a CLI form, or a reason it can't.
 ### colorForth
 
 Not done: `kind`/`reset` for the ROM builds, the ROM labels arrayForth 2 has
-that arrayForth 3's tables lack (`-++`), host words with control flow or that
-use host memory but for system variables, and node state kept across
+that arrayForth 3's tables lack (`-++`), host words that use host memory
+but for system variables, and node state kept across
 `node`. Also not done: host words that read the compiler's object code,
 as block 1172's `resume` does; magenta variables defined outside the
 system's blocks; the names of blocks 34 and 36, which block 18 loads
-through `env` (`serial`); and `/rstack`, `/root` and the IDE's other
-words around boot descriptors. polyFORTH's descriptors (blocks 364–368
-and 266) compile with its code but don't boot: block 394 ends at an
-`exit` before its `1705 bin`, so the bin node 205's descriptor loads is
-never saved, in both images. In the editor: the
+through `env` (`serial`); `/root` and the IDE's other words around boot
+descriptors; and the chip configuration's words, such as `nns` and
+`n-nn`, which polyFORTH's top descriptor block 362 uses. polyFORTH's
+descriptors (blocks 364–368 and 266) compile with its code but don't
+boot: block 394 ends at an `exit` before its `1705 bin`, so the bin node
+205's descriptor loads is never saved, in both images. In the editor: the
 selected node's stacks beside it, and finding a word's definition across
 blocks.
 
