@@ -294,6 +294,9 @@ pub const Session = struct {
         defer it.color_load = null;
         it.color_blocks = blocks;
         it.color_depth = 0;
+        // outside F18 code, as the node a compile before left open is not
+        // this block's
+        it.color_node = false;
         it.feedback_differs = 0;
         it.first_difference = null;
         it.unresolved_then = null;
@@ -633,6 +636,9 @@ const HostWord = struct {
     len: u16,
     /// the block a session compiled it from
     block: ?u32 = null,
+    /// defined outside host and target, as a loader's blocks define their
+    /// words in x86 code, which the end of its load forgets
+    outside: bool = false,
 
     const Part = union(enum) { number: i32, word: []const u8 };
 };
@@ -1444,8 +1450,9 @@ const Interpreter = struct {
     /// the blocks it loads have been, and saves the bin being assembled
     fn loadColorForth(self: *Interpreter, block: i32) Error!void {
         defer self.color_line = null;
+        // the words a loader's block defined in x86 code, which are its own
+        defer self.keepHostWords(null, true);
         self.color_address = false;
-        self.color_node = false;
         // a definition that a load before left open, as one ends without ;
         self.defining = null;
         self.defining_yellow = false;
@@ -1490,6 +1497,18 @@ const Interpreter = struct {
         self.saved_count = kept;
         self.forgetColorDescriptors(block);
 
+        self.keepHostWords(block, false);
+    }
+
+    /// Forgets the host words a session compiled from `block`, or with null
+    /// from any colorForth block, or with `outside` those defined outside
+    /// host and target
+    fn keepHostWords(self: *Interpreter, block: ?u32, outside: bool) void {
+        const from = struct {
+            fn from(at: ?u32, wanted: ?u32) bool {
+                return if (wanted) |b| at == b else at != null;
+            }
+        }.from;
         // the host words kept, with their words and numbers moved down to
         // follow each other, and mark counting those kept before it
         var words: u8 = 0;
@@ -1500,7 +1519,11 @@ const Interpreter = struct {
         var moved: struct { start: u16 = 0, end: u16 = 0, to: u16 = 0 } = .{};
         for (self.host_words[0..self.host_word_count], 0..) |word, i| {
             if (i == self.host_mark) mark = words;
-            if (from(word.block, block)) continue;
+            if (if (outside) word.outside else from(word.block, block)) {
+                if (self.defining != null and self.defining.? == i) self.defining = null;
+                continue;
+            }
+            if (self.defining != null and self.defining.? == i) self.defining = words;
             self.host_words[words] = word;
             if (words > 0 and word.start >= moved.start and word.start + word.len <= moved.end) {
                 self.host_words[words].start = moved.to + (word.start - moved.start);
@@ -1666,7 +1689,7 @@ const Interpreter = struct {
     fn colorToken(self: *Interpreter, token: colorforth.Token) Error!void {
         // a yellow : leaves the address of the word right after it
         if (token.tag != .execute) self.color_address = false;
-        if (self.host_mode) return self.hostToken(token);
+        if (self.host_mode or self.defining != null) return self.hostToken(token);
         switch (token.tag.color()) {
             .white, .blue, .none => {},
             // where arrayForth 2 had assembled to, once a node has code
@@ -1682,12 +1705,20 @@ const Interpreter = struct {
             },
             .cyan, .magenta => return error.HostCode,
             .red => {
-                if (self.bin == null) return error.HostCode;
+                // outside F18 code, before a node in the load or after
+                // +node, a red word defines a word for the host, as the
+                // blocks of arrayForth 2's loaders define theirs, such as
+                // block 366's /wire
+                if (!self.color_node) return self.hostToken(token);
                 const b = try self.builder();
                 b.alignWord();
                 try self.defineLabel(try self.keepName(token.text()), b.location());
             },
-            .green => if (token.tag.isNumber()) {
+            // outside F18 code, as after +node, there is no node to assemble
+            // into
+            .green => if (!self.color_node) {
+                return error.NoNode;
+            } else if (token.tag.isNumber()) {
                 try (try self.builder()).literal(word18(token.value));
             } else try self.greenWord(token.text()),
             .yellow => if (token.tag.isNumber()) {
@@ -1706,7 +1737,7 @@ const Interpreter = struct {
             .cyan, .magenta => return error.HostCode,
             .red => {
                 if (self.host_word_count == self.host_words.len) return error.TooManyLabels;
-                self.host_words[self.host_word_count] = .{ .name = try self.keepName(token.text()), .start = self.host_body_len, .len = 0, .block = self.color_load };
+                self.host_words[self.host_word_count] = .{ .name = try self.keepName(token.text()), .start = self.host_body_len, .len = 0, .block = self.color_load, .outside = !self.host_mode };
                 // a word before it that has no ; yet falls through into it
                 if (self.defining == null) self.defining = self.host_word_count;
                 self.host_word_count += 1;
@@ -4913,6 +4944,21 @@ test "colorForth's boot descriptors say what to load into nodes and how to start
 
     const errors = try colorBlocks(&.{"[ 1 /p"});
     try expectError(error.NoBootNode, assembleColorForth(&errors, &.{0}, &programs, &descriptors, &diagnostic));
+
+    // a red word after +node defines a word for the host, as block 366's
+    // /wire describes a wire node
+    const wire = try colorBlocks(&.{
+        \\[ 9 node 0 org
+        \\: x ] ; [ 1709 bin 1 +node
+        \\: /wire ] $20 1 [ 1709 ] /part /b /a [ $20 ] /p ;
+        \\[ 2 +node left right /wire
+    });
+    const wired = (try assembleColorForth(&wire, &.{0}, &programs, &descriptors, &diagnostic)).descriptors;
+    try expectEqual(2, wired[1].node);
+    try expectEqual(boot.Descriptor.Load{ .bin = 1709, .source = 0x20, .destination = 0x20, .len = 1 }, wired[1].loads[0]);
+    try expectEqual(@as(?Word, 0x1d5), wired[1].b);
+    try expectEqual(@as(?Word, 0x175), wired[1].a);
+    try expectEqual(0x20, wired[1].p);
 }
 
 test "colorForth's boot descriptors refuse what they cannot do" {
@@ -4998,6 +5044,50 @@ test "colorForth's then with nothing to resolve only aligns, and is noted" {
     var diagnostic: Diagnostic = .{};
     const assembled = try assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic);
     try expectEqual(9, colorforth.place(assembled.unresolved_then.?).token);
+}
+
+test "the loads of a program go on from one to the next, but for the host words defined outside host" {
+    // as arrayForth 2 goes on in the node a load before left open, but a
+    // loader's words, such as block 1412's dup, are its own
+    const bytes = try colorBlocks(&.{
+        \\: dup ] 7 ;
+        ,
+        \\
+        ,
+        \\[ 5 node 0 org
+        \\: main ] dup ;
+        ,
+        \\
+        ,
+        \\: more ] drop ;
+    });
+    var programs: [4]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = (try assembleColorForth(&bytes, &.{ 0, 2, 4 }, &programs, &.{}, &diagnostic)).programs;
+    try expectEqual(1, assembled.len);
+    try expectEqual(2, assembled[0].len);
+    try expectEqual(opcodes(.dup, .@";", .@";", .@";"), assembled[0].ram[0]);
+    try expectEqual(opcodes(.drop, .@";", .@";", .@";"), assembled[0].ram[1]);
+}
+
+test "colorForth's red words before a node define words for the host" {
+    try expectSameAsColorForth(&.{
+        \\: twice ] dup + ;
+        \\[ 3 twice 0 node 0 org
+        \\: main ] lit ;
+    },
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : main  6. ;
+        \\ >BIN ]ASM
+    );
+
+    // and after +node, green words have no node to assemble into
+    var programs: [4]Program = undefined;
+    var descriptors: [4]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    const bytes = try colorBlocks(&.{"[ 1 node 0 org : main ] dup ; [ 1 +node ] drop ;"});
+    try expectError(error.NoNode, assembleColorForth(&bytes, &.{0}, &programs, &descriptors, &diagnostic));
+    try expectEqualStrings("drop", diagnostic.token);
 }
 
 test "colorForth runs yellow words as a host word is defined" {
@@ -5176,7 +5266,7 @@ test "colorForth errors say where they are" {
     var diagnostic: Diagnostic = .{};
     const cases = .{
         .{ error.UnknownWord, "[ 0 node 0 org : main ] nothing", "nothing", 6 },
-        .{ error.HostCode, ": host ] dup", "host", 1 },
+        .{ error.HostCode, "\\@ x 1", "x", 1 },
         .{ error.NoNode, "] dup", "dup", 1 },
         .{ error.NoSuchBlock, "[ 3 load", "load", 2 },
         .{ error.StackUnderflow, "[ 0 node org", "org", 3 },
