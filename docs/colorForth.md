@@ -76,12 +76,22 @@ multiply-step instruction `+*` and prints the product in hex:
 
 Yellow words run as the block is loaded: `n node` starts the code of a
 node, saving the code of the one before, `a org` sets where code goes,
-`here` leaves where that is, `n ,` lays down a number, `n load` and
-`n m loads` load a block, or m blocks of code from n, skipping the blocks
-of comments between them, `exit` ends a block, and `n bin` saves the code
-as a bin of another number. Arithmetic is colorForth's, with `-` inverting
-and `or` exclusive. A yellow label leaves its address, for green `lit`. A
-red word labels the next instruction word. Green words assemble: opcodes,
+`here` leaves where that is, `n ,` lays down a number, `n load`,
+`n m loads` and `n m thru` load a block, or m blocks of code from n, or
+the blocks of code from n to m, skipping the blocks of comments between
+them, `n fh` leaves the block n after the one being loaded, `exit` ends a
+block, and `n bin` saves the code as a bin of another number. Arithmetic
+is colorForth's, with `-` inverting and `or` exclusive, before a node's
+code and in host words. Once a node has begun in a load, other yellow
+words assemble code as green ones do, as arrayForth 2 compiles them, such as
+the instruction words a node sends a neighbour to run, laid down after
+`@p`: `]@p !b ; [.. dup or a! ..`. `swap`, `nip`, `negate`, `*`, `/`,
+`mod`, `/mod` and `*/` still work out numbers, and a yellow `:` before a
+label or a port leaves its address, for green `lit`, as in
+`[: message ]lit`. A red word labels the next instruction word, and the
+code of the nodes compiled after it can call it, as nodes call the words
+they send each other, until `reclaim` or `empty` forgets it. Green words
+assemble: opcodes,
 by arrayForth 2's names `-` `or` `push` `pop` or arrayForth 3's, `begin`
 `if` `then` `next` and the other control words, calls to labels and the
 ROM, and port names such as `right`. Green numbers are literals. Gray
