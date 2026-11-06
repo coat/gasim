@@ -864,21 +864,30 @@ pub fn compile(self: *Sim) error{ CompileFailed, OutOfMemory }!void {
     self.remember(.compile);
     self.chip.restore(&self.start);
     const assembled = self.session.assembled();
-    var nodes: usize = 0;
-    for (assembled.programs) |program| if (program.bin == null) {
-        self.chip.setUp(.ofProgram(program), assembled.programs) catch continue;
-        nodes += 1;
-    };
+    const started = arrayforth.startCompiled(&self.chip, assembled);
     const w = &self.out.writer;
-    w.print("compiled, and started the chip again with {d} nodes' code", .{nodes}) catch return error.OutOfMemory;
+    w.print("compiled, and started the chip again with {d} nodes' code", .{started.nodes}) catch return error.OutOfMemory;
+    // what changes what runs first: a node left out, and, as setting up
+    // from a program checks, one started in ROM, which is not loaded
+    var but = true;
+    if (started.unsaved) |unsaved| {
+        w.print(", but node {d:0>3} loads bin {d}, which was not saved", .{ unsaved.node, unsaved.bin }) catch return error.OutOfMemory;
+        but = false;
+    }
+    if (self.roms == null) for (assembled.descriptors) |descriptor| if (descriptor.p & 0x180 == 0x080) {
+        w.print("{s} node {d:0>3} starts in ROM at {x:0>3}, which is not loaded", .{ if (but) ", but" else ", and", descriptor.node, descriptor.p }) catch return error.OutOfMemory;
+        but = false;
+        break;
+    };
     if (assembled.first_difference) |first| {
-        w.print(", but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{
-            assembled.feedback_differs, first.noted, first.found,
+        w.print("{s} {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{
+            if (but) ", but" else ", and", assembled.feedback_differs, first.noted, first.found,
         }) catch return error.OutOfMemory;
+        but = false;
     }
     if (assembled.unresolved_then) |line| {
         w.print("{s} a then in block {d} has nothing to resolve", .{
-            if (assembled.first_difference == null) ", but" else ", and", colorforth.place(line).block,
+            if (but) ", but" else ", and", colorforth.place(line).block,
         }) catch return error.OutOfMemory;
     }
 }

@@ -303,6 +303,7 @@ pub const Session = struct {
             it.defining = null;
             // its code is incomplete, and node would save it
             it.bin = null;
+            it.forgetColorDescriptors(block);
             self.recover();
             return err;
         };
@@ -539,7 +540,43 @@ pub fn assembleColorForth(blocks: []const u8, loads: []const u32, programs: []Pr
         diagnostic.* = .{};
         try interpreter.loadColorForth(std.math.cast(i32, load) orelse return error.NoSuchBlock);
     }
+    try interpreter.checkLoads();
     return interpreter.assembled();
+}
+
+/// what starting a chip with the code compiled so far did: the nodes it
+/// set up, and the first boot descriptor that loads a bin not saved, which
+/// it left out
+pub const Started = struct {
+    nodes: usize = 0,
+    unsaved: ?struct { node: u16, bin: u32 } = null,
+};
+
+/// Sets `chip` up with the programs compiled so far, each in its own node,
+/// and then as their boot descriptors say, as compiling colorForth in the
+/// editor does: softsim and the IDE find a node's compiled code in its RAM
+/// (DB004 7.5)
+pub fn startCompiled(chip: *Chip, assembled: Assembled) Started {
+    var started: Started = .{};
+    for (assembled.programs) |program| if (program.bin == null) {
+        chip.setUp(.ofProgram(program), assembled.programs) catch continue;
+        started.nodes += 1;
+    };
+    for (assembled.descriptors) |descriptor| {
+        const missing = for (descriptor.loads[0..descriptor.load_count]) |part| {
+            if (boot.findBin(assembled.programs, part.bin) == null) break part.bin;
+        } else null;
+        if (missing) |bin| {
+            if (started.unsaved == null) started.unsaved = .{ .node = descriptor.node, .bin = bin };
+            continue;
+        }
+        chip.setUp(descriptor, assembled.programs) catch continue;
+        // a node with no program of its own, which it starts
+        for (assembled.programs) |program| {
+            if (program.bin == null and program.node == descriptor.node) break;
+        } else started.nodes += 1;
+    }
+    return started;
 }
 
 pub const block_size = 1024;
@@ -601,7 +638,7 @@ const HostWord = struct {
 };
 
 /// the yellow words that colorForth runs on the host
-const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, thru, fh, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/", @"@", @"!" };
+const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, thru, fh, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/", @"@", @"!", @"+node", @"/ram", @"/part", @"/a", @"/b", @"/io", @"/p", @"/stack" };
 
 /// arrayForth 2's names for opcodes that arrayForth 3 renamed
 const colorforth_opcodes: std.StaticStringMap([]const u8) = .initComptime(.{
@@ -874,6 +911,9 @@ const Interpreter = struct {
     /// where one is that never is
     unsaved_loads: [16]UnsavedLoad = undefined,
     unsaved_count: u8 = 0,
+    /// the colorForth block a session compiled each of the first boot
+    /// descriptors from, as it forgets them with its bins
+    descriptor_blocks: [576]?u32 = undefined,
     label_pool: [1024]Label = undefined,
     pool_len: u16 = 0,
 
@@ -1448,6 +1488,7 @@ const Interpreter = struct {
         }
         self.count = kept;
         self.saved_count = kept;
+        self.forgetColorDescriptors(block);
 
         // the host words kept, with their words and numbers moved down to
         // follow each other, and mark counting those kept before it
@@ -1810,6 +1851,9 @@ const Interpreter = struct {
             if (colorforth_literals.get(text)) |value| return self.push(value);
             if (named_calls.get(text)) |value| return self.push(value);
         }
+        // a label, which comes before colorForth's own words in F18 code, as
+        // it was defined after them
+        if (in_code and !address) if (self.bin) |*bin| if (bin.findColor(text) != null or self.earlierLabel(text) != null) return self.greenWord(text);
         // as host words assemble the words of the F18 compiler that are not
         // the host's, which bury the numbers arrayForth 2's system names
         const word = std.meta.stringToEnum(ColorWord, text) orelse {
@@ -1905,6 +1949,46 @@ const Interpreter = struct {
                 try self.push(t);
             },
             .negate => try self.push(-%try self.pop()),
+            // boot descriptors, as arrayForth 3's, but of single numbers, and
+            // +node leaves F18 code, as arrayForth 2's loaders read them
+            .@"+node" => {
+                self.color_node = false;
+                try self.bootNode(try self.pop());
+            },
+            // the place of a load of a bin not saved keeps the word's name,
+            // as the block's text it came from is decoded again
+            .@"/ram" => {
+                self.diagnostic.token = "/ram";
+                try self.loadRam(0, 0, 64, try self.pop());
+            },
+            // which replaces the loads before it, as DB004 says
+            .@"/part" => {
+                self.diagnostic.token = "/part";
+                const bin = try self.pop();
+                const len = try self.pop();
+                const start = try self.pop();
+                (try self.bootDescriptor()).load_count = 0;
+                try self.loadRam(start, start, len, bin);
+            },
+            .@"/a" => (try self.bootDescriptor()).a = word18(try self.pop()),
+            .@"/b" => (try self.bootDescriptor()).b = word18(try self.pop()),
+            .@"/io" => (try self.bootDescriptor()).io = word18(try self.pop()),
+            .@"/p" => {
+                const p = try self.pop();
+                if (p < 0 or p > 0x3ff) return error.NumberOutOfRange;
+                (try self.bootDescriptor()).p = @intCast(p);
+            },
+            .@"/stack" => {
+                const d = try self.bootDescriptor();
+                const n = try self.pop();
+                if (n < 1 or n > d.stack.len) return error.NumberOutOfRange;
+                var i: usize = @intCast(n);
+                while (i > 0) {
+                    i -= 1;
+                    d.stack[i] = word18(try self.pop());
+                }
+                d.stack_len = @intCast(n);
+            },
             .@"@" => try self.push((try self.hostCell(try self.pop())).*),
             .@"!" => {
                 const stored = try self.hostCell(try self.pop());
@@ -2751,12 +2835,42 @@ const Interpreter = struct {
         const node_number = std.math.cast(u16, number_of_node) orelse return error.InvalidNode;
         for (self.descriptors[self.descriptor_start..self.descriptor_count], self.descriptor_start..) |d, i| if (d.node == node_number) {
             self.boot_node = i;
+            if (self.color_load != null and i < self.descriptor_blocks.len) self.descriptor_blocks[i] = self.color_load;
             return;
         };
         if (self.descriptor_count == self.descriptors.len) return error.TooManyDescriptors;
         self.descriptors[self.descriptor_count] = .{ .node = node_number, .b = Computer.io_address, .p = 0xa9 };
+        if (self.descriptor_count < self.descriptor_blocks.len) self.descriptor_blocks[self.descriptor_count] = self.color_load;
         self.boot_node = self.descriptor_count;
         self.descriptor_count += 1;
+    }
+
+    /// Forgets the boot descriptors a session compiled from `block`, or
+    /// with null from any colorForth block, outside a stream
+    fn forgetColorDescriptors(self: *Interpreter, block: ?u32) void {
+        if (self.stream != null) return;
+        var kept: usize = 0;
+        // where each kept descriptor moved to, for the loads that name it
+        var moved: [576]?u16 = @splat(null);
+        for (0..self.descriptor_count) |i| {
+            const at: ?u32 = if (i < self.descriptor_blocks.len) self.descriptor_blocks[i] else null;
+            if (if (block) |b| at == b else at != null) continue;
+            self.descriptors[kept] = self.descriptors[i];
+            if (kept < self.descriptor_blocks.len) self.descriptor_blocks[kept] = at;
+            if (i < moved.len) moved[i] = @intCast(kept);
+            kept += 1;
+        }
+        if (kept == self.descriptor_count) return;
+        self.descriptor_count = kept;
+        self.boot_node = null;
+        var unsaved: u8 = 0;
+        for (self.unsaved_loads[0..self.unsaved_count]) |unsaved_load| {
+            const to = (if (unsaved_load.descriptor < moved.len) moved[unsaved_load.descriptor] else null) orelse continue;
+            self.unsaved_loads[unsaved] = unsaved_load;
+            self.unsaved_loads[unsaved].descriptor = to;
+            unsaved += 1;
+        }
+        self.unsaved_count = unsaved;
     }
 
     fn bootDescriptor(self: *Interpreter) Error!*boot.Descriptor {
@@ -3006,7 +3120,7 @@ fn cardinal(node: u16, direction: Cardinal) u18 {
 /// whether `len` words from `address` are all in RAM, for values from the
 /// stack, which may be anything
 fn inRam(address: i32, len: i32) bool {
-    return address >= 0 and len >= 0 and address <= 64 and len <= 64 - address;
+    return address >= 0 and len >= 0 and address < 64 and len <= 64 - address;
 }
 
 /// The linear number of a node in ccyyxx form, counting the nodes of chip
@@ -4762,6 +4876,110 @@ test "colorForth's yellow words assemble only once a node has begun in that load
     // exit run by a host word after its block has ended
     const exits = try colorBlocks(&.{"[ host : x ] exit exit ; [ target x"});
     _ = try assembleColorForth(&exits, &.{0}, &programs, &.{}, &diagnostic);
+}
+
+test "colorForth's boot descriptors say what to load into nodes and how to start them" {
+    // as block 266 describes the SRAM cluster's nodes, after their code,
+    // where +node leaves F18 code, so that down and + are the host's
+    const bytes = try colorBlocks(&.{
+        \\[ 107 node 0 org
+        \\: main ] dup ;
+        \\[ 1614 bin 7 node 0 org
+        \\: main ] drop ;
+        \\[ 107 +node 1614 /ram down /b $8a00 1 /stack $17 /p
+        \\[ 7 +node 3 2 + 4 7 /part 1 2 2 /stack 5 /a $20000 /io
+    });
+    var programs: [4]Program = undefined;
+    var descriptors: [4]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleColorForth(&bytes, &.{0}, &programs, &descriptors, &diagnostic);
+    try expectEqual(2, assembled.descriptors.len);
+    const sram = assembled.descriptors[0];
+    try expectEqual(107, sram.node);
+    try expectEqual(1, sram.load_count);
+    try expectEqual(1614, sram.loads[0].bin);
+    try expectEqual(64, sram.loads[0].len);
+    try expectEqual(@as(?Word, 0x115), sram.b);
+    try expectEqualSlices(Word, &.{0x8a00}, sram.stack[0..sram.stack_len]);
+    try expectEqual(0x17, sram.p);
+    const data = assembled.descriptors[1];
+    try expectEqual(7, data.node);
+    try expectEqual(boot.Descriptor.Load{ .bin = 7, .source = 5, .destination = 5, .len = 4 }, data.loads[0]);
+    try expectEqualSlices(Word, &.{ 1, 2 }, data.stack[0..data.stack_len]);
+    try expectEqual(@as(?Word, 5), data.a);
+    try expectEqual(@as(?Word, word18(0x20000)), data.io);
+    // the default P, warm
+    try expectEqual(0xa9, data.p);
+
+    const errors = try colorBlocks(&.{"[ 1 /p"});
+    try expectError(error.NoBootNode, assembleColorForth(&errors, &.{0}, &programs, &descriptors, &diagnostic));
+}
+
+test "colorForth's boot descriptors refuse what they cannot do" {
+    var programs: [4]Program = undefined;
+    var descriptors: [4]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    const cases = .{
+        // an address past RAM, even of no words
+        .{ error.NumberOutOfRange, "[ 1 +node 64 0 1 /part", "/part" },
+        // a bin never saved, which arrayForth 3 refuses too
+        .{ error.NoSuchBin, "[ 1 +node 9 /ram", "/ram" },
+    };
+    inline for (cases) |case| {
+        const errors = try colorBlocks(&.{case[1]});
+        try expectError(case[0], assembleColorForth(&errors, &.{0}, &programs, &descriptors, &diagnostic));
+        try expectEqualStrings(case[2], diagnostic.token);
+    }
+    // and a block loaded after it, decoded in its place
+    const after = try colorBlocks(&.{ "[ 1 +node 9 /ram", "[ 2 +node" });
+    try expectError(error.NoSuchBin, assembleColorForth(&after, &.{ 0, 1 }, &programs, &descriptors, &diagnostic));
+    try expectEqualStrings("/ram", diagnostic.token);
+
+    // /part replaces the loads before it, as DB004 says
+    const parts = try colorBlocks(&.{"[ 1 node 0 org : main ] ; [ 1 +node 1 /ram 0 1 1 /part 2 3 1 /part"});
+    const replaced = (try assembleColorForth(&parts, &.{0}, &programs, &descriptors, &diagnostic)).descriptors[0];
+    try expectEqual(1, replaced.load_count);
+    try expectEqual(boot.Descriptor.Load{ .bin = 1, .source = 2, .destination = 2, .len = 3 }, replaced.loads[0]);
+}
+
+test "a session forgets the boot descriptors of a block it compiles again, or of another file" {
+    var programs: [4]Program = undefined;
+    var descriptors: [4]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+    try session.interpret("ASM[ # 5 NODE dup >BIN ]ASM 5 +NODE 5 /RAM");
+    const one = try colorBlocks(&.{"[ 1 +node 1 /p"});
+    try session.loadColorForth(&one, 0);
+    const two = try colorBlocks(&.{"[ 2 +node 2 /p"});
+    try session.loadColorForth(&two, 0);
+    var assembled = session.assembled();
+    try expectEqual(2, assembled.descriptors.len);
+    try expectEqual(5, assembled.descriptors[0].node);
+    try expectEqual(2, assembled.descriptors[1].node);
+    // a compile that fails forgets those it made
+    const failing = try colorBlocks(&.{"[ 3 +node 3 /p nothing"});
+    try expectError(error.UnknownWord, session.loadColorForth(&failing, 0));
+    try expectEqual(1, session.assembled().descriptors.len);
+    try session.loadColorForth(&two, 0);
+    session.forgetColorForth();
+    assembled = session.assembled();
+    try expectEqual(1, assembled.descriptors.len);
+    try expectEqual(5, assembled.descriptors[0].node);
+}
+
+test "colorForth's labels come before its own yellow words in F18 code" {
+    try expectSameAsColorForth(&.{
+        \\[ 0 node 0 org
+        \\: /a ] dup ;
+        \\: main ] [ /a ] drop ;
+    },
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : x  dup ;
+        \\ : main  x drop ;
+        \\ >BIN ]ASM
+    );
 }
 
 test "colorForth's then with nothing to resolve only aligns, and is noted" {
