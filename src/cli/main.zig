@@ -892,14 +892,13 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
 
     if (command == .tui) {
         try tui.run(io, init.gpa, init.environ_map, &chip, .{
-        .source_path = source_path,
-        .console = &console,
-        .console_node = console_node,
-        .console_port = console_port,
-        .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
-        // without a .cf file, on a new file of blocks, to name when it is saved
-        .colorforth = try editColorForth(arena, colorforth_blocks orelse try newColorForth(arena), if (colorforth) source_path else null),
-            .show_chip = loaded != null,
+            .source_path = source_path,
+            .console = &console,
+            .console_node = console_node,
+            .console_port = console_port,
+            .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
+            // without a .cf file, on a new file of blocks, to name when it is saved
+            .colorforth = try editColorForth(arena, colorforth_blocks orelse try newColorForth(arena), if (colorforth) source_path else null),
         });
         return 0;
     }

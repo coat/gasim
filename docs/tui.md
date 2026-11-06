@@ -34,7 +34,7 @@ executing.
 | `b` | set or clear a breakpoint on the word in memory under the cursor |
 | `w` | watch the selected node's reads from a port, with `r` `d` `l` `u`, or its writes to one, with `R` `D` `L` `U`, or stop watching it |
 | `g` | follow the word the node is executing again |
-| `?`, `F1` | list the keys, with `F1` where `?` would be typed |
+| `?`, `F1` | list the keys, from those of the panel or mode you are in, with `F1` where `?` would be typed; there, `/` lists only those with what is typed, `enter` keeps it, and `esc` lists them all again |
 | `q`, `ctrl+c` | quit |
 
 Clicking a node on the map to select it.
@@ -45,6 +45,12 @@ and selects that node. Going back leaves the console as it is: its output
 stays, and input that nodes have read is not read again.
 Borders between panels can be dragged, or on touch screens, which turn drags
 into scrolling, tapped and then tapped again where they should go.
+
+A message stays in the status bar until the next key. Errors and what
+stopped a run are red, and the last 32 are kept for the editor's
+`:messages`, which lists as many of the latest as fit. While a key is
+waiting for another, such as `w` for a port, the bar shows only what it
+takes.
 
 The console and the aforth panel have two modes, like the colorForth
 editor. Until you start typing, they take the same keys as the other

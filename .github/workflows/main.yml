@@ -59,6 +59,23 @@ jobs:
           done <<< "$files"
           echo "native=$native web=$web gui=$gui" | tee /dev/stderr | tr ' ' '\n' >> "$GITHUB_OUTPUT"
 
+  # needs no filter, as it is quick and covers every Zig file
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: "0.17.0"
+
+      # named, as zig-pkg holds dependencies that are not ours to format
+      - name: Check formatting
+        run: zig fmt --check build.zig build.zig.zon src tests tools examples
+
   build:
     needs: changes
     if: needs.changes.outputs.native == 'true'
