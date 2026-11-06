@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption(bool, "isocline", isocline);
+    options.addOption([]const u8, "version", @import("build.zig.zon").version);
 
     const exe = b.addExecutable(.{
         .name = "gasim",
@@ -317,6 +318,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_web_tests.step);
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // gasim itself, on what the examples should do
+    const run_examples = b.addRunArtifact(exe);
+    run_examples.addArg("test");
+    run_examples.addFileArg(b.path("examples/test.zon"));
+    run_examples.expectExitCode(0);
+    run_examples.skip_foreign_checks = true;
+    test_step.dependOn(&run_examples.step);
     test_step.dependOn(&run_example_tests.step);
 
     if (coverage) {

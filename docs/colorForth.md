@@ -1,9 +1,31 @@
 # colorForth Support
 
-`gasim blocks` writes the colorForth source in a file of blocks as text. Each
-word is marked with its color where the color changes: `:` red, `[` yellow, `]`
-green, `\` cyan, `(` white, `@` magenta, `^` gray and `~` blue, with hex
-numbers after a `$`.
+## As text
+
+`gasim cf text`, or `gasim blocks`, writes the colorForth source in a file of
+blocks as text, and `gasim cf pack` writes text as blocks:
+
+```
+$ gasim cf text app.cf > app.txt
+$ gasim cf pack app.txt -o app.cf
+$ gasim cf pack block5.txt --into OkadWork.cf -o mine.cf
+$ gasim cf expand OkadWork.cf -o expanded.cf
+```
+
+`--into` keeps the file's other blocks, replacing the ones the text names; a
+compressed arrayForth 2 image comes out uncompressed, as `cf expand` writes it.
+Each block follows a line `block <n>`, or is block 0 without one. Each word is
+marked with its color where the color changes: `:` red, `[` yellow, `]` green,
+`\` cyan, `(` white, `@` magenta, `^` gray and `~` blue, with hex numbers after
+a `$`. Red and magenta are marked each time, and a word after one is green
+unless it is marked. A variable's value follows its name.
+
+So that text reads back as the same bytes, a word that would read as a mark,
+such as a green `@+`, keeps its own mark, `]@+`, though its color has not
+changed, as does a word `block`. A word that reads as a number has `'` before
+it, `('1`, and a number in a cell of its own that would fit in one has `#`.
+
+## The editor
 
 `gasim source.cf` opens the blocks in an editor. Hit alt+1 to get back to the
 chip view and alt+6 to get back to the colorForth editor, which without a .cf

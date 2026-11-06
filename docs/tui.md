@@ -1,5 +1,8 @@
 # TUI
 
+`gasim tui --from <snapshot>` opens a chip as a [snapshot](cli.md) left it,
+paused on the chip screen, with the steps it had taken.
+
 The chip panel at the top right shows all nodes. Running nodes are green, nodes waiting on a
 port yellow, and nodes waiting for code dim. Unless the panel is small, it
 shows each node as a tile with what it is waiting on and its registers,

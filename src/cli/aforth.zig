@@ -9,6 +9,12 @@ pub const Options = struct {
     edit: bool = false,
     /// where to keep the history of lines between runs
     history: ?[:0]const u8 = null,
+    /// lines to interpret instead of reading stdin
+    lines: []const []const u8 = &.{},
+    /// where errors go, if not with the output
+    errors: ?*Io.Writer = null,
+    /// run the chip first, for nodes to settle, unlike one a snapshot left
+    settle: bool = true,
 };
 
 /// the longest line that can be read
@@ -17,13 +23,25 @@ const max_line = 4096;
 /// rounds the chip runs for nodes to settle, such as into warm after reset
 const settle_rounds = 1_000_000;
 
-/// Reads lines from stdin until it ends, interpreting each. Lines are kept
-/// in `arena`, as the session's labels refer to them.
-pub fn run(io: Io, arena: Allocator, chip: *Chip, session: *Session, diagnostic: *const Diagnostic, out: *Io.Writer, options: Options) !void {
+/// Reads lines from stdin until it ends, or takes those given, interpreting
+/// each, and returns whether any failed. Lines are kept in `arena`, as the
+/// session's labels refer to them.
+pub fn run(io: Io, arena: Allocator, chip: *Chip, session: *Session, diagnostic: *const Diagnostic, out: *Io.Writer, options: Options) !bool {
     // nodes start in warm, and wait for code once they get there
-    for (0..settle_rounds) |_| if (!try chip.advance()) break;
+    if (options.settle) for (0..settle_rounds) |_| if (!try chip.advance()) break;
     try out.flush();
-    if (build_options.isocline and options.edit) return edit(arena, session, diagnostic, out, options.history);
+    if (build_options.isocline and options.edit) {
+        try edit(arena, session, diagnostic, out, options.history);
+        return false;
+    }
+    const errors = options.errors orelse out;
+    var failed = false;
+    for (options.lines) |line| {
+        if (!try interpret(session, line, diagnostic, out, errors)) failed = true;
+        try out.flush();
+        try errors.flush();
+    }
+    if (options.lines.len > 0) return failed;
 
     var buffer: [max_line]u8 = undefined;
     var stdin: Io.File.Reader = .init(.stdin(), io, &buffer);
@@ -33,15 +51,18 @@ pub fn run(io: Io, arena: Allocator, chip: *Chip, session: *Session, diagnostic:
             error.StreamTooLong => {
                 // the rest of the line is not interpreted
                 _ = try reader.discardDelimiterInclusive('\n');
-                try out.print("error: lines are at most {d} characters\n", .{max_line});
-                try out.flush();
+                try errors.print("error: lines are at most {d} characters\n", .{max_line});
+                try errors.flush();
+                failed = true;
                 continue;
             },
             error.ReadFailed => return stdin.err.?,
         } orelse break;
-        try interpret(session, try arena.dupe(u8, line), diagnostic, out);
+        if (!try interpret(session, try arena.dupe(u8, line), diagnostic, out, errors)) failed = true;
         try out.flush();
+        try errors.flush();
     }
+    return failed;
 }
 
 /// Reads lines with isocline, prompting with the target node, until ctrl+d
@@ -55,7 +76,7 @@ fn edit(arena: Allocator, session: *Session, diagnostic: *const Diagnostic, out:
         const text = if (session.target()) |node| try std.fmt.bufPrintSentinel(&prompt, "{d:0>3}", .{node}, 0) else "";
         const line = ic.ic_readline(text) orelse break;
         defer ic.ic_free(line);
-        try interpret(session, try arena.dupe(u8, std.mem.span(line)), diagnostic, out);
+        _ = try interpret(session, try arena.dupe(u8, std.mem.span(line)), diagnostic, out, out);
         try out.flush();
     }
 }
@@ -81,13 +102,19 @@ const Completer = struct {
     }
 };
 
-/// Interprets a line, then answers `ok`, or the error and where it was
-pub fn interpret(session: *Session, line: []const u8, diagnostic: *const Diagnostic, out: *Io.Writer) Io.Writer.Error!void {
+/// Interprets a line, then answers `ok`, or says the error and where it was
+/// to `errors`, after what the line wrote, returning whether it worked
+pub fn interpret(session: *Session, line: []const u8, diagnostic: *const Diagnostic, out: *Io.Writer, errors: *Io.Writer) Io.Writer.Error!bool {
     session.interpret(line) catch |err| switch (err) {
         error.WriteFailed => return error.WriteFailed,
-        else => return out.print("error: {t} at '{s}'\n", .{ err, diagnostic.token }),
+        else => {
+            try out.flush();
+            try errors.print("error: {t} at '{s}'\n", .{ err, diagnostic.token });
+            return false;
+        },
     };
     try out.writeAll(" ok\n");
+    return true;
 }
 
 test interpret {
@@ -97,8 +124,8 @@ test interpret {
     var out: Io.Writer = .fixed(&buffer);
     var diagnostic: Diagnostic = .{};
     var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
-    try interpret(&session, "1 2 + .", &diagnostic, &out);
-    try interpret(&session, "1 nothing", &diagnostic, &out);
+    try expect(try interpret(&session, "1 2 + .", &diagnostic, &out, &out));
+    try expect(!try interpret(&session, "1 nothing", &diagnostic, &out, &out));
     try expectEqualStrings("3  ok\nerror: UnknownWord at 'nothing'\n", out.buffered());
 }
 
@@ -112,4 +139,5 @@ const Session = gasim.arrayforth.Session;
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const expect = std.testing.expect;
 const expectEqualStrings = std.testing.expectEqualStrings;

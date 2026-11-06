@@ -20,6 +20,8 @@ pub const Options = struct {
     forth: ?Forth = null,
     /// colorForth blocks to edit, of the file opened or a new one
     colorforth: ?ColorForth = null,
+    /// start on the chip, as a snapshot opens, rather than on those
+    show_chip: bool = false,
 };
 
 pub const ColorForth = struct {
@@ -399,7 +401,7 @@ const Tui = struct {
         tui.shown.remove(.debug);
         // a file of colorForth was opened to edit it
         if (options.colorforth) |cf| {
-            tui.screen = .editor;
+            if (!options.show_chip) tui.screen = .editor;
             if (cf.compressed) tui.message = "decompressed, and saved uncompressed";
         }
         return tui;
@@ -1314,7 +1316,7 @@ const Tui = struct {
         if (!self.running) self.remember(.line);
         forth.session.setTarget(layout.nodeNumber(self.selected));
         output.print("{d:0>3}> {s}\n", .{ layout.nodeNumber(self.selected), line }) catch {};
-        aforth.interpret(forth.session, line, forth.diagnostic, output) catch {
+        _ = aforth.interpret(forth.session, line, forth.diagnostic, output, output) catch {
             self.message = "the aaforth panel's output is full";
         };
         if (forth.session.target()) |node| if (layout.index(node)) |i| self.select(i);

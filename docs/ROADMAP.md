@@ -295,31 +295,15 @@ regressions need catching with consistent numbers:
 
 ### The CLI without the TUI
 
-An agent should be able to do everything the TUI does without one. What the
-CLI lacks today:
-
-- **Limits:** a step or simulated-time limit for `run`, as a program that
-  never settles runs until it is killed.
-- **State:** dumping nodes' RAM, stacks and registers when a run stops, for
-  any node, not only one at a breakpoint.
-- **Going on:** continuing past breakpoints and watches, a given number of
-  times, and stepping a node a given number of steps.
-- **Snapshots:** saving the chip to a file when a run stops, and starting a
-  run from one, as the TUI goes back in memory.
-- **Machine-readable output:** JSON for listings, traces, `--why` and state,
-  and exit codes that say how a run ended (settled, breakpoint, watch,
-  limit, error).
-- **colorForth:** `gasim blocks` writes a `.cf` file's source as text; the
-  reverse would let an agent edit colorForth as text.
-- **Tests:** a way to state what a run should output or leave in a node,
-  for checking programs as `examples/test.zig` does.
-
-Each new feature should come with a CLI form, or a reason it can't.
+An agent should be able to do everything the TUI does without one.
+[docs/cli.md](cli.md) lays out the commands, and the order they come in. Each
+new feature should come with a CLI form, or a reason it can't.
 
 ### The prompt and IDE
 
 - Words to let the chip run freely from `gasim aforth`, as the TUI already
-  can.
+  can, past the rounds it settles for at the start. `run` and `step` go on
+  from a snapshot `aforth` wrote, and `aforth --from` from theirs.
 - Paths (`HOOK PATH -HOOK`) are accepted but do nothing, as gasim reaches
   every node directly. Simulating the real IDE's wire and end nodes could
   come later, if driving GreenArrays' IDE scripts unchanged is wanted.
