@@ -296,6 +296,7 @@ pub const Session = struct {
         it.color_depth = 0;
         it.feedback_differs = 0;
         it.first_difference = null;
+        it.unresolved_then = null;
         it.loadColorForth(std.math.cast(i32, block) orelse return error.NoSuchBlock) catch |err| {
             it.color_depth = 0;
             it.host_mode = false;
@@ -404,6 +405,10 @@ pub const Assembled = struct {
     /// to, and the first of them
     feedback_differs: usize = 0,
     first_difference: ?Feedback = null,
+    /// where, from `colorforth.line`, a colorForth then first had nothing
+    /// to resolve, which arrayForth 2, with no check on its stack, went
+    /// past
+    unresolved_then: ?usize = null,
     /// the frames of a stream, from STREAM[ ... ]STREAM, for
     /// `streamer.stream` to lay out, whose descriptors are then all of
     /// `descriptors`
@@ -913,6 +918,7 @@ const Interpreter = struct {
     color_line: ?usize = null,
     feedback_differs: usize = 0,
     first_difference: ?Feedback = null,
+    unresolved_then: ?usize = null,
     /// the root of the stream STREAM[ began, until ]STREAM, whether FRAME[
     /// has begun its frame, the path COURSE gave it, the node ORGN or TO
     /// drew to last, and the frame once ]FRAME ends it
@@ -944,6 +950,7 @@ const Interpreter = struct {
             .descriptors = self.descriptors[0..self.descriptorEnd()],
             .feedback_differs = self.feedback_differs,
             .first_difference = self.first_difference,
+            .unresolved_then = self.unresolved_then,
             .stream = self.parted(),
         };
     }
@@ -1777,6 +1784,16 @@ const Interpreter = struct {
         const word = colorforth_opcodes.get(text) orelse text;
         self.asm_context = true;
         defer self.asm_context = false;
+        // a then with nothing to resolve, as block 792's, whose if is in a
+        // comment, only aligns, as arrayForth 2 went past it: OkadWork.cf,
+        // with the then in the comment too, has the same code. As handles
+        // share the stack, a then that is one too many can resolve an if
+        // that a later then was for, which then has nothing to resolve
+        if (eql(word, "then") and self.depth == 0) {
+            (try self.builder()).alignWord();
+            if (self.unresolved_then == null) self.unresolved_then = self.diagnostic.line;
+            return;
+        }
         const built_in = try self.findBuiltIn(word);
         switch (built_in) {
             .forth, .number => return error.UnknownWord,
@@ -4723,6 +4740,24 @@ test "colorForth's yellow words assemble only once a node has begun in that load
     // exit run by a host word after its block has ended
     const exits = try colorBlocks(&.{"[ host : x ] exit exit ; [ target x"});
     _ = try assembleColorForth(&exits, &.{0}, &programs, &.{}, &diagnostic);
+}
+
+test "colorForth's then with nothing to resolve only aligns, and is noted" {
+    // as block 792's, whose if is in a comment
+    const source =
+        \\[ 0 node 0 org
+        \\: main ] dup ( if ; [ then ] drop ;
+    ;
+    try expectSameAsColorForth(&.{source},
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : main  dup .. drop ;
+        \\ >BIN ]ASM
+    );
+    const bytes = try colorBlocks(&.{source});
+    var programs: [4]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic);
+    try expectEqual(9, colorforth.place(assembled.unresolved_then.?).token);
 }
 
 test "colorForth runs yellow words as a host word is defined" {

@@ -870,11 +870,17 @@ pub fn compile(self: *Sim) error{ CompileFailed, OutOfMemory }!void {
         nodes += 1;
     };
     const w = &self.out.writer;
+    w.print("compiled, and started the chip again with {d} nodes' code", .{nodes}) catch return error.OutOfMemory;
     if (assembled.first_difference) |first| {
-        w.print("compiled, and started the chip again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{
-            nodes, assembled.feedback_differs, first.noted, first.found,
+        w.print(", but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{
+            assembled.feedback_differs, first.noted, first.found,
         }) catch return error.OutOfMemory;
-    } else w.print("compiled, and started the chip again with {d} nodes' code", .{nodes}) catch return error.OutOfMemory;
+    }
+    if (assembled.unresolved_then) |line| {
+        w.print("{s} a then in block {d} has nothing to resolve", .{
+            if (assembled.first_difference == null) ", but" else ", and", colorforth.place(line).block,
+        }) catch return error.OutOfMemory;
+    }
 }
 
 pub const BlockView = struct {
