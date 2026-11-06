@@ -140,7 +140,8 @@ gasim has got to, with a warning if they differ. A `then` with nothing to
 resolve, as block 792's, whose `if` is in a comment, only aligns, as
 arrayForth 2 went past it, with a warning, which falls on the last `then`
 of a structure that has one too many. Between `host` and
-`target`, a red word defines a word for the host, which runs its green
+`target`, and outside F18 code, before a node in a load or after
+`+node`, a red word defines a word for the host, which runs its green
 words as yellow ones and pushes its numbers, such as `:r-l- ]$1f5 lit ;`,
 a macro for a literal, and one with no words before the next falls
 through into it, as `:head :pipe [1112 ]load ;`, until `empty` forgets
