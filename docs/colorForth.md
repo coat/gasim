@@ -84,7 +84,8 @@ block, and `n bin` saves the code as a bin of another number. In an
 arrayForth 2 image, a yellow word that is nothing else leaves the number
 that the image's system names as it starts, in block 18 and the blocks it
 loads, such as `sram`, which block 202's `:sram [264 ];` names, the block
-of the SRAM cluster: `[sram load`. gasim's directives, labels and the F18
+of the SRAM cluster: `[sram load`. `spispeed`, `spicmd` and `spiadr`
+assemble the literals arrayForth 2's F18 compiler gives the SPI boot. gasim's directives, labels and the F18
 compiler's words come first, as block 202's `host` and `target` name
 blocks too, so `[host load`, in the IDE's blocks, still begins host
 words. Arithmetic
@@ -108,8 +109,13 @@ gasim has got to, with a warning if they differ. Between `host` and
 words as yellow ones and pushes its numbers, such as `:r-l- ]$1f5 lit ;`,
 a macro for a literal, and one with no words before the next falls
 through into it, as `:head :pipe [1112 ]load ;`, until `empty` forgets
-the words defined since `mark`. `--listing` shows the line of colorForth each word came from, as
-`gasim blocks` writes it. Compiled this way, the F18 code of `OkadWork.cf` agrees with the gray
+the words defined since `mark`. Yellow words in a definition run as it is
+defined, and the next green word compiles the number they leave, as
+colorForth does: `:seven [3 4 + ]lit ;`. There, and in host words, `@` and
+`!` fetch and store, such as an image's system variables, which leave
+their address in yellow, as block 444's `:resume [@res2 ]@ …` reads the
+value block 202 keeps for `@res2`. `--listing` shows the line of colorForth
+each word came from, as `gasim blocks` writes it. Compiled this way, the F18 code of `OkadWork.cf` agrees with the gray
 numbers arrayForth 2 wrote, but for a few lines that were changed after it
 was compiled. This opens the PWM demo running in node 600, and lists the
 SHA-256 scheduler in node 101:
