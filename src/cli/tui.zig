@@ -126,6 +126,7 @@ const colors = struct {
     const focused: vaxis.Style = .{ .fg = .{ .index = 4 } };
     const dim: vaxis.Style = .{ .dim = true };
     const breakpoint: vaxis.Style = .{ .fg = .{ .index = 1 }, .bold = true };
+    const failure: vaxis.Style = .{ .fg = .{ .index = 1 }, .bold = true };
 };
 
 /// a key and what it does, for the status bar
@@ -221,6 +222,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ ":e file, :e! file", "open a file of blocks, with ! though not saved" },
         .{ ":new, :new!", "start a new file of blocks, with ! though not saved" },
         .{ ":q, :q!, :wq", "quit, though not saved, or after saving" },
+        .{ ":messages", "the last errors and stops, until the next key" },
         .{ "tab", "complete the name of a .cf file or a directory" },
         .{ "esc", "done" },
     } },
@@ -268,6 +270,19 @@ fn helpRow(heading: []const u8) u16 {
 
 /// bytes of a formatted message, past which it is cut short
 const message_capacity = 256;
+
+/// failures kept for `:messages`
+const log_capacity = 32;
+
+/// What a message is, which says how it is shown
+const MessageKind = enum {
+    /// what a key did, or why it did nothing
+    info,
+    /// an error, or what stopped a run, shown in red and kept
+    failure,
+    /// what the next key does, shown without other hints
+    prompt,
+};
 
 const Tui = struct {
     io: Io,
@@ -334,7 +349,15 @@ const Tui = struct {
     map_more: []const u8 = "",
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
+    message_kind: MessageKind = .info,
     message_buffer: [message_capacity]u8 = undefined,
+    /// the last failures, in a ring, for `:messages`
+    log: [log_capacity][message_capacity]u8 = undefined,
+    log_lengths: [log_capacity]u16 = undefined,
+    /// failures so far, more than the ring keeps
+    log_count: usize = 0,
+    /// whether the failures are shown, until the next key
+    log_open: bool = false,
     /// the first row of the help in view, while it is shown
     help_scroll: ?u16 = null,
     /// rows of the help last drawn in view
@@ -404,7 +427,7 @@ const Tui = struct {
         // waits on a new file for alt+6
         if (options.colorforth) |cf| if (cf.path != null) {
             tui.screen = .editor;
-            if (cf.compressed) tui.message = "decompressed, and saved uncompressed";
+            if (cf.compressed) tui.say("decompressed, and saved uncompressed");
         };
         return tui;
     }
@@ -421,6 +444,40 @@ const Tui = struct {
     /// formats text that lasts until the next frame
     fn print(self: *Tui, comptime format: []const u8, args: anytype) []const u8 {
         return std.fmt.allocPrint(self.frame.allocator(), format, args) catch "…";
+    }
+
+    /// shows a message
+    fn say(self: *Tui, text: []const u8) void {
+        self.message = text;
+        self.message_kind = .info;
+    }
+
+    /// shows the keys a key is waiting for
+    fn ask(self: *Tui, text: []const u8) void {
+        self.message = text;
+        self.message_kind = .prompt;
+    }
+
+    /// shows an error, or what stopped a run, keeping it for `:messages`
+    fn fail(self: *Tui, text: []const u8) void {
+        self.message = text;
+        self.message_kind = .failure;
+        const slot = self.log_count % log_capacity;
+        const len = @min(text.len, message_capacity);
+        @memcpy(self.log[slot][0..len], text[0..len]);
+        self.log_lengths[slot] = @intCast(len);
+        self.log_count += 1;
+    }
+
+    /// how many failures are kept
+    fn logLen(self: *const Tui) usize {
+        return @min(self.log_count, log_capacity);
+    }
+
+    /// a failure that is kept, the oldest first
+    fn logged(self: *const Tui, i: usize) []const u8 {
+        const slot = (self.log_count - self.logLen() + i) % log_capacity;
+        return self.log[slot][0..self.log_lengths[slot]];
     }
 
     /// formats a message for the status bar, cutting short one too long
@@ -475,7 +532,7 @@ const Tui = struct {
         self.running = false;
         self.select(hit.index());
         self.memory_scroll = null;
-        self.message = self.printLasting("{f}", .{hit.describe(self.chip.layout)});
+        self.fail(self.printLasting("{f}", .{hit.describe(self.chip.layout)}));
     }
 
     /// Handles an event, returning false to quit
@@ -489,7 +546,16 @@ const Tui = struct {
                 self.quit_asked = false;
                 // a key ends moving a border by tapping
                 self.dragging = null;
-                if (k.matches('c', .{ .ctrl = true })) return self.keepOnQuit();
+                if (k.matches('c', .{ .ctrl = true })) {
+                    // so that the q it may ask for reaches the panels
+                    self.log_open = false;
+                    self.help_scroll = null;
+                    return self.keepOnQuit();
+                }
+                if (self.log_open) {
+                    self.log_open = false;
+                    return true;
+                }
                 if (self.help_scroll != null) return self.helpKey(k);
                 if (k.matches(vaxis.Key.f1, .{})) return self.openHelp();
                 // a digit with alt, or with ctrl where the terminal reports it,
@@ -554,9 +620,9 @@ const Tui = struct {
             self.chip.hit = null;
         }
         const stepping = k.matches('s', .{}) or k.matches('S', .{}) or k.matches('n', .{});
-        if (stepping and self.running) self.message = "pause with space to step";
+        if (stepping and self.running) self.say("pause with space to step");
         if (k.matches('z', .{})) {
-            if (self.running) self.message = "pause with space to go back" else self.back();
+            if (self.running) self.say("pause with space to go back") else self.back();
         }
         if (!self.running) {
             const layout = self.chip.layout;
@@ -566,12 +632,12 @@ const Tui = struct {
                 self.trimOutput();
                 if (try self.chip.stepNext()) |i| {
                     self.select(i);
-                    self.message = self.printLasting("stepped node {d:0>3}", .{layout.nodeNumber(i)});
-                } else self.message = "every node is waiting";
+                    self.say(self.printLasting("stepped node {d:0>3}", .{layout.nodeNumber(i)}));
+                } else self.say("every node is waiting");
             }
             if (k.matches('S', .{})) {
                 self.remember(.round);
-                self.message = if (try self.advance()) "took a round of steps, the furthest behind first" else "every node is waiting";
+                self.say(if (try self.advance()) "took a round of steps, the furthest behind first" else "every node is waiting");
             }
             if (k.matches('n', .{})) {
                 self.remember(.node);
@@ -580,7 +646,7 @@ const Tui = struct {
                 self.chip.stepNode(self.selected);
                 self.memory_scroll = null;
                 const waiting = self.chip.nodes[self.selected].suspended;
-                self.message = self.printLasting("node {d:0>3} {s}", .{ layout.nodeNumber(self.selected), if (waiting) "is still waiting" else "stepped" });
+                self.say(self.printLasting("node {d:0>3} {s}", .{ layout.nodeNumber(self.selected), if (waiting) "is still waiting" else "stepped" }));
             }
         }
 
@@ -600,11 +666,11 @@ const Tui = struct {
                 if (k.matches('b', .{})) {
                     if (self.cursorRow()) |row| {
                         self.toggleBreakpoint(row);
-                    } else self.message = "move to a word in memory first";
+                    } else self.say("move to a word in memory first");
                 }
                 if (k.matches('w', .{})) {
                     self.choosing_watch = true;
-                    self.message = "watch reads from r d l u, or writes to R D L U";
+                    self.ask("watch reads from r d l u, or writes to R D L U");
                 }
             },
             .debug => self.debugKey(k),
@@ -631,6 +697,7 @@ const Tui = struct {
     /// Shows the help, at the keys of what has the focus, or from the map,
     /// whose keys are those at the top
     fn openHelp(self: *Tui) bool {
+        self.choosing_watch = false;
         self.help_scroll = if (self.helpHeading()) |heading| helpRow(heading) else 0;
         return true;
     }
@@ -683,11 +750,11 @@ const Tui = struct {
                 .numbers => .registers,
                 .registers => .auto,
             };
-            self.message = switch (self.map_mode) {
+            self.say(switch (self.map_mode) {
                 .auto => "tiles of registers where they fit, and numbers otherwise",
                 .numbers => "numbers",
                 .registers => "tiles of registers, scrolling where they do not fit",
-            };
+            });
         }
     }
 
@@ -719,7 +786,7 @@ const Tui = struct {
                     if (k.matches('X', .{})) {
                         self.chip.breakpoints = .{};
                         self.chip.watches = .{};
-                        self.message = "removed every breakpoint and watch";
+                        self.say("removed every breakpoint and watch");
                     }
                 }
             },
@@ -766,7 +833,7 @@ const Tui = struct {
             .history => {
                 if (cursor == 0) return;
                 if (self.running) {
-                    self.message = "pause with space to go back";
+                    self.say("pause with space to go back");
                     return;
                 }
                 self.backTo(self.history_len - cursor);
@@ -792,13 +859,13 @@ const Tui = struct {
     fn setTracing(self: *Tui, on: bool) void {
         if (on and self.trace == null) {
             const buffer = self.gpa.alloc(u8, trace_capacity) catch {
-                self.message = "there is no memory left to trace with";
+                self.fail("there is no memory left to trace with");
                 return;
             };
             self.trace = .init(buffer);
         }
         self.chip.trace = if (on) &self.trace.?.writer else null;
-        self.message = if (on) "tracing each step that runs code, which is slower" else "not tracing";
+        self.say(if (on) "tracing each step that runs code, which is slower" else "not tracing");
     }
 
     /// the start of the selected node's lines of the trace, if only those
@@ -810,7 +877,7 @@ const Tui = struct {
     /// writes the lines of the trace shown to trace.txt
     fn saveTrace(self: *Tui) void {
         const t = self.trace orelse {
-            self.message = "t starts tracing";
+            self.say("t starts tracing");
             return;
         };
         const only = self.traceOnly();
@@ -826,10 +893,10 @@ const Tui = struct {
             lines += 1;
         }
         Io.Dir.cwd().writeFile(self.io, .{ .sub_path = "trace.txt", .data = text.items }) catch |err| {
-            self.message = self.printLasting("cannot save trace.txt: {t}", .{err});
+            self.fail(self.printLasting("cannot save trace.txt: {t}", .{err}));
             return;
         };
-        self.message = self.printLasting("saved {d} lines as trace.txt", .{lines});
+        self.say(self.printLasting("saved {d} lines as trace.txt", .{lines}));
     }
 
     /// Whether to keep going rather than quit, which with blocks not saved
@@ -838,7 +905,7 @@ const Tui = struct {
         const cf = self.options.colorforth orelse return false;
         if (self.quit_confirmed or !cf.editor.unsaved()) return false;
         self.quit_asked = true;
-        self.message = "blocks are not saved: s in the editor saves them, and q again quits";
+        self.ask("blocks are not saved: s in the editor saves them, and q again quits");
         return true;
     }
 
@@ -892,7 +959,7 @@ const Tui = struct {
     /// Gives the editor a key and does what it asks, returning false to quit
     fn editorAction(self: *Tui, editor: *Editor, k: Editor.Key) bool {
         const action = editor.key(k) catch |err| {
-            self.message = Editor.describe(err);
+            self.fail(Editor.describe(err));
             return true;
         };
         switch (action) {
@@ -901,7 +968,7 @@ const Tui = struct {
                 _ = self.save(path);
             } else {
                 self.startCommand("w ");
-                self.message = "name the new file";
+                self.say("name the new file");
             },
             .compile => self.compile(),
             .toggle_format => self.show_format = !self.show_format,
@@ -921,7 +988,7 @@ const Tui = struct {
         forth.session.loadColorForth(editor.contents(), @intCast(editor.block)) catch |err| {
             const place = gasim.colorforth.place(forth.diagnostic.line);
             if (place.block == editor.block and place.token <= editor.len) editor.cursor = place.token - 1;
-            self.message = self.printLasting("{t} at {s} in block {d}", .{ err, forth.diagnostic.token, place.block });
+            self.fail(self.printLasting("{t} at {s} in block {d}", .{ err, forth.diagnostic.token, place.block }));
             return;
         };
         self.remember(.compile);
@@ -934,13 +1001,14 @@ const Tui = struct {
         };
         self.settled = false;
         const then_block = if (assembled.unresolved_then) |line| gasim.colorforth.place(line).block else null;
-        self.message = if (assembled.first_difference) |first| (if (then_block) |block|
-            self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}, and a then in block {d} has nothing to resolve", .{ nodes, assembled.feedback_differs, first.noted, first.found, block })
-        else
-            self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ nodes, assembled.feedback_differs, first.noted, first.found })) else if (then_block) |block|
-            self.printLasting("started again with {d} nodes' code, but a then in block {d} has nothing to resolve", .{ nodes, block })
-        else
-            self.printLasting("compiled, and started the chip again with {d} nodes' code", .{nodes});
+        if (assembled.first_difference) |first| {
+            self.fail(if (then_block) |block|
+                self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}, and a then in block {d} has nothing to resolve", .{ nodes, assembled.feedback_differs, first.noted, first.found, block })
+            else
+                self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ nodes, assembled.feedback_differs, first.noted, first.found }));
+        } else if (then_block) |block| {
+            self.fail(self.printLasting("started again with {d} nodes' code, but a then in block {d} has nothing to resolve", .{ nodes, block }));
+        } else self.say(self.printLasting("compiled, and started the chip again with {d} nodes' code", .{nodes}));
     }
 
     /// Writes the editor's blocks to a file, which becomes theirs, returning
@@ -949,13 +1017,13 @@ const Tui = struct {
         const cf = &self.options.colorforth.?;
         const contents = cf.editor.contents();
         Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = contents }) catch |err| {
-            self.message = self.printLasting("cannot save {s}: {t}", .{ std.fs.path.basename(path), err });
+            self.fail(self.printLasting("cannot save {s}: {t}", .{ std.fs.path.basename(path), err }));
             return false;
         };
         cf.editor.saved();
         if (cf.path == null or !std.mem.eql(u8, cf.path.?, path)) self.name(path);
         cf.compressed = false;
-        self.message = self.printLasting("saved {d} blocks", .{contents.len / gasim.colorforth.block_size});
+        self.say(self.printLasting("saved {d} blocks", .{contents.len / gasim.colorforth.block_size}));
         return true;
     }
 
@@ -973,7 +1041,7 @@ const Tui = struct {
         const cf = &self.options.colorforth.?;
         const editor = cf.editor;
         if (path.len > self.path_buffer.len) {
-            self.message = "the file's name is too long";
+            self.fail("the file's name is too long");
             return;
         }
         // a compressed image takes less than the blocks it holds, and a
@@ -985,11 +1053,11 @@ const Tui = struct {
                 break :read &.{};
             },
             error.StreamTooLong => {
-                self.message = self.printLasting("{s} has more than {d} blocks", .{ std.fs.path.basename(path), editor.capacity() });
+                self.fail(self.printLasting("{s} has more than {d} blocks", .{ std.fs.path.basename(path), editor.capacity() }));
                 return;
             },
             else => {
-                self.message = self.printLasting("cannot open {s}: {t}", .{ std.fs.path.basename(path), err });
+                self.fail(self.printLasting("cannot open {s}: {t}", .{ std.fs.path.basename(path), err }));
                 return;
             },
         };
@@ -997,18 +1065,18 @@ const Tui = struct {
         const compressed = colorforth.compressedBlocks(read);
         const count = compressed orelse colorforth.blockCount(read);
         if (count > editor.capacity()) {
-            self.message = self.printLasting("{s} has more than {d} blocks", .{ std.fs.path.basename(path), editor.capacity() });
+            self.fail(self.printLasting("{s} has more than {d} blocks", .{ std.fs.path.basename(path), editor.capacity() }));
             return;
         }
         // decompressed apart, to leave the blocks as they are if it fails
         const bytes = self.gpa.alloc(u8, count * colorforth.block_size) catch {
-            self.message = "out of memory";
+            self.fail("out of memory");
             return;
         };
         defer self.gpa.free(bytes);
         if (compressed != null) {
             colorforth.decompress(read, bytes) catch |err| {
-                self.message = self.printLasting("cannot decompress {s}: {t}", .{ std.fs.path.basename(path), err });
+                self.fail(self.printLasting("cannot decompress {s}: {t}", .{ std.fs.path.basename(path), err }));
                 return;
             };
         } else {
@@ -1022,12 +1090,12 @@ const Tui = struct {
         cf.compressed = compressed != null;
         self.forgetCompiled();
         self.editor_scroll = 0;
-        self.message = if (compressed != null)
+        self.say(if (compressed != null)
             "decompressed, and saved uncompressed"
         else if (!found)
             self.printLasting("{s} is new", .{std.fs.path.basename(path)})
         else
-            self.printLasting("opened {d} blocks", .{count});
+            self.printLasting("opened {d} blocks", .{count}));
     }
 
     /// Starts a new file of blocks, which saving names
@@ -1039,7 +1107,7 @@ const Tui = struct {
         cf.compressed = false;
         self.forgetCompiled();
         self.editor_scroll = 0;
-        self.message = "a new file of blocks";
+        self.say("a new file of blocks");
     }
 
     /// forgets the code compiled from the blocks of the file before, so
@@ -1104,12 +1172,12 @@ const Tui = struct {
             const path = if (argument.len > 0) argument else cf.path orelse {
                 // and quits once it is named
                 self.startCommand(if (quitting) "wq " else "w ");
-                self.message = "name the new file";
+                self.say("name the new file");
                 return true;
             };
             const another = cf.path == null or !std.mem.eql(u8, cf.path.?, path);
             if (another and !forced) if (Io.Dir.cwd().access(self.io, path, .{})) |_| {
-                self.message = self.printLasting("{s} exists: :{s}! saves over it", .{ std.fs.path.basename(path), command });
+                self.fail(self.printLasting("{s} exists: :{s}! saves over it", .{ std.fs.path.basename(path), command }));
                 return true;
             } else |_| {};
             if (!self.save(path)) return true;
@@ -1118,23 +1186,27 @@ const Tui = struct {
         if (is(command, "q") or is(command, "quit")) {
             // as in vim, rather than asking twice
             if (forced or !cf.editor.unsaved()) return false;
-            self.message = "blocks are not saved: :w saves them, and :q! quits";
+            self.fail("blocks are not saved: :w saves them, and :q! quits");
             return true;
         }
         if (is(command, "e") or is(command, "edit") or is(command, "new") or is(command, "enew")) {
             const opening = is(command, "e") or is(command, "edit");
             if (opening and argument.len == 0) {
-                self.message = "name the file to open, as :e blocks.cf";
+                self.say("name the file to open, as :e blocks.cf");
                 return true;
             }
             if (!forced and cf.editor.unsaved()) {
-                self.message = self.printLasting("blocks are not saved: :w saves them, and :{s}! lets them go", .{command});
+                self.fail(self.printLasting("blocks are not saved: :w saves them, and :{s}! lets them go", .{command}));
                 return true;
             }
             if (opening) self.open(argument) else self.newFile();
             return true;
         }
-        self.message = self.printLasting("no command {s}: :w, :e, :new or :q", .{command});
+        if (is(command, "messages")) {
+            if (self.log_count > 0) self.log_open = true else self.say("no errors or stops yet");
+            return true;
+        }
+        self.fail(self.printLasting("no command {s}: :w, :e, :new, :messages or :q", .{command}));
         return true;
     }
 
@@ -1144,7 +1216,7 @@ const Tui = struct {
     fn completePath(self: *Tui) void {
         const line = self.command[0..self.command_len.?];
         const start = if (std.mem.findScalarLast(u8, line, ' ')) |space| space + 1 else {
-            self.message = "complete a file's name after :e or :w";
+            self.say("complete a file's name after :e or :w");
             return;
         };
         const typed = line[start..];
@@ -1152,7 +1224,7 @@ const Tui = struct {
         const partial = typed[slash..];
         const dir_path = if (slash == 0) "." else typed[0..slash];
         var dir = Io.Dir.cwd().openDir(self.io, dir_path, .{ .iterate = true }) catch {
-            self.message = "no such directory";
+            self.fail("no such directory");
             return;
         };
         defer dir.close(self.io);
@@ -1190,7 +1262,7 @@ const Tui = struct {
             listed.print("{s}{s} ", .{ entry.name, if (directory) "/" else "" }) catch {};
         }
         if (found == 0) {
-            self.message = "no .cf file or directory starts with that";
+            self.say("no .cf file or directory starts with that");
             return;
         }
         if (common_len > partial.len and start + slash + common_len <= self.command.len) {
@@ -1198,7 +1270,7 @@ const Tui = struct {
             self.command_len = @intCast(start + slash + common_len);
             return;
         }
-        self.message = self.printLasting("{s}", .{std.mem.trimEnd(u8, listed.buffered(), " ")});
+        self.say(self.printLasting("{s}", .{std.mem.trimEnd(u8, listed.buffered(), " ")}));
     }
 
     /// Handles keys typed into the console, returning false for keys it
@@ -1228,7 +1300,7 @@ const Tui = struct {
                 try self.send();
             } else {
                 self.options.console.input.?.queue.close(self.io);
-                self.message = "the console's input has ended";
+                self.say("the console's input has ended");
             }
         } else if (k.text) |text| {
             for (text) |byte| if (self.input_len < self.input.len - 1 and byte >= ' ' and byte < 0x7f) {
@@ -1276,7 +1348,7 @@ const Tui = struct {
         var words: Completions = .{ .partial = input[start..] };
         forth.session.complete(words.partial, &words);
         if (words.len == 0) {
-            self.message = "no word starts with that";
+            self.say("no word starts with that");
             return;
         }
         const found = words.found[0..@min(words.len, words.found.len)];
@@ -1334,7 +1406,7 @@ const Tui = struct {
         forth.session.setTarget(layout.nodeNumber(self.selected));
         output.print("{d:0>3}> {s}\n", .{ layout.nodeNumber(self.selected), line }) catch {};
         _ = aforth.interpret(forth.session, line, forth.diagnostic, output, output) catch {
-            self.message = "the aforth panel's output is full";
+            self.fail("the aforth panel's output is full");
         };
         if (forth.session.target()) |node| if (layout.index(node)) |i| self.select(i);
         self.memory_scroll = null;
@@ -1348,15 +1420,16 @@ const Tui = struct {
         // the queue is full when the node is not reading its input
         const sent = self.options.console.input.?.queue.put(self.io, text, 0) catch |err| switch (err) {
             error.Closed => {
-                self.message = "the console's input has ended";
+                self.fail("the console's input has ended");
                 return;
             },
             else => |e| return e,
         };
-        if (sent < text.len) self.message = "the console's input is full";
+        if (sent < text.len) self.fail("the console's input is full");
     }
 
     fn mouse(self: *Tui, m: vaxis.Mouse) void {
+        if (self.log_open) return;
         // the help takes the wheel, and nothing else
         if (self.help_scroll != null) {
             if (m.type != .press) return;
@@ -1406,7 +1479,7 @@ const Tui = struct {
         if (self.onBorder(m)) |border| {
             self.dragging = border;
             self.dragged = false;
-            self.message = "drag the border, or tap where it should go";
+            self.ask("drag the border, or tap where it should go");
             return;
         }
 
@@ -1535,7 +1608,7 @@ const Tui = struct {
         self.causes[index] = cause;
         const snapshot = &self.history[index];
         if (snapshot.* == null) snapshot.* = Chip.Snapshot.init(self.gpa, self.chip.layout) catch {
-            self.message = "there is no memory left to go back with";
+            self.fail("there is no memory left to go back with");
             return;
         };
         self.chip.save(&snapshot.*.?);
@@ -1564,7 +1637,7 @@ const Tui = struct {
     fn back(self: *Tui) void {
         self.keepPending();
         if (self.history_len == 0) {
-            self.message = "nothing to go back to";
+            self.say("nothing to go back to");
             return;
         }
         self.backTo(self.history_len - 1);
@@ -1578,7 +1651,7 @@ const Tui = struct {
         self.history_len = n;
         self.chip.restore(&self.history[self.historyIndex(n)].?);
         self.memory_scroll = null;
-        self.message = self.printLasting("back to {d} steps", .{self.chip.steps});
+        self.say(self.printLasting("back to {d} steps", .{self.chip.steps}));
     }
 
     /// the index in `history` of the snapshot `i` from the oldest
@@ -1598,14 +1671,14 @@ const Tui = struct {
             else => return,
         };
         _ = self.chip.watches.toggle(.{ .index = self.selected, .direction = direction, .write = std.ascii.isUpper(text[0]) }) catch {
-            self.message = "there are too many watches";
+            self.fail("there are too many watches");
         };
     }
 
     fn toggleBreakpoint(self: *Tui, row: u16) void {
         const address = rowAddress(row) orelse return;
         _ = self.chip.breakpoints.toggle(.init(self.selected, address)) catch {
-            self.message = "there are too many breakpoints";
+            self.fail("there are too many breakpoints");
             return;
         };
     }
@@ -1760,6 +1833,7 @@ const Tui = struct {
         }
         // over either screen
         defer if (self.help_scroll != null) self.drawHelp(win);
+        defer if (self.log_open) self.drawLog(win);
         if (self.screen == .editor) return self.drawEditor(win);
 
         const layout = self.chip.layout;
@@ -1869,6 +1943,37 @@ const Tui = struct {
                 row += 1;
             }
             row += 1;
+        }
+    }
+
+    /// Draws the failures kept in a box over the screen, as many of the
+    /// latest as fit, each on as many rows as it takes
+    fn drawLog(self: *Tui, win: vaxis.Window) void {
+        const width = @min(win.width -| 4, help_key_width + 60);
+        const text_width = width -| 3;
+        const room = win.height -| 3;
+        const rowsOf = struct {
+            fn rowsOf(w: vaxis.Window, text: []const u8, columns: u16) u16 {
+                return @max(std.math.divCeil(u16, w.gwidth(text), columns) catch 1, 1);
+            }
+        }.rowsOf;
+        var first = self.logLen();
+        var rows: u16 = 0;
+        while (first > 0) : (first -= 1) {
+            const needed = rowsOf(win, self.logged(first - 1), text_width);
+            if (rows > 0 and rows + needed > room) break;
+            rows += needed;
+        }
+        const height = @min(rows, room) + 2;
+        const box = win.child(.{ .x_off = (win.width - width) / 2, .y_off = (win.height - 1 -| height) / 2, .width = width, .height = height });
+        box.clear();
+        const inside = box.child(.{ .border = .{ .where = .all, .style = .{ .fg = .{ .index = 6 } } } }).child(.{ .x_off = 1 });
+        _ = box.child(.{ .x_off = 2, .width = width -| 3, .height = 1 }).printSegment(.{ .text = "messages", .style = .{ .bold = true } }, .{ .wrap = .none });
+        var row: u16 = 0;
+        for (first..self.logLen()) |i| {
+            const text = self.logged(i);
+            _ = inside.printSegment(.{ .text = text }, .{ .row_offset = row, .wrap = .grapheme });
+            row += rowsOf(win, text, text_width);
         }
     }
 
@@ -2337,7 +2442,7 @@ const Tui = struct {
                 .{ .text = ":" },
                 .{ .text = shown },
             }, .{ .wrap = .none });
-            if (self.message) |message| _ = win.printSegment(.{ .text = message, .style = colors.literal }, .{ .col_offset = @intCast(@min(shown.len + 3, win.width)), .wrap = .none });
+            if (self.message) |message| _ = win.printSegment(.{ .text = message, .style = self.messageStyle() }, .{ .col_offset = @intCast(@min(shown.len + 3, win.width)), .wrap = .none });
             win.showCursor(@intCast(@min(shown.len + 1, win.width -| 1)), 0);
             return;
         }
@@ -2361,6 +2466,10 @@ const Tui = struct {
         self.drawBar(win, state[0..len], hints, if (editor.mode == .insert) "F1" else "?");
     }
 
+    fn messageStyle(self: *const Tui) vaxis.Style {
+        return if (self.message_kind == .failure) colors.failure else colors.literal;
+    }
+
     /// Draws the bar along the bottom of a screen: `state`, then any message,
     /// then as many of `hints` as fit, the most wanted first, with the key of
     /// the help, which lists the rest, always at the right
@@ -2382,11 +2491,13 @@ const Tui = struct {
             const room = end - x - 2;
             const width = win.gwidth(message);
             const shown = if (width <= room) width else room - 1;
-            _ = win.child(.{ .x_off = x + 1, .width = shown }).printSegment(.{ .text = message, .style = colors.literal }, .{ .wrap = .none });
-            if (width > room) _ = win.printSegment(.{ .text = "…", .style = colors.literal }, .{ .col_offset = x + 1 + shown, .wrap = .none });
+            _ = win.child(.{ .x_off = x + 1, .width = shown }).printSegment(.{ .text = message, .style = self.messageStyle() }, .{ .wrap = .none });
+            if (width > room) _ = win.printSegment(.{ .text = "…", .style = self.messageStyle() }, .{ .col_offset = x + 1 + shown, .wrap = .none });
             x += @min(width, room) + 2;
         };
 
+        // what the next key does matters more than the hints
+        if (self.message != null and self.message_kind == .prompt) return;
         for (hints) |hint| {
             const width: u16 = @intCast(" ".len + hint[0].len + " ".len + hint[1].len + " ".len);
             if (x + width > end) break;
@@ -2440,7 +2551,8 @@ const Tui = struct {
             std.mem.concat(self.frame.allocator(), Hint, &.{ hints, &.{.{ "alt+6", "colorforth" }} }) catch hints
         else
             hints;
-        self.drawBar(win, bar[0..len], with_editor, if (self.inserting) "F1" else "?");
+        // `?` would be typed, or be the key a watch is waiting for
+        self.drawBar(win, bar[0..len], with_editor, if (self.inserting or self.choosing_watch) "F1" else "?");
     }
 
     /// the ports of the selected node that are watched, such as `reads
@@ -2821,6 +2933,106 @@ test "the status bar keeps the help, and hints that fit whole" {
     t.draw();
     try expect(try t.shows(29, " every node is waiting  space run"));
     try expect(try t.shows(29, " ? help "));
+}
+
+test "a message's kind says how it is shown" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+
+    // a failure is red, and goes on being kept
+    t.tui.fail("cannot open it");
+    t.draw();
+    try expect(try t.shows(29, "cannot open it  space run"));
+    try expectEqual(vaxis.Color{ .index = 1 }, t.screen.readCell(18, 29).?.style.fg);
+
+    // and a message after it is not, without a key between them
+    t.tui.say("nothing wrong");
+    t.draw();
+    try expectEqual(vaxis.Color{ .index = 3 }, t.screen.readCell(18, 29).?.style.fg);
+    try expectEqual(1, t.tui.logLen());
+
+    // a prompt leaves out the hints, whose keys it would not take
+    try t.pressWith('3', .{ .alt = true });
+    try t.press('w');
+    try expect(try t.shows(29, "watch reads from r d l u"));
+    try expect(!try t.shows(29, "space run"));
+    // where ? would be the key it waits for
+    try expect(try t.shows(29, " F1 help "));
+    try t.press(vaxis.Key.escape);
+    try expect(try t.shows(29, "space run"));
+
+    // the help lets it go, so the key after it is not taken for a port
+    try t.press('w');
+    try t.press(vaxis.Key.f1);
+    try t.press(vaxis.Key.escape);
+    try t.press('r');
+    try expectEqual(0, t.chip.watches.len);
+}
+
+test "keeps the last failures for :messages" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [gasim.colorforth.block_size]u8 = @splat(0);
+    editor.open(&blocks, 1);
+    t.tui.options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
+    t.tui.screen = .editor;
+    t.draw();
+
+    const typeCommand = struct {
+        fn typeCommand(tt: *TestTui, command: []const u8) !void {
+            try tt.press(':');
+            for (command) |c| try tt.press(c);
+            try tt.press(vaxis.Key.enter);
+        }
+    }.typeCommand;
+    try typeCommand(&t, "messages");
+    try expect(!t.tui.log_open);
+    try expect(try t.shows(29, "no errors or stops yet"));
+
+    // what a key clears from the bar is still there
+    for (0..log_capacity + 2) |i| t.tui.fail(t.tui.printLasting("failure {d}", .{i}));
+    try t.press('j');
+    try expectEqual(null, t.tui.message);
+    try expectEqual(log_capacity, t.tui.logLen());
+    try expectEqualStrings("failure 2", t.tui.logged(0));
+    try expectEqualStrings("failure 33", t.tui.logged(log_capacity - 1));
+
+    try typeCommand(&t, "messages");
+    try expect(t.tui.log_open);
+    try expect(try t.shows(0, "#messages#"));
+    // the latest that fit, ending with the last
+    try expect(try t.shows(27, "failure 33"));
+    try expect(try t.shows(1, "failure 7"));
+
+    // a failure that takes more than a row of the box takes more rows
+    const long: [100]u8 = @splat('x');
+    t.tui.fail(&long);
+    t.draw();
+    try expect(try t.shows(25, "failure 33"));
+    try expect(try t.shows(26, "xxx"));
+    try expect(try t.shows(27, "xxx"));
+
+    // a short screen still shows the latest, on all the rows it has
+    t.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 30, .height = 8, .screen = &t.screen });
+    try expectEqualStrings("x", t.screen.readCell(4, 1).?.char.grapheme);
+    try expectEqualStrings("x", t.screen.readCell(4, 5).?.char.grapheme);
+
+    // the next key only closes it
+    const mode = editor.mode;
+    try t.press('i');
+    try expect(!t.tui.log_open);
+    try expectEqual(mode, editor.mode);
+
+    // and ctrl+c closes it, for the q that asks for to reach the panels
+    try t.press(vaxis.Key.escape);
+    try typeCommand(&t, "messages");
+    _ = try t.tui.handle(.{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } });
+    try expect(!t.tui.log_open);
 }
 
 test "a long message is cut short, not lost" {
@@ -3770,6 +3982,8 @@ test "compiling colorForth in the editor starts the chip again with its code" {
     try t.press(vaxis.Key.escape);
     try t.press('L');
     try expect(try t.shows(29, "started again with 1 nodes' code, but a then in block 0 has nothing to resolve"));
+    try expectEqual(.failure, t.tui.message_kind);
+    try expectEqualStrings(t.tui.message.?, t.tui.logged(t.tui.logLen() - 1));
 }
 
 test "the editor's commands save, open and start files" {
