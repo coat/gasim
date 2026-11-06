@@ -150,7 +150,15 @@ block defines its words in x86 code, such as block 228's `+wire`, is
 there for the blocks loaded after it, until `reclaim` or `empty`, but F18
 code's words and colorForth's own, such as `dup`, come before it. Each
 load given to the compiler starts outside F18 code,
-though a block loaded from F18 code goes on in its node. Yellow words in a definition run as it is
+though a block loaded from F18 code goes on in its node. Host words branch
+and loop as x86 colorForth compiles them, as block 230's `?rl` and `+dx`
+do: `for`, `next` and `i`; `push` and `pop`; `if` and `-if`, and `begin`
+with `end`, `until`, `-until`, `while` and `-while`, which test the flags
+of the last `+`, `and`, `or`, `negate`, `2*` or `2/`; and a `;` that
+returns, with the green words after it, such as `then`, going on in the
+word. One defined outside `host` whose control words don't match, as F18
+code's can, such as a ROM source's `begin … unext`, fails only when it
+runs. Yellow words in a definition run as it is
 defined, and the next green word compiles the number they leave, as
 colorForth does: `:seven [3 4 + ]lit ;`. There, and in host words, `@` and
 `!` fetch and store, such as an image's system variables, which leave
