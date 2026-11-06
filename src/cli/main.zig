@@ -899,7 +899,6 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
         // without a .cf file, on a new file of blocks, to name when it is saved
         .colorforth = try editColorForth(arena, colorforth_blocks orelse try newColorForth(arena), if (colorforth) source_path else null),
-            .show_chip = loaded != null,
         });
         return 0;
     }
