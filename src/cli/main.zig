@@ -720,6 +720,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, descriptors, programs, buffer) catch |err| switch (err) {
             error.NoSuchNode => fatal("--boot needs node 001, which is not in {f}", .{layout}),
             error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
+            error.NoSuchBin => fatal("{s}: a node loads a bin that was not saved", .{source_path}),
             else => |e| return e,
         };
         chip.attachFeeder(&feeder, 1, .up) catch fatal("--boot needs node 001's up port to face off the chip", .{});

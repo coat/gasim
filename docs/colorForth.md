@@ -108,7 +108,15 @@ block, and `n bin` saves the code as a bin of another number. In an
 arrayForth 2 image, a yellow word that is nothing else leaves the number
 that the image's system names as it starts, in block 18 and the blocks it
 loads, such as `sram`, which block 202's `:sram [264 ];` names, the block
-of the SRAM cluster: `[sram load`. `spispeed`, `spicmd` and `spiadr`
+of the SRAM cluster: `[sram load`. Boot descriptors say what to load into
+nodes and how to start them, as arrayForth 3's do but with single
+numbers: `n +node` picks node n, and leaves F18 code, `bin /ram` loads all
+of its RAM, `a n bin /part` n words at a, in place of the loads before,
+`x /a`, `x /b`, `x /io` and `a /p` set its registers, and `v1 … vn n
+/stack` its stack, as block 266 describes the SRAM cluster's nodes:
+`[107 +node 1614 /ram down /b`. A program with them is set up as they
+say, by `gasim run` and by `L`, which sets the code compiled up first and
+leaves out a node whose bin was not saved. `spispeed`, `spicmd` and `spiadr`
 assemble the literals arrayForth 2's F18 compiler gives the SPI boot. gasim's directives, labels and the F18
 compiler's words come first, as block 202's `host` and `target` name
 blocks too, so `[host load`, in the IDE's blocks, still begins host
@@ -132,7 +140,8 @@ gasim has got to, with a warning if they differ. A `then` with nothing to
 resolve, as block 792's, whose `if` is in a comment, only aligns, as
 arrayForth 2 went past it, with a warning, which falls on the last `then`
 of a structure that has one too many. Between `host` and
-`target`, a red word defines a word for the host, which runs its green
+`target`, and outside F18 code, before a node in a load or after
+`+node`, a red word defines a word for the host, which runs its green
 words as yellow ones and pushes its numbers, such as `:r-l- ]$1f5 lit ;`,
 a macro for a literal, and one with no words before the next falls
 through into it, as `:head :pipe [1112 ]load ;`, until `empty` forgets
