@@ -581,6 +581,8 @@ const ColorFrame = struct {
     block: usize,
     token: usize = 0,
     lines: colorforth.Lines = .{},
+    /// the blocks loads or thru goes on to after this one, every other one
+    rest: u16 = 0,
 };
 
 /// a word defined for the host, between host and target, and the words and
@@ -596,7 +598,7 @@ const HostWord = struct {
 };
 
 /// the yellow words that colorForth runs on the host
-const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/" };
+const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, thru, fh, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/" };
 
 /// arrayForth 2's names for opcodes that arrayForth 3 renamed
 const colorforth_opcodes: std.StaticStringMap([]const u8) = .initComptime(.{
@@ -627,8 +629,9 @@ pub fn assemble(source: []const u8, diagnostic: *Diagnostic) Error!Program {
 /// what arrayForth leaves in erased RAM, a call to warm
 const erased: Word = 0x134a9;
 
-/// the most labels a bin can have, including its ROM's
-const max_labels = 64;
+/// the most labels a bin can have, including its ROM's, such as those of
+/// the eForth stack node, which arrayForth 2 compiles from two blocks
+const max_labels = 128;
 
 /// arrayForth 3's STREAMER, block 42 FH of its environment, block 1560
 const streamer_block = 1602;
@@ -671,6 +674,8 @@ const Bin = struct {
     /// assembled since the bin was last saved
     directive: Diagnostic = .{},
     changed: bool = false,
+    /// its own labels that reclaim forgot, the first this many
+    reclaimed: u8 = 0,
 
     fn init(node: u16, number: u32) Bin {
         var bin: Bin = .{ .node = node, .number = number, .builder = fresh() };
@@ -685,6 +690,19 @@ const Bin = struct {
 
     fn fresh() Builder {
         return .{ .mem = @splat(erased), .returns = true, .short_forward = true, .wrap = true };
+    }
+
+    /// a label that colorForth can still find, as reclaim forgets the
+    /// node's own labels before it, but not its ROM's
+    fn findColor(self: *const Bin, name: []const u8) ?u16 {
+        const own = self.rom_labels.len;
+        var i = self.label_count;
+        while (i > 0) {
+            i -= 1;
+            if (i >= own and i < own + self.reclaimed) continue;
+            if (sameLabel(self.labels[i].name, name)) return self.labels[i].value;
+        }
+        return null;
     }
 
     fn find(self: *const Bin, name: []const u8) ?u16 {
@@ -712,6 +730,11 @@ const SavedBin = struct {
     labels: []const Label,
     /// the colorForth block a session compiled it from
     block: ?u32 = null,
+    /// the times reclaim had forgotten colorForth's red words when it was
+    /// saved, which its labels are among until the next, but for the first
+    /// this many, which reclaim forgot before it was saved
+    reclaims: u16 = 0,
+    reclaimed: u8 = 0,
 };
 
 /// a word defined by NL, NDL, NC or CONSTANT
@@ -859,6 +882,14 @@ const Interpreter = struct {
     /// the block a session is compiling, which the bins and host words it
     /// makes come from
     color_load: ?u32 = null,
+    /// the times reclaim or empty has forgotten the red words of the nodes
+    /// compiled before, which arrayForth 2 keeps in its dictionary until then
+    color_reclaims: u16 = 0,
+    /// set by a yellow :, so that the next yellow word leaves its address
+    color_address: bool = false,
+    /// whether a node has begun in this load, after which yellow words
+    /// assemble code
+    color_node: bool = false,
     /// the names of colorForth labels, which are not kept as text in blocks
     names_text: [16 * 1024]u8 = undefined,
     names_len: u16 = 0,
@@ -1361,6 +1392,8 @@ const Interpreter = struct {
     /// the blocks it loads have been, and saves the bin being assembled
     fn loadColorForth(self: *Interpreter, block: i32) Error!void {
         defer self.color_line = null;
+        self.color_address = false;
+        self.color_node = false;
         try self.pushColorBlock(block);
         while (self.color_depth > 0) {
             const frame = &self.color_frames[self.color_depth - 1];
@@ -1368,7 +1401,7 @@ const Interpreter = struct {
                 self.colorDiagnostic(frame, "");
                 return error.NotSource;
             } orelse {
-                self.color_depth -= 1;
+                self.endColorBlock();
                 continue;
             };
             frame.token += 1;
@@ -1425,12 +1458,37 @@ const Interpreter = struct {
     }
 
     fn pushColorBlock(self: *Interpreter, block: i32) Error!void {
+        return self.pushColorBlocks(block, 1);
+    }
+
+    /// loads `count` blocks from `block`, skipping the blocks of comments
+    /// between them
+    fn pushColorBlocks(self: *Interpreter, block: i32, count: i32) Error!void {
+        if (count <= 0) return;
         const blocks = self.color_blocks orelse return error.NoSuchBlock;
-        if (block < 0 or block >= blocks.len / colorforth.block_size) return error.NoSuchBlock;
+        const last = @as(i64, block) + 2 * (@as(i64, count) - 1);
+        if (block < 0 or last >= blocks.len / colorforth.block_size) return error.NoSuchBlock;
         if (self.color_depth == self.color_frames.len) return error.LoadTooDeep;
-        const at: usize = @intCast(block);
-        self.color_frames[self.color_depth] = .{ .reader = .{ .block = blocks[at * colorforth.block_size ..][0..colorforth.block_size] }, .block = at };
+        self.color_frames[self.color_depth] = colorFrame(blocks, @intCast(block));
+        self.color_frames[self.color_depth].rest = @intCast(count - 1);
         self.color_depth += 1;
+    }
+
+    fn colorFrame(blocks: []const u8, at: usize) ColorFrame {
+        return .{ .reader = .{ .block = blocks[at * colorforth.block_size ..][0..colorforth.block_size] }, .block = at };
+    }
+
+    /// ends the block being loaded, going on to the next block that loads
+    /// or thru loads, if there is one
+    fn endColorBlock(self: *Interpreter) void {
+        const frame = &self.color_frames[self.color_depth - 1];
+        if (frame.rest == 0) {
+            self.color_depth -= 1;
+            return;
+        }
+        const rest = frame.rest - 1;
+        frame.* = colorFrame(self.color_blocks.?, frame.block + 2);
+        frame.rest = rest;
     }
 
     /// Interprets a colorForth token by its color: a red word labels the
@@ -1438,6 +1496,8 @@ const Interpreter = struct {
     /// on the host, as arrayForth 2 compiles F18 code. Gray numbers, which
     /// arrayForth 2 wrote where it had assembled to, are checked.
     fn colorToken(self: *Interpreter, token: colorforth.Token) Error!void {
+        // a yellow : leaves the address of the word right after it
+        if (token.tag != .execute) self.color_address = false;
         if (self.host_mode) return self.hostToken(token);
         switch (token.tag.color()) {
             .white, .blue, .none => {},
@@ -1503,6 +1563,25 @@ const Interpreter = struct {
         }
     }
 
+    /// a label of a node compiled before this one, searching the nodes in
+    /// the order they were first saved, the last first, as arrayForth 2
+    /// keeps red words in its dictionary until reclaim
+    fn earlierLabel(self: *Interpreter, text: []const u8) ?u16 {
+        const current = if (self.bin) |bin| bin.number else null;
+        var i = self.saved_count;
+        while (i > 0) {
+            i -= 1;
+            const saved = self.saved[i];
+            if (saved.reclaims != self.color_reclaims or saved.number == current) continue;
+            var j = saved.labels.len;
+            while (j > saved.reclaimed) {
+                j -= 1;
+                if (sameLabel(saved.labels[j].name, text)) return saved.labels[j].value;
+            }
+        }
+        return null;
+    }
+
     fn findHostWord(self: *Interpreter, text: []const u8) ?HostWord {
         var i = self.host_word_count;
         while (i > 0) {
@@ -1539,9 +1618,10 @@ const Interpreter = struct {
     /// arrayForth 2 name or arrayForth 3's, a control word, or a named
     /// literal or call
     fn greenWord(self: *Interpreter, text: []const u8) Error!void {
-        if (self.bin) |*bin| if (bin.find(text)) |value| return self.callOrPush(value, true);
+        if (self.bin) |*bin| if (bin.findColor(text)) |value| return self.callOrPush(value, true);
         if (self.findHostWord(text)) |word| return self.runHostWord(word);
         if (self.bin == null) return error.NoNode;
+        if (self.earlierLabel(text)) |value| return self.callOrPush(value, true);
         if (eql(text, ",")) return (try self.builder()).data(word18(try self.pop()));
         if (eql(text, "lit")) return (try self.builder()).literal(word18(try self.pop()));
         // words of arrayForth 3 that read a name after them, as colorForth
@@ -1559,18 +1639,38 @@ const Interpreter = struct {
 
     /// Runs a yellow word on the host, as colorForth does: arithmetic with
     /// colorForth's meanings, where - inverts and or is exclusive, the words
-    /// that place and load code, and labels, which push their address
+    /// that place and load code, and labels, which push their address. In
+    /// F18 code, once a node has begun and outside host words, arrayForth
+    /// 2 runs yellow words as it does green ones, so they assemble code
+    /// but for those words, and a yellow : before a label, a port or a
+    /// port call leaves its address.
     fn yellowWord(self: *Interpreter, text: []const u8) Error!void {
+        const address = self.color_address;
+        self.color_address = false;
         if (self.findHostWord(text)) |host_word| return self.runHostWord(host_word);
-        // a label's address, such as for lit, or a port's or port call's
-        if (self.bin) |*bin| if (bin.find(text)) |value| return self.push(value);
-        if (named_literals.get(text)) |value| return self.push(value);
-        if (named_calls.get(text)) |value| return self.push(value);
-        const word = std.meta.stringToEnum(ColorWord, text) orelse return error.UnknownWord;
+        const node_begun = self.color_node and self.bin != null;
+        const in_code = node_begun and !self.host_mode and self.host_depth == 0;
+        if (address or !in_code) {
+            if (self.bin) |*bin| if (bin.findColor(text)) |value| return self.push(value);
+            if (self.earlierLabel(text)) |value| return self.push(value);
+            if (named_literals.get(text)) |value| return self.push(value);
+            if (named_calls.get(text)) |value| return self.push(value);
+        }
+        // as host words assemble the words of the F18 compiler that are not
+        // the host's
+        const word = std.meta.stringToEnum(ColorWord, text) orelse {
+            if (node_begun) return self.greenWord(text);
+            return error.UnknownWord;
+        };
+        if (in_code) switch (word) {
+            .dup, .drop, .over, .@"-", .@"2*", .@"2/", .@"+", .@"and", .@"or" => return self.greenWord(text),
+            else => {},
+        };
         switch (word) {
             .node => {
                 if (self.bin) |bin| if (bin.changed) try self.save();
                 try self.node();
+                self.color_node = true;
             },
             // saves the node's code as a bin of another number, as
             // arrayForth 3's BIN does
@@ -1581,8 +1681,9 @@ const Interpreter = struct {
                 bin.number = @intCast(number_of_bin);
                 try self.save();
             },
-            // before a label, as labels push their address anyway
-            .@":" => {},
+            // the address of the label after it, which outside F18 code
+            // labels leave anyway
+            .@":" => self.color_address = true,
             .host => self.host_mode = true,
             .target => {
                 if (self.defining != null) return error.UnclosedDefinition;
@@ -1598,18 +1699,30 @@ const Interpreter = struct {
             // blocks of source alternate with blocks of comments
             .loads => {
                 const count = try self.pop();
-                const first = try self.pop();
-                if (count < 0 or count > self.color_frames.len) return error.LoadTooDeep;
-                var i = count;
-                while (i > 0) {
-                    i -= 1;
-                    try self.pushColorBlock(first +% 2 * i);
-                }
+                if (count < 0 or count > 0xffff) return error.NumberOutOfRange;
+                try self.pushColorBlocks(try self.pop(), count);
             },
-            .exit => self.color_depth -= 1,
+            // the blocks of source from one to another, which are an
+            // even number of blocks apart
+            .thru => {
+                const last = try self.pop();
+                const first = try self.pop();
+                const span = @as(i64, last) - first;
+                if (span < 0 or span > 0x1fffe) return error.NumberOutOfRange;
+                try self.pushColorBlocks(first, @intCast(@divTrunc(span, 2) + 1));
+            },
+            // a block counted from the one being loaded
+            .fh => {
+                if (self.color_depth == 0) return error.NoSuchBlock;
+                const block: i32 = @intCast(self.color_frames[self.color_depth - 1].block);
+                try self.push(block +% try self.pop());
+            },
+            .exit => if (self.color_depth > 0) self.endColorBlock(),
             // the host words defined since mark, which empty forgets
             .mark => self.host_mark = self.host_word_count,
             .empty, .reclaim => {
+                self.color_reclaims +%= 1;
+                if (self.bin) |*bin| bin.reclaimed = @intCast(bin.label_count - bin.rom_labels.len);
                 self.host_word_count = self.host_mark;
                 self.host_body_len = if (self.host_mark == 0) 0 else self.host_words[self.host_mark - 1].start + self.host_words[self.host_mark - 1].len;
             },
@@ -1914,7 +2027,7 @@ const Interpreter = struct {
             self.pool_len += @intCast(own.len);
             break :copy copy;
         };
-        const saved_bin: SavedBin = .{ .number = bin.number, .rom_labels = bin.rom_labels, .labels = labels, .block = self.color_load };
+        const saved_bin: SavedBin = .{ .number = bin.number, .rom_labels = bin.rom_labels, .labels = labels, .block = self.color_load, .reclaims = self.color_reclaims, .reclaimed = @min(bin.reclaimed, own.len) };
 
         bin.changed = false;
         if (again) |i| {
@@ -4181,10 +4294,10 @@ fn colorBlocks(comptime blocks: []const []const u8) ![blocks.len * colorforth.bl
         var color: colorforth.Color = .green;
         var red = false;
         var words = std.mem.tokenizeAny(u8, text, " \n");
-        while (words.next()) |word| {
-            if (word.len == 1 and std.mem.indexOfScalar(u8, ":[](^", word[0]) != null) {
-                red = word[0] == ':';
-                color = switch (word[0]) {
+        while (words.next()) |text_word| {
+            if (text_word.len == 1 and std.mem.indexOfScalar(u8, ":[](^", text_word[0]) != null) {
+                red = text_word[0] == ':';
+                color = switch (text_word[0]) {
                     '[' => .yellow,
                     '(' => .white,
                     '^' => .gray,
@@ -4192,6 +4305,8 @@ fn colorBlocks(comptime blocks: []const []const u8) ![blocks.len * colorforth.bl
                 };
                 continue;
             }
+            // \: is the word :, in the color before it
+            const word = if (std.mem.eql(u8, text_word, "\\:")) ":" else text_word;
             const negative = word[0] == '-' and word.len > 1;
             const digits = if (negative) word[1..] else word;
             const hex = digits[0] == '$';
@@ -4236,7 +4351,7 @@ test "colorForth assembles what arrayForth 3 does" {
     try expectSameAsColorForth(&.{
         \\[ 0 node 0 org
         \\: message [ 13 , 72 , 101 , 108 , 108 , 111 , 44 , 32 , 119 , 111 , 114 , 108 , 100 , 33 , 10 ,
-        \\: main ] up b! [ message ] lit a! @+ for @+ !b unext left b! @b
+        \\: main ] up b! [ \: message ] lit a! @+ for @+ !b unext left b! @b
     },
         \\ ASM[ # 0 NODE ERS  # 0 org
         \\ : message  # 13. , # 72. , # 101. , # 108. , # 108. , # 111. , # 44. , # 32. ,
@@ -4273,8 +4388,8 @@ test "colorForth loads blocks, and runs yellow words on the host" {
         ,
         \\
         ,
-        \\[ 5 node 0 org
-        \\: two ] [ 3 - 4 * 7 or 13 3 /mod + + ] lit ;
+        \\[ 3 - 4 * 7 or 13 3 /mod + + 5 node 0 org
+        \\: two ] lit ;
         \\[ exit ] nothing
         ,
         \\( comments
@@ -4293,6 +4408,141 @@ test "colorForth loads blocks, and runs yellow words on the host" {
     // code starts at main
     try expectEqual(6, assembled[1].node);
     try expectEqual(0x20, assembled[1].entry.local);
+}
+
+test "colorForth loads blocks with thru, and counts them from here with fh" {
+    // block 0 loads 2, 4 and 6 with thru, and 6 loads 8, 2 blocks from it,
+    // where exit ends the block, but not those thru goes on to
+    const bytes = try colorBlocks(&.{
+        \\[ 2 6 thru
+        ,
+        \\
+        ,
+        \\[ 1 node 0 org [ exit ] nothing
+        ,
+        \\
+        ,
+        \\[ 2 node 0 org
+        ,
+        \\
+        ,
+        \\[ 2 fh load
+        ,
+        \\
+        ,
+        \\[ 3 node 0 org
+    });
+    var programs: [4]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = (try assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic)).programs;
+    try expectEqual(3, assembled.len);
+    for (assembled, [_]u16{ 1, 2, 3 }) |program, node| try expectEqual(node, program.node);
+    try expectEqual(0, assembled[0].len);
+
+    const errors = try colorBlocks(&.{"[ 0 4 thru"});
+    try expectError(error.NoSuchBlock, assembleColorForth(&errors, &.{0}, &programs, &.{}, &diagnostic));
+}
+
+test "colorForth runs yellow words in F18 code as green ones, as arrayForth 2 does" {
+    // instruction words for a neighbour to run, laid down in yellow after
+    // @p, a yellow then, and a yellow : leaving the address of a label and
+    // of a port call, where a yellow port call assembles a call
+    try expectSameAsColorForth(&.{
+        \\[ 0 node 0 org
+        \\: go ] @p !b ; [ .. dup or a! .. ]
+        \\: main ] if drop [ then go ] [ \: go ] lit [ \: --l- ] lit [ ---u ] ;
+    },
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : go  @p !b ; .. dup xor a! ..
+        \\ : main  if drop then go  # go alit  # --l- alit  ---u ;
+        \\ >BIN ]ASM
+    );
+    // a yellow : leaves the address only of the word right after it, and
+    // before anything else does nothing
+    try expectSameAsColorForth(&.{
+        \\[ \: 0 node 0 org
+        \\: main ] [ \: 5 drop ] lit ;
+    },
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : main  drop 5. ;
+        \\ >BIN ]ASM
+    );
+    // before a node, and in host words, they still work out numbers
+    try expectSameAsColorForth(&.{
+        \\[ 3 dup + 1 + 0 node 0 org host
+        \\: twice ] dup + ; [ target
+        \\: main ] [ 4 twice ] lit lit ;
+    },
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : main  8. 7. ;
+        \\ >BIN ]ASM
+    );
+}
+
+test "colorForth's red words are found in the nodes after theirs, until reclaim" {
+    // node 1 calls the word of node 0 that it sends to it, as a cluster's
+    // nodes do, and node 2 cannot after reclaim
+    try expectSameAsColorForth(&.{
+        \\[ 0 node 0 org
+        \\: sleep ] dup ;
+        \\[ 1 node 0 org
+        \\: wake ] @p !b ; [ .. sleep ; .. ]
+    },
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : sleep  dup ;
+        \\ >BIN
+        \\ # 1 NODE ERS  # 0 org
+        \\ : wake  @p !b ; .. # 0 its sleep ; ..
+        \\ >BIN ]ASM
+    );
+    var programs: [4]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+    const bytes = try colorBlocks(&.{
+        \\[ 0 node 0 org
+        \\: sleep ] dup ;
+        \\[ reclaim 1 node 0 org
+        \\: wake ] sleep ;
+    });
+    try expectError(error.UnknownWord, assembleColorForth(&bytes, &.{0}, &programs, &.{}, &diagnostic));
+    try expectEqualStrings("sleep", diagnostic.token);
+    // nor can the node itself, but for its ROM's, which reclaim keeps
+    const same = try colorBlocks(&.{
+        \\[ 0 node 0 org
+        \\: sleep ] dup ;
+        \\[ reclaim
+        \\: wake ] warm sleep ;
+    });
+    try expectError(error.UnknownWord, assembleColorForth(&same, &.{0}, &programs, &.{}, &diagnostic));
+    try expectEqualStrings("sleep", diagnostic.token);
+}
+
+test "colorForth's yellow words assemble only once a node has begun in that load" {
+    var programs: [4]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+    // compiled again, 3 dup + is 6 again, where the node of the first
+    // compile is still open
+    const bytes = try colorBlocks(&.{
+        \\[ 3 dup + node 0 org
+        \\: main ] 1 ;
+    });
+    for (0..2) |_| try session.loadColorForth(&bytes, 0);
+    const assembled = session.assembled().programs;
+    try expectEqual(1, assembled.len);
+    try expectEqual(6, assembled[0].node);
+    try expectEqual(2, assembled[0].len);
+
+    // before a node in that load, a word not the host's is not assembled
+    const before = try colorBlocks(&.{"[ @p 1 node"});
+    try expectError(error.UnknownWord, session.loadColorForth(&before, 0));
+    try expectEqualStrings("@p", diagnostic.token);
+
+    // exit run by a host word after its block has ended
+    const exits = try colorBlocks(&.{"[ host : x ] exit exit ; [ target x"});
+    _ = try assembleColorForth(&exits, &.{0}, &programs, &.{}, &diagnostic);
 }
 
 test "colorForth errors say where they are" {
@@ -4338,7 +4588,7 @@ test "colorForth defines words for the host between host and target" {
         \\[ mark 7 node host
         \\: rl ] $1f5 lit ;
         \\: less ] -3 + ; [ target 0 org
-        \\: main ] rl b! [ 10 less ] lit [ right , ] ;
+        \\: main ] rl b! [ 10 less ] lit [ \: right , ] ;
         \\[ empty
     });
     var programs: [4]Program = undefined;
