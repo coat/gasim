@@ -121,7 +121,7 @@ fn put(writer: *Io.Writer, value: anytype) Error!void {
         },
         .bool => try writer.writeByte(@intFromBool(value)),
         .void => {},
-        .@"enum" => try put(writer, @intFromEnum(value)),
+        .@"enum" => try put(writer, @backingInt(value)),
         .optional => if (value) |v| {
             try writer.writeByte(1);
             try put(writer, v);
