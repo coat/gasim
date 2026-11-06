@@ -20,8 +20,6 @@ pub const Options = struct {
     forth: ?Forth = null,
     /// colorForth blocks to edit, of the file opened or a new one
     colorforth: ?ColorForth = null,
-    /// start on the chip, as a snapshot opens, rather than on those
-    show_chip: bool = false,
 };
 
 pub const ColorForth = struct {
@@ -402,11 +400,12 @@ const Tui = struct {
         if (options.forth == null) tui.shown.remove(.forth);
         // until asked for
         tui.shown.remove(.debug);
-        // a file of colorForth was opened to edit it
-        if (options.colorforth) |cf| {
-            if (!options.show_chip) tui.screen = .editor;
+        // a file of colorForth was opened to edit it; without one the editor
+        // waits on a new file for alt+6
+        if (options.colorforth) |cf| if (cf.path != null) {
+            tui.screen = .editor;
             if (cf.compressed) tui.message = "decompressed, and saved uncompressed";
-        }
+        };
         return tui;
     }
 
@@ -2785,6 +2784,27 @@ test "draws the chip, console and selected node" {
     var sent: [3]u8 = undefined;
     try expectEqual(3, try t.input.get(std.testing.io, &sent, 0));
     try expectEqualStrings("hi\n", &sent);
+}
+
+test "starts in the editor only with a file of colorForth" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [gasim.colorforth.block_size]u8 = @splat(0);
+    editor.open(&blocks, 1);
+    var options = t.tui.options;
+
+    options.colorforth = .{ .editor = editor, .path = null, .compressed = false };
+    var new_file: Tui = .init(std.testing.io, std.testing.allocator, &t.chip, options);
+    defer new_file.deinit();
+    try expectEqual(.chip, new_file.screen);
+
+    options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
+    var opened: Tui = .init(std.testing.io, std.testing.allocator, &t.chip, options);
+    defer opened.deinit();
+    try expectEqual(.editor, opened.screen);
 }
 
 test "the status bar keeps the help, and hints that fit whole" {
