@@ -592,19 +592,6 @@ fn load(self: *Editor, block: usize) void {
     self.read_only = !std.mem.eql(u8, bytes, &encoded);
 }
 
-/// the tag of a word typed in a color
-fn wordTag(color: Color) Tag {
-    return switch (color) {
-        .red => .define,
-        .yellow => .execute,
-        .green, .none, .gray => .compile,
-        .cyan => .macro,
-        .white => .comment,
-        .magenta => .variable,
-        .blue => .format,
-    };
-}
-
 /// the color of a token typed after one, or a red one first
 fn nextColor(before: ?Color) Color {
     const color = before orelse return .red;
@@ -617,23 +604,6 @@ fn nextColor(before: ?Color) Color {
 /// a blue cr, which ends a line
 fn cr() Token {
     return Token.word(.format, "cr") catch unreachable;
-}
-
-/// a number as typed: decimal digits or `$` and hex digits, after an
-/// optional `-`
-pub fn parseNumber(text: []const u8) ?struct { value: i32, hex: bool } {
-    var digits = text;
-    const negative = digits.len > 0 and digits[0] == '-';
-    if (negative) digits = digits[1..];
-    const hex = digits.len > 0 and digits[0] == '$';
-    if (hex) digits = digits[1..];
-    if (digits.len == 0) return null;
-    for (digits) |c| if (!std.ascii.isDigit(c) and !(hex and std.ascii.isHex(c))) return null;
-    const magnitude = std.fmt.parseInt(u32, digits, if (hex) 16 else 10) catch return null;
-    // hex numbers wrap, as colorForth shows cells, and decimal ones do not
-    if (!hex and magnitude > @as(u32, if (negative) 1 << 31 else (1 << 31) - 1)) return null;
-    const value: i32 = @bitCast(magnitude);
-    return .{ .value = if (negative) -%value else value, .hex = hex };
 }
 
 const Snapshot = struct {
@@ -668,6 +638,8 @@ const colorforth = @import("colorforth.zig");
 const block_size = colorforth.block_size;
 const cells_per_block = colorforth.cells_per_block;
 const Color = colorforth.Color;
+const parseNumber = colorforth.parseNumber;
+const wordTag = colorforth.wordTag;
 const Tag = colorforth.Tag;
 const Token = colorforth.Token;
 
