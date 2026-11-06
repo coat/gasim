@@ -2,8 +2,9 @@
 //! its nodes, the registers, stacks and memory of the selected node, the
 //! console, and arrayForth 3 typed at the chip with the words of its IDE.
 //! Panels can be hidden, zoomed to fill the screen, resized and scrolled.
-//! A screen of its own edits colorForth blocks, with vim-like keys, and
-//! opens and saves files of them from a command line as vim's.
+//! A screen of its own edits colorForth blocks, with vim-like keys. A
+//! command line as vim's, over either screen, opens and saves files of them,
+//! and takes the commands of the CLI that act on the chip.
 //! Help lists the keys over either screen.
 
 /// bytes of console output kept for display
@@ -153,6 +154,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "f, esc", "fill the screen with the panel, and go back" },
         .{ "< >", "narrow or widen the panels on the left" },
         .{ "- +", "shorten or lengthen the panel, or the map" },
+        .{ ":", "type a command, with tab to complete it" },
         .{ "q", "quit" },
     } },
     .{ "map", &.{
@@ -214,16 +216,22 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "f", "show or hide blue words, which lay out the block" },
         .{ "L", "compile the block and start the chip again with its code" },
         .{ "s, ctrl+s", "save, naming a new file first" },
-        .{ ":", "type a command: save, open or quit" },
+        .{ ":", "type a command, with tab to complete it" },
         .{ "q", "quit" },
     } },
-    .{ "the editor's commands", &.{
+    .{ "commands", &.{
+        .{ ":node 105", "select a node" },
+        .{ ":break 105:003", "set or clear a breakpoint" },
+        .{ ":watch 105:right", "watch a port, or stop: :read or :write after it for one" },
+        .{ ":step", "a step, or --count 4 of them, --node 105 of a node, --rounds 4" },
+        .{ ":run", "run, or stop after --max-steps 1000" },
+        .{ ":help text", "list only the keys with the text" },
+        .{ ":messages", "the last errors and stops, until the next key" },
         .{ ":w, :w file", "save, or save as the file, with :w! over another" },
         .{ ":e file, :e! file", "open a file of blocks, with ! though not saved" },
         .{ ":new, :new!", "start a new file of blocks, with ! though not saved" },
         .{ ":q, :q!, :wq", "quit, though not saved, or after saving" },
-        .{ ":messages", "the last errors and stops, until the next key" },
-        .{ "tab", "complete the name of a .cf file or a directory" },
+        .{ "tab", "complete a command or a .cf file, or show what a command takes" },
         .{ "esc", "done" },
     } },
     .{ "typing in the editor", &.{
@@ -275,6 +283,62 @@ const message_capacity = 256;
 
 /// failures kept for `:messages`
 const log_capacity = 32;
+
+/// steps a command may take at once, however many it asks for, as it takes
+/// them before the next frame
+const max_command_steps = 1_000_000;
+
+/// A command typed after `:`, under any of its names
+const Command = struct {
+    names: []const []const u8,
+    /// what it takes, for tab to show and for a mistake to quote
+    usage: []const u8,
+    /// that it takes a file, for tab to complete
+    file: bool = false,
+    /// returns false to quit
+    run: *const fn (*Tui, Typed) anyerror!bool,
+
+    fn named(name: []const u8) ?*const Command {
+        for (&Tui.commands) |*command| for (command.names) |other| {
+            if (std.mem.eql(u8, other, name)) return command;
+        };
+        return null;
+    }
+};
+
+/// A command as it was typed
+const Typed = struct {
+    command: *const Command,
+    name: []const u8,
+    /// that `!` follows its name
+    forced: bool,
+    argument: []const u8,
+};
+
+/// Writes as much of what is formatted as fits, ending with an ellipsis if
+/// that is not all of it
+fn printCut(buffer: []u8, comptime format: []const u8, args: anytype) []const u8 {
+    var writer: Io.Writer = .fixed(buffer);
+    writer.print(format, args) catch {
+        const ellipsis = "…";
+        var end = buffer.len - ellipsis.len;
+        // not through the middle of a character
+        while (end > 0 and buffer[end] & 0xc0 == 0x80) end -= 1;
+        @memcpy(buffer[end..][0..ellipsis.len], ellipsis);
+        return buffer[0 .. end + ellipsis.len];
+    };
+    return writer.buffered();
+}
+
+/// Draws text in `width` columns from `x`, with an ellipsis in the last of
+/// them if it is cut short, returning the columns it took
+fn drawCut(win: vaxis.Window, x: u16, width: u16, text: []const u8, style: vaxis.Style) u16 {
+    const full = win.gwidth(text);
+    const shown = if (full <= width) full else width -| 1;
+    _ = win.child(.{ .x_off = x, .width = shown }).printSegment(.{ .text = text, .style = style }, .{ .wrap = .none });
+    if (full > width) _ = win.printSegment(.{ .text = "…", .style = style }, .{ .col_offset = x + shown, .wrap = .none });
+    return @min(full, width);
+}
 
 /// What a message is, which says how it is shown
 const MessageKind = enum {
@@ -376,9 +440,12 @@ const Tui = struct {
     quit_confirmed: bool = false,
     /// the first row of the editor's block in view
     editor_scroll: u16 = 0,
-    /// a command typed in the editor after `:`, while there is one
+    /// a command typed after `:`, while there is one
     command: [256]u8 = undefined,
     command_len: ?u16 = null,
+    /// what tab found the command could go on with, until the next key
+    choices: ?[]const u8 = null,
+    choices_buffer: [message_capacity]u8 = undefined,
     /// the editor's file, once a command names it
     path_buffer: [Io.Dir.max_path_bytes]u8 = undefined,
     /// whether the editor shows blue words, which lay out the block
@@ -489,16 +556,7 @@ const Tui = struct {
 
     /// formats a message for the status bar, cutting short one too long
     fn printLasting(self: *Tui, comptime format: []const u8, args: anytype) []const u8 {
-        var writer: Io.Writer = .fixed(&self.message_buffer);
-        writer.print(format, args) catch {
-            const ellipsis = "…";
-            var end = self.message_buffer.len - ellipsis.len;
-            // not through the middle of a character
-            while (end > 0 and self.message_buffer[end] & 0xc0 == 0x80) end -= 1;
-            @memcpy(self.message_buffer[end..][0..ellipsis.len], ellipsis);
-            return self.message_buffer[0 .. end + ellipsis.len];
-        };
-        return writer.buffered();
+        return printCut(&self.message_buffer, format, args);
     }
 
     /// keeps room in the console's output for another `rounds_per_check`
@@ -526,6 +584,12 @@ const Tui = struct {
                     return;
                 }
                 if (self.chip.hit != null) return self.stop();
+                if (self.chip.steps >= self.chip.step_limit) {
+                    self.running = false;
+                    self.chip.step_limit = std.math.maxInt(u64);
+                    self.fail(self.printLasting("stopped at the limit, after {d} steps", .{self.chip.steps}));
+                    return;
+                }
             }
             if (Io.Timestamp.now(self.io, .awake).compare(.gte, deadline)) return;
         }
@@ -537,6 +601,7 @@ const Tui = struct {
         const hit = self.chip.hit orelse return;
         self.chip.hit = null;
         self.running = false;
+        self.chip.step_limit = std.math.maxInt(u64);
         self.select(hit.index());
         self.memory_scroll = null;
         self.fail(self.printLasting("{f}", .{hit.describe(self.chip.layout)}));
@@ -549,6 +614,7 @@ const Tui = struct {
         switch (event) {
             .key_press => |k| {
                 self.message = null;
+                self.choices = null;
                 self.quit_confirmed = self.quit_asked;
                 self.quit_asked = false;
                 // a key ends moving a border by tapping
@@ -557,6 +623,7 @@ const Tui = struct {
                     // so that the q it may ask for reaches the panels
                     self.log_open = false;
                     self.help_scroll = null;
+                    self.command_len = null;
                     return self.keepOnQuit();
                 }
                 if (self.log_open) {
@@ -565,6 +632,7 @@ const Tui = struct {
                 }
                 if (self.help_scroll != null) return self.helpKey(k);
                 if (k.matches(vaxis.Key.f1, .{})) return self.openHelp();
+                if (self.command_len != null) return self.commandKey(k);
                 // a digit with alt, or with ctrl where the terminal reports it,
                 // focuses a panel, even from the panels that take text
                 for ([_]Panel{ .map, .console, .node, .forth, .debug }, "12345") |panel, digit| {
@@ -590,7 +658,10 @@ const Tui = struct {
                 if (self.inserting and self.focus == .forth and try self.forthKey(k)) return true;
                 return self.key(k);
             },
-            .mouse => |m| self.mouse(m),
+            .mouse => |m| {
+                if (m.type == .press) self.choices = null;
+                self.mouse(m);
+            },
             .winsize => {},
         }
         return true;
@@ -605,6 +676,10 @@ const Tui = struct {
         }
         if (k.matches('q', .{})) return self.keepOnQuit();
         if (k.matches('?', .{})) return self.openHelp();
+        if (k.matches(':', .{})) {
+            self.startCommand("");
+            return true;
+        }
         // matching text would take tab for shift+tab too
         if (k.codepoint == vaxis.Key.tab) self.cycleFocus(if (k.mods.shift) -1 else 1);
         if (k.matches(vaxis.Key.escape, .{})) self.zoomed = null;
@@ -623,6 +698,8 @@ const Tui = struct {
         if (k.matches(' ', .{})) {
             if (!self.running) self.remember(.run);
             self.running = !self.running;
+            // a limit is for the run `:run` started
+            self.chip.step_limit = std.math.maxInt(u64);
             // a breakpoint reached while stepping is left behind
             self.chip.hit = null;
         }
@@ -713,8 +790,8 @@ const Tui = struct {
 
     /// the heading of the help for what has the focus, if not the first
     fn helpHeading(self: *Tui) ?[]const u8 {
+        if (self.command_len != null) return "commands";
         if (self.screen == .editor) {
-            if (self.command_len != null) return "the editor's commands";
             return if (self.options.colorforth.?.editor.mode == .insert) "typing in the editor" else "colorForth editor";
         }
         return switch (self.focus) {
@@ -979,7 +1056,6 @@ const Tui = struct {
         var chars: []const u8 = &.{};
         var named: ?Editor.Key = null;
         if (k.mods.alt or k.mods.super or k.mods.hyper or k.mods.meta) return true;
-        if (self.command_len != null) return self.commandKey(k);
         if (k.mods.ctrl) {
             if (k.codepoint < 0x80) named = .{ .code = .{ .char = @intCast(k.codepoint) }, .ctrl = true };
         } else if (editorKeyCode(k)) |code| {
@@ -1055,6 +1131,8 @@ const Tui = struct {
             return;
         };
         self.remember(.compile);
+        // counted from the steps of the chip that is replaced
+        self.chip.step_limit = std.math.maxInt(u64);
         self.chip.restore(&start);
         const assembled = forth.session.assembled();
         var nodes: usize = 0;
@@ -1179,15 +1257,15 @@ const Tui = struct {
         if (self.options.forth) |forth| forth.session.forgetColorForth();
     }
 
-    /// starts typing a command in the editor, with `text` typed
+    /// starts typing a command, with `text` typed
     fn startCommand(self: *Tui, text: []const u8) void {
         @memcpy(self.command[0..text.len], text);
         self.command_len = @intCast(text.len);
     }
 
-    /// Handles keys typed into the editor's command line, returning false to
-    /// quit
-    fn commandKey(self: *Tui, k: vaxis.Key) bool {
+    /// Handles keys typed into the command line, returning false to quit
+    fn commandKey(self: *Tui, k: vaxis.Key) !bool {
+        if (k.mods.alt or k.mods.super or k.mods.hyper or k.mods.meta) return true;
         const len = &self.command_len.?;
         if (k.matches(vaxis.Key.escape, .{})) {
             self.command_len = null;
@@ -1199,7 +1277,7 @@ const Tui = struct {
             self.command_len = null;
             return self.runCommand(command);
         } else if (k.codepoint == vaxis.Key.tab) {
-            if (!k.mods.shift) self.completePath();
+            if (!k.mods.shift) self.completeCommand();
         } else if (k.text) |text| {
             for (text) |byte| if (len.* < self.command.len and byte >= ' ' and byte < 0x7f) {
                 self.command[len.*] = byte;
@@ -1209,68 +1287,299 @@ const Tui = struct {
         return true;
     }
 
-    /// Runs a command typed in the editor, as vim's: `w` saves, as a file if
-    /// one is named, `e` opens a file, `new` starts a new one, and `q` quits,
-    /// with `!` letting unsaved blocks go or saving over another file, and
-    /// `wq` saves and quits, as `x` does when there is anything to save
-    fn runCommand(self: *Tui, line: []const u8) bool {
+    /// the commands, which act on the blocks of the editor and on the chip,
+    /// with the names and arguments of those of the CLI
+    const commands = [_]Command{
+        .{ .names = &.{ "w", "write" }, .usage = "w[!] [file]", .file = true, .run = commandWrite },
+        .{ .names = &.{ "wq", "x" }, .usage = "wq[!] [file]", .file = true, .run = commandWrite },
+        .{ .names = &.{ "q", "quit" }, .usage = "q[!]", .run = commandQuit },
+        .{ .names = &.{ "e", "edit" }, .usage = "e[!] <file>", .file = true, .run = commandEdit },
+        .{ .names = &.{ "new", "enew" }, .usage = "new[!]", .run = commandEdit },
+        .{ .names = &.{"messages"}, .usage = "messages", .run = commandMessages },
+        .{ .names = &.{"help"}, .usage = "help [text]", .run = commandHelp },
+        .{ .names = &.{"node"}, .usage = "node <node>", .run = commandNode },
+        .{ .names = &.{"break"}, .usage = "break <node>:<address>", .run = commandBreak },
+        .{ .names = &.{"watch"}, .usage = "watch <node>:<port>[:read|:write]", .run = commandWatch },
+        .{ .names = &.{"step"}, .usage = "step [--node <node>] [--count <n> | --rounds <n>]", .run = commandStep },
+        .{ .names = &.{"run"}, .usage = "run [--max-steps <n>]", .run = commandRun },
+    };
+
+    /// Runs a command, returning false to quit
+    fn runCommand(self: *Tui, line: []const u8) !bool {
         const trimmed = std.mem.trim(u8, line, " ");
         const end = for (trimmed, 0..) |c, i| {
             if (!std.ascii.isAlphabetic(c)) break i;
         } else trimmed.len;
-        const command = trimmed[0..end];
+        const word = trimmed[0..end];
         const forced = end < trimmed.len and trimmed[end] == '!';
-        const argument = std.mem.trim(u8, trimmed[end + @intFromBool(forced) ..], " ");
-        const cf = self.options.colorforth.?;
-        const is = struct {
-            fn is(a: []const u8, b: []const u8) bool {
-                return std.mem.eql(u8, a, b);
-            }
-        }.is;
+        if (word.len == 0) return true;
+        const command = Command.named(word) orelse {
+            self.fail(self.printLasting("no command {s}: tab lists them", .{word}));
+            return true;
+        };
+        return command.run(self, .{
+            .command = command,
+            .name = word,
+            .forced = forced,
+            .argument = std.mem.trim(u8, trimmed[end + @intFromBool(forced) ..], " "),
+        });
+    }
 
-        if (command.len == 0) return true;
-        if (is(command, "w") or is(command, "write") or is(command, "wq") or is(command, "x")) {
-            const quitting = !is(command, "w") and !is(command, "write");
-            if (is(command, "x") and argument.len == 0 and !cf.editor.unsaved()) return false;
-            const path = if (argument.len > 0) argument else cf.path orelse {
-                // and quits once it is named
-                self.startCommand(if (quitting) "wq " else "w ");
-                self.say("name the new file");
+    /// says how a command is used, returning true to go on
+    fn commandUsage(self: *Tui, typed: Typed) bool {
+        self.fail(self.printLasting("use :{s}", .{typed.command.usage}));
+        return true;
+    }
+
+    /// `w` saves, as a file if one is named, with `!` over another file, and
+    /// `wq` saves and quits, as `x` does when there is anything to save
+    fn commandWrite(self: *Tui, typed: Typed) !bool {
+        const cf = self.options.colorforth.?;
+        const is = std.mem.eql;
+        // a word left being typed, which leaving the editor does not finish
+        cf.editor.escape() catch |err| {
+            self.fail(Editor.describe(err));
+            return true;
+        };
+        const quitting = is(u8, typed.command.names[0], "wq");
+        if (is(u8, typed.name, "x") and typed.argument.len == 0 and !cf.editor.unsaved()) return false;
+        const path = if (typed.argument.len > 0) typed.argument else cf.path orelse {
+            // and quits once it is named
+            self.startCommand(if (quitting) "wq " else "w ");
+            self.say("name the new file");
+            return true;
+        };
+        const another = cf.path == null or !is(u8, cf.path.?, path);
+        if (another and !typed.forced) if (Io.Dir.cwd().access(self.io, path, .{})) |_| {
+            self.fail(self.printLasting("{s} exists: :{s}! saves over it", .{ std.fs.path.basename(path), typed.name }));
+            return true;
+        } else |_| {};
+        if (!self.save(path)) return true;
+        return !quitting;
+    }
+
+    fn commandQuit(self: *Tui, typed: Typed) !bool {
+        const cf = self.options.colorforth orelse return false;
+        // as in vim, rather than asking twice
+        if (typed.forced or !cf.editor.unsaved()) return false;
+        self.fail("blocks are not saved: :w saves them, and :q! quits");
+        return true;
+    }
+
+    /// `e` opens a file of blocks, and `new` starts one, with `!` though the
+    /// blocks are not saved
+    fn commandEdit(self: *Tui, typed: Typed) !bool {
+        const cf = self.options.colorforth.?;
+        const opening = typed.command.file;
+        if (opening and typed.argument.len == 0) {
+            self.say("name the file to open, as :e blocks.cf");
+            return true;
+        }
+        if (!typed.forced and cf.editor.unsaved()) {
+            self.fail(self.printLasting("blocks are not saved: :w saves them, and :{s}! lets them go", .{typed.name}));
+            return true;
+        }
+        if (opening) self.open(typed.argument) else self.newFile();
+        return true;
+    }
+
+    fn commandMessages(self: *Tui, _: Typed) !bool {
+        if (self.log_count > 0) self.log_open = true else self.say("no errors or stops yet");
+        return true;
+    }
+
+    /// shows the help, listing only the keys with the text given
+    fn commandHelp(self: *Tui, typed: Typed) !bool {
+        _ = self.openHelp();
+        const len = @min(typed.argument.len, self.help_filter.len);
+        if (len == 0) return true;
+        @memcpy(self.help_filter[0..len], typed.argument[0..len]);
+        self.help_filter_len = @intCast(len);
+        self.help_scroll = 0;
+        return true;
+    }
+
+    /// the index of a node, saying so if the chip has none by that number
+    fn nodeIndex(self: *Tui, number: u16) ?u16 {
+        return self.chip.layout.index(number) orelse {
+            self.fail(self.printLasting("no node {f} on this chip", .{Chip.nodeName(number)}));
+            return null;
+        };
+    }
+
+    fn commandNode(self: *Tui, typed: Typed) !bool {
+        const number = Chip.parseNode(typed.argument) catch return self.commandUsage(typed);
+        const index = self.nodeIndex(number) orelse return true;
+        self.select(index);
+        self.memory_scroll = null;
+        return true;
+    }
+
+    /// sets a breakpoint, or clears it, as `b` does
+    fn commandBreak(self: *Tui, typed: Typed) !bool {
+        const parsed = cli_options.parseBreak(typed.argument) catch |err| {
+            self.fail(cli_options.breakErrorText(err));
+            return true;
+        };
+        const index = self.nodeIndex(parsed.node) orelse return true;
+        const set = self.chip.breakpoints.toggle(.init(index, parsed.address)) catch {
+            self.fail("there are too many breakpoints");
+            return true;
+        };
+        self.say(self.printLasting("{s} {f}:{x:0>3}", .{ if (set) "breakpoint at" else "no breakpoint at", Chip.nodeName(parsed.node), parsed.address }));
+        return true;
+    }
+
+    /// watches a port, for reads, writes or both, or stops if they all are,
+    /// as `w` does
+    fn commandWatch(self: *Tui, typed: Typed) !bool {
+        const parsed = cli_options.parseWatch(typed.argument) catch |err| {
+            self.fail(cli_options.watchErrorText(err));
+            return true;
+        };
+        const index = self.nodeIndex(parsed.node) orelse return true;
+        const read: Chip.Watch = .{ .index = index, .direction = parsed.direction, .write = false };
+        const write: Chip.Watch = .{ .index = index, .direction = parsed.direction, .write = true };
+        const watched = (!parsed.read or self.chip.watches.contains(read)) and (!parsed.write or self.chip.watches.contains(write));
+        for ([_]Chip.Watch{ read, write }, [_]bool{ parsed.read, parsed.write }) |watch, wanted| {
+            if (wanted and self.chip.watches.contains(watch) == watched) _ = self.chip.watches.toggle(watch) catch {
+                self.fail("there are too many watches");
                 return true;
             };
-            const another = cf.path == null or !std.mem.eql(u8, cf.path.?, path);
-            if (another and !forced) if (Io.Dir.cwd().access(self.io, path, .{})) |_| {
-                self.fail(self.printLasting("{s} exists: :{s}! saves over it", .{ std.fs.path.basename(path), command }));
-                return true;
-            } else |_| {};
-            if (!self.save(path)) return true;
-            return !quitting;
         }
-        if (is(command, "q") or is(command, "quit")) {
-            // as in vim, rather than asking twice
-            if (forced or !cf.editor.unsaved()) return false;
-            self.fail("blocks are not saved: :w saves them, and :q! quits");
-            return true;
-        }
-        if (is(command, "e") or is(command, "edit") or is(command, "new") or is(command, "enew")) {
-            const opening = is(command, "e") or is(command, "edit");
-            if (opening and argument.len == 0) {
-                self.say("name the file to open, as :e blocks.cf");
-                return true;
-            }
-            if (!forced and cf.editor.unsaved()) {
-                self.fail(self.printLasting("blocks are not saved: :w saves them, and :{s}! lets them go", .{command}));
-                return true;
-            }
-            if (opening) self.open(argument) else self.newFile();
-            return true;
-        }
-        if (is(command, "messages")) {
-            if (self.log_count > 0) self.log_open = true else self.say("no errors or stops yet");
-            return true;
-        }
-        self.fail(self.printLasting("no command {s}: :w, :e, :new, :messages or :q", .{command}));
+        const which = if (parsed.read and parsed.write) "" else if (parsed.read) " reads" else " writes";
+        self.say(self.printLasting("{s} {f} {t}{s}", .{ if (watched) "not watching" else "watching", Chip.nodeName(parsed.node), parsed.direction, which }));
         return true;
+    }
+
+    /// Takes steps as `gasim step` does, as many as it is told, and as the
+    /// keys do, up to a stop
+    fn commandStep(self: *Tui, typed: Typed) !bool {
+        if (self.running) {
+            self.say("pause with space to step");
+            return true;
+        }
+        var node: ?u16 = null;
+        var count: ?usize = null;
+        var rounds: ?usize = null;
+        var words = std.mem.tokenizeScalar(u8, typed.argument, ' ');
+        while (words.next()) |word| {
+            const is = std.mem.eql;
+            const value = words.next() orelse return self.commandUsage(typed);
+            if (is(u8, word, "--node")) {
+                const number = Chip.parseNode(value) catch return self.commandUsage(typed);
+                node = self.nodeIndex(number) orelse return true;
+            } else if (is(u8, word, "--count")) {
+                count = std.fmt.parseInt(usize, value, 10) catch return self.commandUsage(typed);
+            } else if (is(u8, word, "--rounds")) {
+                rounds = std.fmt.parseInt(usize, value, 10) catch return self.commandUsage(typed);
+            } else return self.commandUsage(typed);
+        }
+        if (count != null and rounds != null) return self.commandUsage(typed);
+        if (rounds != null and node != null) return self.commandUsage(typed);
+        const times = rounds orelse count orelse 1;
+
+        self.remember(if (rounds != null) .round else if (node != null) .node else .step);
+        self.chip.hit = null;
+        var last = node;
+        var taken: usize = 0;
+        var waiting = false;
+        const first_step = self.chip.steps;
+        for (0..times) |_| {
+            self.trimOutput();
+            if (rounds != null) {
+                if (!try self.chip.advance()) waiting = true;
+            } else if (node) |i| {
+                _ = try self.chip.service();
+                self.chip.stepNode(i);
+            } else if (try self.chip.stepNext()) |i| {
+                last = i;
+            } else waiting = true;
+            if (waiting) break;
+            taken += 1;
+            if (self.chip.hit != null) break;
+            if (taken >= max_command_steps or self.chip.steps - first_step >= max_command_steps) break;
+        }
+        if (last) |i| self.select(i);
+        self.memory_scroll = null;
+        if (self.chip.hit != null) {
+            self.stop();
+        } else if (waiting and taken == 0) {
+            self.say("every node is waiting");
+        } else if (node != null and self.chip.nodes[node.?].suspended) {
+            self.say(self.printLasting("node {f} is still waiting", .{Chip.nodeName(self.chip.layout.nodeNumber(node.?))}));
+        } else {
+            self.say(self.printLasting("took {d} of {d} {s}", .{ taken, times, if (rounds != null) "rounds" else "steps" }));
+        }
+        return true;
+    }
+
+    /// Runs the chip as space does, stopping after the steps it is told
+    fn commandRun(self: *Tui, typed: Typed) !bool {
+        var limit: u64 = std.math.maxInt(u64);
+        if (typed.argument.len > 0) {
+            var words = std.mem.tokenizeScalar(u8, typed.argument, ' ');
+            if (!std.mem.eql(u8, words.next().?, "--max-steps")) return self.commandUsage(typed);
+            const value = words.next() orelse return self.commandUsage(typed);
+            if (words.next() != null) return self.commandUsage(typed);
+            const steps = std.fmt.parseInt(u64, value, 10) catch return self.commandUsage(typed);
+            limit = self.chip.steps +| steps;
+        }
+        if (!self.running) self.remember(.run);
+        self.running = true;
+        self.chip.hit = null;
+        self.chip.step_limit = limit;
+        return true;
+    }
+
+    /// Completes what is typed at the command line: a command's name, or
+    /// after one the file it takes, or shows what else it takes
+    fn completeCommand(self: *Tui) void {
+        // spaces before the name, which running it would ignore
+        const typed = self.command[0..self.command_len.?];
+        const line = std.mem.trimStart(u8, typed, " ");
+        std.mem.copyForwards(u8, &self.command, line);
+        self.command_len = @intCast(line.len);
+        const text = self.command[0..line.len];
+        const end = std.mem.findAny(u8, text, " !") orelse return self.completeName(text);
+        const word = text[0..end];
+        const command = Command.named(word) orelse {
+            self.say(self.printLasting("no command {s}: tab lists them", .{word}));
+            return;
+        };
+        if (std.mem.findScalar(u8, text, ' ') == null) {
+            self.choices = printCut(&self.choices_buffer, ":{s}", .{command.usage});
+            return;
+        }
+        if (command.file) return self.completePath();
+        self.choices = printCut(&self.choices_buffer, ":{s}", .{command.usage});
+    }
+
+    /// Completes the name of a command, as far as those it could be agree,
+    /// or lists them when that adds nothing
+    fn completeName(self: *Tui, partial: []const u8) void {
+        var listed_buffer: [message_capacity + 1]u8 = undefined;
+        var listed: Io.Writer = .fixed(&listed_buffer);
+        var common: []const u8 = "";
+        var found: usize = 0;
+        for (&commands) |*command| for (command.names) |word| {
+            if (!std.mem.startsWith(u8, word, partial)) continue;
+            common = if (found == 0) word else common[0 .. std.mem.indexOfDiff(u8, common, word) orelse common.len];
+            found += 1;
+            listed.print("{s} ", .{word}) catch {};
+        };
+        if (found == 0) {
+            self.say("no command starts with that");
+            return;
+        }
+        const end = common.len + @intFromBool(found == 1);
+        if (common.len > partial.len or found == 1) {
+            @memcpy(self.command[0..common.len], common);
+            if (found == 1) self.command[common.len] = ' ';
+            self.command_len = @intCast(end);
+            return;
+        }
+        self.choices = printCut(&self.choices_buffer, "{s}", .{std.mem.trimEnd(u8, listed.buffered(), " ")});
     }
 
     /// Completes the name of the file being typed in a command, as far as the
@@ -1278,10 +1587,7 @@ const Tui = struct {
     /// adds nothing
     fn completePath(self: *Tui) void {
         const line = self.command[0..self.command_len.?];
-        const start = if (std.mem.findScalarLast(u8, line, ' ')) |space| space + 1 else {
-            self.say("complete a file's name after :e or :w");
-            return;
-        };
+        const start = std.mem.findScalarLast(u8, line, ' ').? + 1;
         const typed = line[start..];
         const slash = if (std.mem.findScalarLast(u8, typed, '/')) |i| i + 1 else 0;
         const partial = typed[slash..];
@@ -1333,7 +1639,7 @@ const Tui = struct {
             self.command_len = @intCast(start + slash + common_len);
             return;
         }
-        self.say(self.printLasting("{s}", .{std.mem.trimEnd(u8, listed.buffered(), " ")}));
+        self.choices = printCut(&self.choices_buffer, "{s}", .{std.mem.trimEnd(u8, listed.buffered(), " ")});
     }
 
     /// Handles keys typed into the console, returning false for keys it
@@ -1897,6 +2203,11 @@ const Tui = struct {
         // over either screen
         defer if (self.help_scroll != null) self.drawHelp(win);
         defer if (self.log_open) self.drawLog(win);
+        defer if (self.choices) |choices| {
+            const row = win.child(.{ .y_off = win.height - 2, .height = 1 });
+            row.clear();
+            _ = drawCut(row, 0, win.width, choices, colors.label);
+        };
         if (self.screen == .editor) return self.drawEditor(win);
 
         const layout = self.chip.layout;
@@ -2520,22 +2831,11 @@ const Tui = struct {
 
     fn drawEditorStatus(self: *Tui, win: vaxis.Window) void {
         const editor = self.options.colorforth.?.editor;
-        if (self.command_len) |len| {
-            const typed = self.command[0..len];
-            // the end of a long command, to keep the cursor in view
-            const shown = typed[typed.len -| (win.width -| 2)..];
-            _ = win.print(&.{
-                .{ .text = ":" },
-                .{ .text = shown },
-            }, .{ .wrap = .none });
-            if (self.message) |message| _ = win.printSegment(.{ .text = message, .style = self.messageStyle() }, .{ .col_offset = @intCast(@min(shown.len + 3, win.width)), .wrap = .none });
-            win.showCursor(@intCast(@min(shown.len + 1, win.width -| 1)), 0);
-            return;
-        }
+        if (self.command_len != null) return self.drawCommand(win);
         const hints: []const Hint = if (editor.mode == .insert)
             &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "esc", "done" }, .{ "ctrl+r y g w t v b", "color" } }
         else
-            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ ":", "w e new" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
+            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ ":", "command" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
         var state: [3]vaxis.Segment = undefined;
         var len: usize = 0;
         state[len] = if (editor.mode == .insert)
@@ -2550,6 +2850,20 @@ const Tui = struct {
             len += 1;
         }
         self.drawBar(win, state[0..len], hints, if (editor.mode == .insert) "F1" else "?");
+    }
+
+    /// Draws the command line in place of the bar
+    fn drawCommand(self: *Tui, win: vaxis.Window) void {
+        const typed = self.command[0..self.command_len.?];
+        // the end of a long command, to keep the cursor in view
+        const shown = typed[typed.len -| (win.width -| 2)..];
+        _ = win.print(&.{
+            .{ .text = ":" },
+            .{ .text = shown },
+        }, .{ .wrap = .none });
+        const start: u16 = @intCast(@min(shown.len + 3, win.width));
+        if (self.message) |message| _ = drawCut(win, start, win.width - start, message, self.messageStyle());
+        win.showCursor(@intCast(@min(shown.len + 1, win.width -| 1)), 0);
     }
 
     fn messageStyle(self: *const Tui) vaxis.Style {
@@ -2574,12 +2888,7 @@ const Tui = struct {
 
         // with a space on each side, and an ellipsis where it is cut short
         if (self.message) |message| if (end - x > 3) {
-            const room = end - x - 2;
-            const width = win.gwidth(message);
-            const shown = if (width <= room) width else room - 1;
-            _ = win.child(.{ .x_off = x + 1, .width = shown }).printSegment(.{ .text = message, .style = self.messageStyle() }, .{ .wrap = .none });
-            if (width > room) _ = win.printSegment(.{ .text = "…", .style = self.messageStyle() }, .{ .col_offset = x + 1 + shown, .wrap = .none });
-            x += @min(width, room) + 2;
+            x += drawCut(win, x + 1, end - x - 2, message, self.messageStyle()) + 2;
         };
 
         // what the next key does matters more than the hints
@@ -2597,6 +2906,7 @@ const Tui = struct {
     }
 
     fn drawStatus(self: *Tui, win: vaxis.Window) void {
+        if (self.command_len != null) return self.drawCommand(win);
         // reversed, so the text takes the theme's background colour
         const state: vaxis.Segment = if (!self.running)
             .{ .text = " paused ", .style = .{ .reverse = true, .bold = true } }
@@ -2606,16 +2916,16 @@ const Tui = struct {
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
         const panels: Hint = .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" };
         const hints: []const Hint = switch (self.focus) {
-            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "tab", "next" }, .{ "f", "zoom" }, .{ "t", "tiles" }, panels, .{ "S", "round" }, .{ "q", "quit" } },
+            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "tab", "next" }, .{ ":", "command" }, .{ "f", "zoom" }, .{ "t", "tiles" }, panels, .{ "S", "round" }, .{ "q", "quit" } },
             .console => if (self.inserting)
                 &.{ .{ "enter", "send" }, .{ "esc", "done" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" } }
             else
-                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "tab", "next" }, .{ "f", "zoom" }, panels, .{ "q", "quit" } },
+                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "tab", "next" }, .{ "f", "zoom" }, panels, .{ ":", "command" }, .{ "q", "quit" } },
             .forth => if (self.inserting)
                 &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "esc", "done" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" } }
             else
-                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "tab", "next" }, .{ "f", "zoom" }, .{ "1-5", "panels" }, .{ "q", "quit" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "up/down", "move" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "g", "follow" }, .{ "tab", "next" }, .{ "f", "zoom" } },
+                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "tab", "next" }, .{ "f", "zoom" }, .{ "1-5", "panels" }, .{ ":", "command" }, .{ "q", "quit" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "up/down", "move" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "g", "follow" }, .{ "tab", "next" }, .{ ":", "command" }, .{ "f", "zoom" } },
             .debug => switch (self.debug) {
                 .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "w", "save trace.txt" }, .{ "c", "clear" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" } },
                 .breakpoints => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "x", "remove" }, .{ "X", "remove all" }, .{ "space", "run" }, .{ "tab", "next" } },
@@ -2883,6 +3193,13 @@ const TestTui = struct {
         self.draw();
     }
 
+    /// types a command, and enter
+    fn command(self: *TestTui, line: []const u8) !void {
+        try self.press(':');
+        for (line) |c| try self.press(c);
+        try self.press(vaxis.Key.enter);
+    }
+
     fn pressWith(self: *TestTui, codepoint: u21, mods: vaxis.Key.Modifiers) !void {
         try expect(try self.tui.handle(.{ .key_press = .{ .codepoint = codepoint, .mods = mods } }));
         self.draw();
@@ -3057,6 +3374,270 @@ test "a message's kind says how it is shown" {
     try expectEqual(0, t.chip.watches.len);
 }
 
+test "commands act on the chip from any panel" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init(": loop loop ;");
+    defer t.deinit();
+    t.draw();
+
+    // the console takes : as a key, until typing into it
+    try t.press(vaxis.Key.tab);
+    try t.command("node 1");
+    try expectEqual(t.chip.layout.index(1).?, t.tui.selected);
+    try t.press('i');
+    try t.press(':');
+    try expectEqual(null, t.tui.command_len);
+    try expectEqualStrings(":", t.tui.input[0..t.tui.input_len]);
+    try t.press(vaxis.Key.escape);
+
+    // and shows what is typed in place of the bar
+    try t.press(':');
+    for ("node") |c| try t.press(c);
+    try expect(try t.shows(29, ":node"));
+    try expect(!try t.shows(29, "paused"));
+    try t.press(vaxis.Key.escape);
+    try expect(try t.shows(29, "paused"));
+
+    try t.command("node nonsense");
+    try expect(try t.shows(29, "use :node <node>"));
+    try t.command("node 999");
+    try expectEqualStrings("no node 999 on this chip", t.tui.message.?);
+    try expectEqual(.failure, t.tui.message_kind);
+
+    // breakpoints as the CLI names them, set and cleared
+    try t.command("break 1:003");
+    try expect(t.chip.breakpoints.contains(.init(t.chip.layout.index(1).?, 3)));
+    try expectEqualStrings("breakpoint at 001:003", t.tui.message.?);
+    try t.command("break 1:003");
+    try expectEqual(0, t.chip.breakpoints.len);
+    try t.command("break 1");
+    try expectEqualStrings("expected for example 105:003", t.tui.message.?);
+
+    // and watches, of reads and writes, or of either
+    const index = t.chip.layout.index(1).?;
+    const read: Chip.Watch = .{ .index = index, .direction = .right, .write = false };
+    try t.command("watch 1:right");
+    try expectEqual(2, t.chip.watches.len);
+    try t.command("watch 1:right:read");
+    try expect(!t.chip.watches.contains(read));
+    try expectEqual(1, t.chip.watches.len);
+    // adding what is missing, rather than turning over each
+    try t.command("watch 1:right");
+    try expectEqual(2, t.chip.watches.len);
+    try expectEqualStrings("watching 001 right", t.tui.message.?);
+    try t.command("watch 1:right");
+    try expectEqual(0, t.chip.watches.len);
+    try t.command("watch 1:sideways");
+    try expectEqualStrings("expected right, down, left or up", t.tui.message.?);
+
+    try t.command("nonsense");
+    try expectEqualStrings("no command nonsense: tab lists them", t.tui.message.?);
+
+    // :help lists the keys with what it is given
+    try t.command("help breakpoint");
+    try expect(try t.shows(1, "node"));
+    try expectEqual("breakpoint".len, t.tui.help_filter_len);
+    try t.press('q');
+    try t.command("help");
+    try expectEqual(0, t.tui.help_filter_len);
+    try t.press('q');
+
+    // with no blocks to lose, :q quits
+    try t.press(':');
+    try t.press('q');
+    try expect(!try t.tui.handle(.{ .key_press = .{ .codepoint = vaxis.Key.enter } }));
+}
+
+test ":step and :run take steps as the CLI does" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("begin dup drop again");
+    defer t.deinit();
+    t.draw();
+
+    try t.command("step");
+    const one = t.chip.steps;
+    try expect(one > 0);
+    try t.command("step --count 4");
+    try expect(t.chip.steps > one);
+    const node = t.chip.steps;
+    try t.command("step --node 0 --count 2");
+    try expectEqual(0, t.tui.selected);
+    try expect(t.chip.steps > node);
+    const round = t.chip.steps;
+    try t.command("step --rounds 2");
+    try expect(t.chip.steps > round);
+
+    // going back undoes them all at once
+    try t.press('z');
+    try expectEqual(round, t.chip.steps);
+
+    const before = t.chip.steps;
+    for ([_][]const u8{ "step --count", "step --count many", "step --sideways 2", "step --count 1 --rounds 1", "step --node 0 --rounds 1" }) |line| {
+        try t.command(line);
+        try expect(std.mem.startsWith(u8, t.tui.message.?, "use :step"));
+    }
+    try t.command("step --node 999");
+    try expectEqualStrings("no node 999 on this chip", t.tui.message.?);
+    try expectEqual(before, t.chip.steps);
+
+    // however many it asks for, it takes no more than a frame can bear
+    try t.command("step --rounds 99999999");
+    try expect(t.chip.steps - before < max_command_steps + t.chip.nodes.len);
+    try expect(std.mem.endsWith(u8, t.tui.message.?, "of 99999999 rounds"));
+    try t.press('z');
+    try expectEqual(before, t.chip.steps);
+
+    // a breakpoint ends them
+    try t.command("break 0:000");
+    try t.command("step --count 10000");
+    try expectEqualStrings("node 000 reached 000", t.tui.message.?);
+    try expect(t.chip.steps < 10000);
+    try t.command("break 0:000");
+
+    // a stop ends the limit of a run
+    try t.command("break 0:000");
+    try t.command("run --max-steps 100000");
+    try t.tui.run();
+    try expect(!t.tui.running);
+    try expectEqual(std.math.maxInt(u64), t.chip.step_limit);
+    try t.command("break 0:000");
+
+    // :run stops at a limit, and only the run it started
+    try t.command("run --max-steps 50");
+    try expect(t.tui.running);
+    const start = t.chip.steps;
+    try t.tui.run();
+    try expect(!t.tui.running);
+    try expect(t.chip.steps >= start + 50 - 1);
+    try expect(std.mem.startsWith(u8, t.tui.message.?, "stopped at the limit"));
+    try expectEqual(std.math.maxInt(u64), t.chip.step_limit);
+
+    try t.command("run --max-steps 1000000");
+    try t.press(' ');
+    try expect(!t.tui.running);
+    try expectEqual(std.math.maxInt(u64), t.chip.step_limit);
+
+    try t.press(' ');
+    try t.command("step");
+    try expectEqualStrings("pause with space to step", t.tui.message.?);
+    try t.press(' ');
+    for ([_][]const u8{ "run 5", "run --max-steps", "run --max-steps many", "run --max-steps 5 6" }) |line| {
+        try t.command(line);
+        try expect(std.mem.startsWith(u8, t.tui.message.?, "use :run"));
+    }
+    try expect(!t.tui.running);
+}
+
+test "tab completes commands, and shows what they take" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+
+    // as far as they agree, with a space after a whole name
+    try t.press(':');
+    for ("st") |c| try t.press(c);
+    try t.press(vaxis.Key.tab);
+    try expectEqualStrings("step ", t.tui.command[0..t.tui.command_len.?]);
+
+    // and what comes after it, on the row above the bar, until the next key
+    try t.press(vaxis.Key.tab);
+    try expect(try t.shows(28, ":step [--node <node>]"));
+    try t.press('-');
+    try expectEqual(null, t.tui.choices);
+    try t.press(vaxis.Key.escape);
+
+    // every command, when nothing is typed
+    try t.press(':');
+    try t.press(vaxis.Key.tab);
+    try expect(try t.shows(28, "w write wq x q quit"));
+    try expect(try t.shows(28, "break watch step run"));
+    try t.press(vaxis.Key.escape);
+    try expectEqual(null, t.tui.choices);
+
+    // those it could be, where they differ at once
+    try t.press(':');
+    try t.press('w');
+    try t.press(vaxis.Key.tab);
+    try expectEqualStrings("w write wq watch", t.tui.choices.?);
+    try t.press(vaxis.Key.escape);
+
+    try t.press(':');
+    try t.press('z');
+    try t.press(vaxis.Key.tab);
+    try expectEqualStrings("no command starts with that", t.tui.message.?);
+    try t.press(vaxis.Key.escape);
+
+    // spaces before a name go, and ! does not get in the way
+    try t.press(':');
+    for ("  st") |c| try t.press(c);
+    try t.press(vaxis.Key.tab);
+    try expectEqualStrings("step ", t.tui.command[0..t.tui.command_len.?]);
+    try t.press(vaxis.Key.escape);
+    try t.press(':');
+    for ("w!") |c| try t.press(c);
+    try t.press(vaxis.Key.tab);
+    try expectEqualStrings(":w[!] [file]", t.tui.choices.?);
+    try t.press(vaxis.Key.escape);
+
+    // a mistake while completing is not kept as a failure
+    try t.press(':');
+    for ("nope ") |c| try t.press(c);
+    try t.press(vaxis.Key.tab);
+    try expectEqual(.info, t.tui.message_kind);
+    try expectEqual(0, t.tui.logLen());
+    try t.press(vaxis.Key.escape);
+
+    // what tab showed goes with the next key of any kind, and a click
+    try t.press(':');
+    try t.press(vaxis.Key.tab);
+    try t.pressWith('x', .{ .alt = true });
+    try expectEqual(null, t.tui.choices);
+    try t.press(vaxis.Key.tab);
+    try t.click(50, 10, .press);
+    try expectEqual(null, t.tui.choices);
+
+    // panels do not change under the line, which ctrl+c closes
+    try t.pressWith('2', .{ .alt = true });
+    try expectEqual(.map, t.tui.focus);
+    try expect(t.tui.command_len != null);
+    _ = try t.tui.handle(.{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } });
+    try expectEqual(null, t.tui.command_len);
+
+    // a message too long beside the command is cut short
+    const long: [200]u8 = @splat('x');
+    try t.press(':');
+    t.tui.message = &long;
+    t.draw();
+    try expectEqualStrings("…", t.screen.readCell(119, 29).?.char.grapheme);
+}
+
+test ":w saves the word being typed, from either screen" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [gasim.colorforth.block_size * 2]u8 = @splat(0);
+    editor.open(&blocks, 1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/typed.cf", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+    t.tui.options.colorforth = .{ .editor = editor, .path = path, .compressed = false };
+    t.tui.screen = .editor;
+    t.draw();
+
+    try t.press('i');
+    for ("dup") |c| try t.press(c);
+    try t.pressWith('1', .{ .alt = true });
+    try expectEqual(.chip, t.tui.screen);
+    try t.command("w");
+    try expectEqualStrings("saved 1 blocks", t.tui.message.?);
+    try expectEqual(.normal, editor.mode);
+    try expect(!std.mem.allEqual(u8, blocks[0..gasim.colorforth.block_size], 0));
+}
+
 test "keeps the last failures for :messages" {
     var t: TestTui = .{ .chip = undefined };
     try t.init("");
@@ -3069,14 +3650,7 @@ test "keeps the last failures for :messages" {
     t.tui.screen = .editor;
     t.draw();
 
-    const typeCommand = struct {
-        fn typeCommand(tt: *TestTui, command: []const u8) !void {
-            try tt.press(':');
-            for (command) |c| try tt.press(c);
-            try tt.press(vaxis.Key.enter);
-        }
-    }.typeCommand;
-    try typeCommand(&t, "messages");
+    try t.command("messages");
     try expect(!t.tui.log_open);
     try expect(try t.shows(29, "no errors or stops yet"));
 
@@ -3088,7 +3662,7 @@ test "keeps the last failures for :messages" {
     try expectEqualStrings("failure 2", t.tui.logged(0));
     try expectEqualStrings("failure 33", t.tui.logged(log_capacity - 1));
 
-    try typeCommand(&t, "messages");
+    try t.command("messages");
     try expect(t.tui.log_open);
     try expect(try t.shows(0, "#messages#"));
     // the latest that fit, ending with the last
@@ -3116,7 +3690,7 @@ test "keeps the last failures for :messages" {
 
     // and ctrl+c closes it, for the q that asks for to reach the panels
     try t.press(vaxis.Key.escape);
-    try typeCommand(&t, "messages");
+    try t.command("messages");
     _ = try t.tui.handle(.{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } });
     try expect(!t.tui.log_open);
 }
@@ -3185,7 +3759,7 @@ test "help opens at the keys of what has the focus" {
     try t.press(vaxis.Key.escape);
     try t.press(':');
     try t.press(vaxis.Key.f1);
-    try expectEqual(@min(helpRow("the editor's commands"), help_rows - t.tui.help_page), t.tui.help_scroll.?);
+    try expectEqual(@min(helpRow("commands"), help_rows - t.tui.help_page), t.tui.help_scroll.?);
     try t.press(vaxis.Key.escape);
     try t.press(vaxis.Key.escape);
     try t.press('i');
@@ -3586,6 +4160,7 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
+const cli_options = @import("options.zig");
 const vaxis = @import("vaxis");
 
 test "the aforth panel interprets arrayForth 3 at the selected node" {
