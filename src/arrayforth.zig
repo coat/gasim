@@ -381,18 +381,7 @@ pub const Session = struct {
     /// starts with `prefix`: FORTH and ASM words, opcodes, named literals
     /// and calls, the labels of the bin being assembled, and defined names
     pub fn complete(self: *const Session, prefix: []const u8, completer: anytype) void {
-        const it = &self.interpreter;
-        inline for (.{ ForthWord, AsmWord, Opcode }) |Words| {
-            for (std.enums.values(Words)) |word| add(prefix, @tagName(word), completer);
-        }
-        for (named_literals.keys()) |word| add(prefix, word, completer);
-        for (named_calls.keys()) |word| add(prefix, word, completer);
-        if (it.bin) |*bin| for (bin.labels[0..bin.label_count]) |label| add(prefix, label.name, completer);
-        for (it.names[0..it.name_count]) |name| add(prefix, name.name, completer);
-    }
-
-    fn add(prefix: []const u8, word: []const u8, completer: anytype) void {
-        if (std.mem.startsWith(u8, word, prefix)) completer.add(word);
+        self.interpreter.complete(prefix, completer);
     }
 };
 
@@ -2373,6 +2362,7 @@ const Interpreter = struct {
                 for (self.stack[0..self.depth]) |value| try self.printNumber(out, value, true);
             },
             .CR => if (self.out) |out| try out.writeByte('\n'),
+            .WORDS => if (self.out) |out| try self.writeWords(out),
             .SPACE => if (self.out) |out| try out.writeByte(' '),
             .NODE => try self.selectTarget(try self.pop()),
             .HOOK => {
@@ -2795,6 +2785,37 @@ const Interpreter = struct {
         if (space) try out.writeByte(' ');
     }
 
+    /// Tells `completer` each word that starts with `prefix`
+    fn complete(self: *const Interpreter, prefix: []const u8, completer: anytype) void {
+        inline for (.{ ForthWord, AsmWord, Opcode }) |Words| {
+            for (std.enums.values(Words)) |word| addCompletion(prefix, @tagName(word), completer);
+        }
+        for (named_literals.keys()) |word| addCompletion(prefix, word, completer);
+        for (named_calls.keys()) |word| addCompletion(prefix, word, completer);
+        if (self.bin) |*bin| for (bin.labels[0..bin.label_count]) |label| addCompletion(prefix, label.name, completer);
+        for (self.names[0..self.name_count]) |named| addCompletion(prefix, named.name, completer);
+    }
+
+    fn addCompletion(prefix: []const u8, word: []const u8, completer: anytype) void {
+        if (std.mem.startsWith(u8, word, prefix)) completer.add(word);
+    }
+
+    /// Writes each word, a line to each, as completing them would offer
+    fn writeWords(self: *const Interpreter, out: *Io.Writer) Error!void {
+        var lister: struct {
+            out: *Io.Writer,
+            failed: bool = false,
+
+            pub fn add(lister: *@This(), word: []const u8) void {
+                lister.out.print("{s}\n", .{word}) catch {
+                    lister.failed = true;
+                };
+            }
+        } = .{ .out = out };
+        self.complete("", &lister);
+        if (lister.failed) return error.WriteFailed;
+    }
+
     fn selectTarget(self: *Interpreter, number_of_node: i32) Error!void {
         const chip = self.chip orelse return error.NoChip;
         const node_number = std.math.cast(u16, number_of_node) orelse return error.InvalidNode;
@@ -3155,6 +3176,7 @@ const ForthWord = enum {
     @"D.",
     @".S",
     CR,
+    WORDS,
     SPACE,
     NODE,
     HOOK,
