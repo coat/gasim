@@ -16,7 +16,7 @@ pub const Options = struct {
     console: *Console,
     console_node: u16,
     console_port: Direction,
-    /// arrayForth 3 typed into the aaforth panel, if it is shown
+    /// arrayForth 3 typed into the aforth panel, if it is shown
     forth: ?Forth = null,
     /// colorForth blocks to edit, of the file opened or a new one
     colorforth: ?ColorForth = null,
@@ -45,10 +45,10 @@ pub const Forth = struct {
     arena: Allocator,
 };
 
-/// bytes of the aaforth panel's output kept for display
+/// bytes of the aforth panel's output kept for display
 pub const forth_capacity = 16 * 1024;
 
-/// lines typed into the aaforth panel that up and down recall
+/// lines typed into the aforth panel that up and down recall
 const recall_capacity = 32;
 
 const Event = union(enum) {
@@ -95,7 +95,7 @@ const Cause = enum {
     round,
     node,
     run,
-    /// a line typed into the aaforth panel
+    /// a line typed into the aforth panel
     line,
     compile,
 
@@ -236,7 +236,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
     .{ "mouse", &.{
         .{ "click", "focus a panel, select a node, or move to a word in memory" },
         .{ "click memory's edge", "set or clear a breakpoint" },
-        .{ "wheel", "scroll memory, the console, the aaforth panel or this help" },
+        .{ "wheel", "scroll memory, the console, the aforth panel or this help" },
         .{ "drag a border", "resize panels, or tap it and then where it goes" },
     } },
     .{ "this help", &.{
@@ -268,6 +268,9 @@ fn helpRow(heading: []const u8) u16 {
     return row;
 }
 
+/// bytes of a formatted message, past which it is cut short
+const message_capacity = 256;
+
 const Tui = struct {
     io: Io,
     /// for snapshots of the chip, as they are needed
@@ -283,7 +286,7 @@ const Tui = struct {
     selected: u16,
     screen: Screen = .chip,
     focus: Panel = .map,
-    /// whether keys are typed into the console or the aaforth panel, rather
+    /// whether keys are typed into the console or the aforth panel, rather
     /// than left to the panels, as in the editor
     inserting: bool = false,
     /// when each panel last had the focus, counting changes of focus, for
@@ -307,12 +310,12 @@ const Tui = struct {
     input_len: u8 = 0,
     /// rows of console output scrolled back from the end
     console_scroll: usize = 0,
-    /// the line being typed into the aaforth panel, and rows of its output
+    /// the line being typed into the aforth panel, and rows of its output
     /// scrolled back from the end
     forth_input: [256]u8 = undefined,
     forth_input_len: u8 = 0,
     forth_scroll: usize = 0,
-    /// lines typed into the aaforth panel, the latest last, and how far back
+    /// lines typed into the aforth panel, the latest last, and how far back
     /// up has recalled
     recalled: [recall_capacity][]const u8 = undefined,
     recalled_len: usize = 0,
@@ -333,7 +336,7 @@ const Tui = struct {
     map_more: []const u8 = "",
     /// a message for the status bar, until the next key
     message: ?[]const u8 = null,
-    message_buffer: [160]u8 = undefined,
+    message_buffer: [message_capacity]u8 = undefined,
     /// the first row of the help in view, while it is shown
     help_scroll: ?u16 = null,
     /// rows of the help last drawn in view
@@ -421,9 +424,18 @@ const Tui = struct {
         return std.fmt.allocPrint(self.frame.allocator(), format, args) catch "…";
     }
 
-    /// formats a message for the status bar
+    /// formats a message for the status bar, cutting short one too long
     fn printLasting(self: *Tui, comptime format: []const u8, args: anytype) []const u8 {
-        return std.fmt.bufPrint(&self.message_buffer, format, args) catch "…";
+        var writer: Io.Writer = .fixed(&self.message_buffer);
+        writer.print(format, args) catch {
+            const ellipsis = "…";
+            var end = self.message_buffer.len - ellipsis.len;
+            // not through the middle of a character
+            while (end > 0 and self.message_buffer[end] & 0xc0 == 0x80) end -= 1;
+            @memcpy(self.message_buffer[end..][0..ellipsis.len], ellipsis);
+            return self.message_buffer[0 .. end + ellipsis.len];
+        };
+        return writer.buffered();
     }
 
     /// keeps room in the console's output for another `rounds_per_check`
@@ -603,7 +615,7 @@ const Tui = struct {
         return true;
     }
 
-    /// Handles keys for the console or the aaforth panel when not typing into
+    /// Handles keys for the console or the aforth panel when not typing into
     /// it, which scroll its output, or start typing
     fn textKey(self: *Tui, k: vaxis.Key, scroll: *usize) void {
         const panel = self.focus;
@@ -617,10 +629,26 @@ const Tui = struct {
         if (k.matchesAny(&.{ vaxis.Key.end, 'G' }, .{})) scroll.* = 0;
     }
 
-    /// Shows the help, at the editor's keys in the editor
+    /// Shows the help, at the keys of what has the focus, or from the map,
+    /// whose keys are those at the top
     fn openHelp(self: *Tui) bool {
-        self.help_scroll = if (self.screen == .editor) helpRow("colorForth editor") else 0;
+        self.help_scroll = if (self.helpHeading()) |heading| helpRow(heading) else 0;
         return true;
+    }
+
+    /// the heading of the help for what has the focus, if not the first
+    fn helpHeading(self: *Tui) ?[]const u8 {
+        if (self.screen == .editor) {
+            if (self.command_len != null) return "the editor's commands";
+            return if (self.options.colorforth.?.editor.mode == .insert) "typing in the editor" else "colorForth editor";
+        }
+        return switch (self.focus) {
+            .map => null,
+            .node => "node",
+            .debug => "debug",
+            .console => if (self.inserting) "typing in the console" else "console and aforth",
+            .forth => if (self.inserting) "typing in aforth" else "console and aforth",
+        };
     }
 
     /// Handles keys while the help is shown, which scroll and close it
@@ -1130,9 +1158,9 @@ const Tui = struct {
         };
         defer dir.close(self.io);
 
-        // the names it could be, with a slash after a directory, as many as
-        // fit in a message
-        var listed_buffer: [256]u8 = undefined;
+        // the names it could be, with a slash after a directory, filling
+        // more than a message so that one left out cuts the message short
+        var listed_buffer: [message_capacity + 1]u8 = undefined;
         var listed: Io.Writer = .fixed(&listed_buffer);
         var common: [256]u8 = undefined;
         var common_len: usize = 0;
@@ -1171,17 +1199,7 @@ const Tui = struct {
             self.command_len = @intCast(start + slash + common_len);
             return;
         }
-        const names = std.mem.trimEnd(u8, listed.buffered(), " ");
-        const ellipsis = "…";
-        if (names.len <= self.message_buffer.len) {
-            @memcpy(self.message_buffer[0..names.len], names);
-            self.message = self.message_buffer[0..names.len];
-        } else {
-            const cut = self.message_buffer.len - ellipsis.len;
-            @memcpy(self.message_buffer[0..cut], names[0..cut]);
-            @memcpy(self.message_buffer[cut..], ellipsis);
-            self.message = &self.message_buffer;
-        }
+        self.message = self.printLasting("{s}", .{std.mem.trimEnd(u8, listed.buffered(), " ")});
     }
 
     /// Handles keys typed into the console, returning false for keys it
@@ -1222,7 +1240,7 @@ const Tui = struct {
         return true;
     }
 
-    /// Handles keys typed into the aaforth panel, returning false for keys it
+    /// Handles keys typed into the aforth panel, returning false for keys it
     /// leaves to the panels. Escape stops typing, and tab completes words.
     fn forthKey(self: *Tui, k: vaxis.Key) !bool {
         if (k.codepoint == vaxis.Key.tab) {
@@ -1250,7 +1268,7 @@ const Tui = struct {
         return true;
     }
 
-    /// Completes the word being typed into the aaforth panel, as far as the
+    /// Completes the word being typed into the aforth panel, as far as the
     /// words it could be agree, or lists them when that adds nothing
     fn complete(self: *Tui) void {
         const forth = self.options.forth.?;
@@ -1281,7 +1299,7 @@ const Tui = struct {
         output.writeByte('\n') catch {};
     }
 
-    /// puts the line typed `lines_back` lines ago into the aaforth panel's
+    /// puts the line typed `lines_back` lines ago into the aforth panel's
     /// input, or an empty line for none
     fn recall(self: *Tui, lines_back: usize) void {
         self.recalling = lines_back;
@@ -1291,7 +1309,7 @@ const Tui = struct {
         self.forth_input_len = @intCast(len);
     }
 
-    /// Interprets the line typed into the aaforth panel, with the selected node
+    /// Interprets the line typed into the aforth panel, with the selected node
     /// as the target, and selects the target it leaves. The chip is
     /// remembered first, to go back to as after a step.
     fn interpret(self: *Tui) !void {
@@ -1317,7 +1335,7 @@ const Tui = struct {
         forth.session.setTarget(layout.nodeNumber(self.selected));
         output.print("{d:0>3}> {s}\n", .{ layout.nodeNumber(self.selected), line }) catch {};
         _ = aforth.interpret(forth.session, line, forth.diagnostic, output, output) catch {
-            self.message = "the aaforth panel's output is full";
+            self.message = "the aforth panel's output is full";
         };
         if (forth.session.target()) |node| if (layout.index(node)) |i| self.select(i);
         self.memory_scroll = null;
@@ -2325,32 +2343,61 @@ const Tui = struct {
             return;
         }
         const hints: []const Hint = if (editor.mode == .insert)
-            &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "ctrl+r y g w t v b", "color" }, .{ "esc", "done" } }
+            &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "esc", "done" }, .{ "ctrl+r y g w t v b", "color" } }
         else
-            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ ":", "w e new" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "?", "help" }, .{ "q", "quit" } };
-        var segments: [4 + 2 * 12]vaxis.Segment = undefined;
+            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ ":", "w e new" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
+        var state: [3]vaxis.Segment = undefined;
         var len: usize = 0;
-        segments[len] = if (editor.mode == .insert)
+        state[len] = if (editor.mode == .insert)
             .{ .text = " insert ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } }
         else
             .{ .text = " normal ", .style = .{ .reverse = true, .bold = true } };
         len += 1;
-        segments[len] = .{ .text = self.print(" {d}/{d} cells ", .{ editor.cells(), gasim.colorforth.cells_per_block }), .style = colors.dim };
+        state[len] = .{ .text = self.print(" {d}/{d} cells ", .{ editor.cells(), gasim.colorforth.cells_per_block }), .style = colors.dim };
         len += 1;
         if (editor.prefix) |count| {
-            segments[len] = .{ .text = self.print(" {d} ", .{count}), .style = colors.label };
+            state[len] = .{ .text = self.print(" {d} ", .{count}), .style = colors.label };
             len += 1;
         }
-        if (self.message) |message| {
-            segments[len] = .{ .text = self.print(" {s} ", .{message}), .style = colors.literal };
-            len += 1;
-        }
+        self.drawBar(win, state[0..len], hints, if (editor.mode == .insert) "F1" else "?");
+    }
+
+    /// Draws the bar along the bottom of a screen: `state`, then any message,
+    /// then as many of `hints` as fit, the most wanted first, with the key of
+    /// the help, which lists the rest, always at the right
+    fn drawBar(self: *Tui, win: vaxis.Window, state: []const vaxis.Segment, hints: []const Hint, help_key: []const u8) void {
+        _ = win.print(state, .{ .wrap = .none });
+        var x: u16 = 0;
+        for (state) |segment| x += win.gwidth(segment.text);
+        const help_width: u16 = @intCast(help_key.len + " ".len + " help ".len);
+        if (x + help_width > win.width) return;
+        const end = win.width - help_width;
+        _ = win.print(&.{
+            .{ .text = " " },
+            .{ .text = help_key, .style = colors.label },
+            .{ .text = " help " },
+        }, .{ .col_offset = end, .wrap = .none });
+
+        // with a space on each side, and an ellipsis where it is cut short
+        if (self.message) |message| if (end - x > 3) {
+            const room = end - x - 2;
+            const width = win.gwidth(message);
+            const shown = if (width <= room) width else room - 1;
+            _ = win.child(.{ .x_off = x + 1, .width = shown }).printSegment(.{ .text = message, .style = colors.literal }, .{ .wrap = .none });
+            if (width > room) _ = win.printSegment(.{ .text = "…", .style = colors.literal }, .{ .col_offset = x + 1 + shown, .wrap = .none });
+            x += @min(width, room) + 2;
+        };
+
         for (hints) |hint| {
-            segments[len] = .{ .text = self.print(" {s}", .{hint[0]}), .style = colors.label };
-            segments[len + 1] = .{ .text = self.print(" {s} ", .{hint[1]}) };
-            len += 2;
+            const width: u16 = @intCast(" ".len + hint[0].len + " ".len + hint[1].len + " ".len);
+            if (x + width > end) break;
+            _ = win.print(&.{
+                .{ .text = " " },
+                .{ .text = hint[0], .style = colors.label },
+                .{ .text = self.print(" {s} ", .{hint[1]}) },
+            }, .{ .col_offset = x, .wrap = .none });
+            x += width;
         }
-        _ = win.print(segments[0..len], .{ .wrap = .none });
     }
 
     fn drawStatus(self: *Tui, win: vaxis.Window) void {
@@ -2361,48 +2408,40 @@ const Tui = struct {
             .{ .text = " waiting ", .style = .{ .fg = .{ .index = 3 }, .reverse = true, .bold = true } }
         else
             .{ .text = " running ", .style = .{ .fg = .{ .index = 2 }, .reverse = true, .bold = true } };
+        const panels: Hint = .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" };
         const hints: []const Hint = switch (self.focus) {
-            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "S", "round" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "t", "tiles" }, .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" }, .{ "q", "quit" } },
+            .map => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "arrows", "select" }, .{ "tab", "next" }, .{ "f", "zoom" }, .{ "t", "tiles" }, panels, .{ "S", "round" }, .{ "q", "quit" } },
             .console => if (self.inserting)
-                &.{ .{ "enter", "send" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "esc", "done" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" } }
+                &.{ .{ "enter", "send" }, .{ "esc", "done" }, .{ "ctrl+d", "end input" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" } }
             else
-                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ if (self.options.forth == null) "1-3 5" else "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" }, .{ "q", "quit" } },
+                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "tab", "next" }, .{ "f", "zoom" }, panels, .{ "q", "quit" } },
             .forth => if (self.inserting)
-                &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "esc", "done" }, .{ "alt+1-6", "panels" }, .{ "F1", "help" } }
+                &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "esc", "done" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" } }
             else
-                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "1-5", "panels" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" }, .{ "q", "quit" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "up/down", "move" }, .{ "g", "follow" }, .{ "f", "zoom" }, .{ "tab", "next" }, .{ "?", "help" } },
+                &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "tab", "next" }, .{ "f", "zoom" }, .{ "1-5", "panels" }, .{ "q", "quit" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "up/down", "move" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "g", "follow" }, .{ "tab", "next" }, .{ "f", "zoom" } },
             .debug => switch (self.debug) {
-                .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "c", "clear" }, .{ "w", "save trace.txt" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
-                .breakpoints => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "x", "remove" }, .{ "X", "remove all" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
-                .history => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "go back" }, .{ "space", "run" }, .{ "tab", "next" }, .{ "?", "help" } },
+                .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "w", "save trace.txt" }, .{ "c", "clear" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" } },
+                .breakpoints => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "x", "remove" }, .{ "X", "remove all" }, .{ "space", "run" }, .{ "tab", "next" } },
+                .history => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "go back" }, .{ "space", "run" }, .{ "tab", "next" } },
             },
         };
-        var segments: [4 + 2 * 13]vaxis.Segment = undefined;
+        var bar: [3]vaxis.Segment = undefined;
         var len: usize = 0;
-        segments[len] = state;
+        bar[len] = state;
         len += 1;
         if (self.inserting) {
-            segments[len] = .{ .text = " typing ", .style = .{ .fg = .{ .index = 4 }, .reverse = true, .bold = true } };
+            bar[len] = .{ .text = " typing ", .style = .{ .fg = .{ .index = 4 }, .reverse = true, .bold = true } };
             len += 1;
         }
-        segments[len] = .{ .text = self.print(" {d} steps ", .{self.chip.steps}), .style = colors.dim };
+        bar[len] = .{ .text = self.print(" {d} steps ", .{self.chip.steps}), .style = colors.dim };
         len += 1;
-        if (self.message) |message| {
-            segments[len] = .{ .text = self.print(" {s} ", .{message}), .style = colors.literal };
-            len += 1;
-        }
-        for (hints) |hint| {
-            segments[len] = .{ .text = self.print(" {s}", .{hint[0]}), .style = colors.label };
-            segments[len + 1] = .{ .text = self.print(" {s} ", .{hint[1]}) };
-            len += 2;
-        }
-        if (self.options.colorforth != null and self.focus == .map) {
-            segments[len] = .{ .text = " alt+6", .style = colors.label };
-            segments[len + 1] = .{ .text = " colorforth " };
-            len += 2;
-        }
-        _ = win.print(segments[0..len], .{ .wrap = .none });
+        // the last of the map's hints, when there is an editor to go to
+        const with_editor = if (self.options.colorforth != null and self.focus == .map)
+            std.mem.concat(self.frame.allocator(), Hint, &.{ hints, &.{.{ "alt+6", "colorforth" }} }) catch hints
+        else
+            hints;
+        self.drawBar(win, bar[0..len], with_editor, if (self.inserting) "F1" else "?");
     }
 
     /// the ports of the selected node that are watched, such as `reads
@@ -2520,7 +2559,7 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
     }
 }
 
-/// words that could complete what was typed into the aaforth panel, up to as
+/// words that could complete what was typed into the aforth panel, up to as
 /// many as are listed
 const Completions = struct {
     partial: []const u8,
@@ -2632,7 +2671,11 @@ const TestTui = struct {
     }
 
     fn draw(self: *TestTui) void {
-        self.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = 30, .screen = &self.screen });
+        self.drawWidth(120);
+    }
+
+    fn drawWidth(self: *TestTui, width: u16) void {
+        self.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 30, .screen = &self.screen });
     }
 
     fn press(self: *TestTui, codepoint: u21) !void {
@@ -2744,6 +2787,94 @@ test "draws the chip, console and selected node" {
     try expectEqualStrings("hi\n", &sent);
 }
 
+test "the status bar keeps the help, and hints that fit whole" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.drawWidth(80);
+    try expect(try t.shows(29, "arrows select"));
+    try expect(!try t.shows(29, "tab"));
+    try expectEqualStrings("?", t.screen.readCell(73, 29).?.char.grapheme);
+
+    // a message comes before the hints, which take what it leaves
+    t.tui.message = "every node is waiting";
+    t.draw();
+    try expect(try t.shows(29, " every node is waiting  space run"));
+    try expect(try t.shows(29, " ? help "));
+}
+
+test "a long message is cut short, not lost" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    // longer than the buffer, ending short of it in the middle of a character
+    const accents: [200][2]u8 = @splat("é".*);
+    const message = t.tui.printLasting("{s}", .{std.mem.asBytes(&accents)});
+    try expect(std.unicode.utf8ValidateSlice(message));
+    try expect(std.mem.startsWith(u8, message, "éé"));
+    try expect(std.mem.endsWith(u8, message, "é…"));
+
+    // and longer than the bar, leaving the help
+    const long: [200]u8 = @splat('x');
+    t.tui.message = &long;
+    t.draw();
+    try expect(try t.shows(29, "xxx"));
+    try expectEqualStrings("…", t.screen.readCell(110, 29).?.char.grapheme);
+    try expect(try t.shows(29, " ? help "));
+    try expect(!try t.shows(29, "space run"));
+}
+
+test "help opens at the keys of what has the focus" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    t.draw();
+    try t.press('?');
+    try expectEqual(0, t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+
+    try t.pressWith('3', .{ .alt = true });
+    try t.press('?');
+    try expect(try t.shows(1, "node"));
+    try expect(try t.shows(2, "up down, j k"));
+    try t.press(vaxis.Key.escape);
+
+    try t.pressWith('5', .{ .alt = true });
+    try t.press('?');
+    try expectEqual(helpRow("debug"), t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+
+    // typing, or not
+    try t.pressWith('2', .{ .alt = true });
+    try t.press(vaxis.Key.f1);
+    try expectEqual(helpRow("typing in the console"), t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+    try t.press(vaxis.Key.escape);
+    try t.press('?');
+    try expectEqual(helpRow("console and aforth"), t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+
+    // and in the editor, typing or at its command line, near the end of the
+    // help, whose last page is full
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [2 * gasim.colorforth.block_size]u8 = @splat(0);
+    editor.open(&blocks, 2);
+    t.tui.options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
+    try t.pressWith('6', .{ .alt = true });
+    try t.press('?');
+    try expectEqual(helpRow("colorForth editor"), t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+    try t.press(':');
+    try t.press(vaxis.Key.f1);
+    try expectEqual(@min(helpRow("the editor's commands"), help_rows - t.tui.help_page), t.tui.help_scroll.?);
+    try t.press(vaxis.Key.escape);
+    try t.press(vaxis.Key.escape);
+    try t.press('i');
+    try t.press(vaxis.Key.f1);
+    try expectEqual(@min(helpRow("typing in the editor"), help_rows - t.tui.help_page), t.tui.help_scroll.?);
+}
+
 test "help lists the keys, and scrolls" {
     var t: TestTui = .{ .chip = undefined };
     try t.init("");
@@ -2779,7 +2910,7 @@ test "help lists the keys, and scrolls" {
     try t.press('?');
     try expectEqualStrings("?", t.tui.input[0..t.tui.input_len]);
     try t.press(vaxis.Key.f1);
-    try expect(try t.shows(1, "everywhere"));
+    try expect(try t.shows(1, "typing in the console"));
     try t.press(vaxis.Key.f1);
     try expectEqual(null, t.tui.help_scroll);
 }
@@ -3051,7 +3182,7 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
 const vaxis = @import("vaxis");
 
-test "the aaforth panel interprets arrayForth 3 at the selected node" {
+test "the aforth panel interprets arrayForth 3 at the selected node" {
     var t: TestTui = .{ .chip = undefined };
     try t.init("up b! @b");
     defer t.deinit();
