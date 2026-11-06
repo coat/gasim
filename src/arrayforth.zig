@@ -155,6 +155,9 @@ pub const Error = assembler.Error || error{
     LoadTooDeep,
     /// a definition without its ;
     UnclosedDefinition,
+    /// colorForth host words that run more than 2^24 of their words and
+    /// numbers in a load, as a loop that never ends
+    HostWordTooLong,
     /// FORGET, within the [ ] of a definition, of a name from before it
     ForgetInDefinition,
     /// a control word such as IF outside a definition
@@ -300,7 +303,7 @@ pub const Session = struct {
         it.loadColorForth(std.math.cast(i32, block) orelse return error.NoSuchBlock) catch |err| {
             it.color_depth = 0;
             it.host_mode = false;
-            it.defining = null;
+            it.endHostWord();
             // its code is incomplete, and node would save it
             it.bin = null;
             it.forgetColorDescriptors(block);
@@ -636,9 +639,36 @@ const HostWord = struct {
     /// defined outside host and target, as a loader's blocks define their
     /// words in x86 code, which F18 code does not see
     outside: bool = false,
+    /// with control words that don't match, which fails when it runs, as
+    /// one defined outside host can be F18 code, such as a ROM source's
+    /// begin … unext
+    unmatched: bool = false,
 
-    const Part = union(enum) { number: i32, word: []const u8 };
+    const Part = union(enum) {
+        number: i32,
+        word: []const u8,
+        /// a jump by `by` parts from this one, always, or as x86 colorForth
+        /// jumps on the flags of the last arithmetic: if and until on zero,
+        /// -if and -until on not negative. An if not yet resolved jumps by
+        /// `unresolved`.
+        branch: struct { by: i16, when: enum { always, zero, not_negative } },
+        /// pushes the count onto the return stack
+        @"for",
+        /// counts down, jumping back by this many parts until zero
+        next: i16,
+        /// i, push and pop on the return stack, and a ; that returns
+        index,
+        push,
+        pop,
+        exit,
+
+        const unresolved = std.math.minInt(i16);
+    };
 };
+
+/// the green words of a host word that x86 colorForth compiles as control
+/// flow or the return stack
+const HostControl = enum { @";", @"if", @"-if", then, begin, end, until, @"-until", @"while", @"-while", @"for", next, i, push, pop };
 
 /// the yellow words that colorForth runs on the host
 const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, thru, fh, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/", @"@", @"!", @"+node", @"/ram", @"/part", @"/a", @"/b", @"/io", @"/p", @"/stack" };
@@ -970,6 +1000,18 @@ const Interpreter = struct {
     host_body_len: u16 = 0,
     /// the host word being defined, until its ;
     defining: ?u8 = null,
+    /// the host word a ; returned from, whose green words after it, such
+    /// as then, go on in it, until the next red word
+    host_continue: ?u8 = null,
+    /// where the control words of the host word being defined branch from
+    /// or to, as af3's control
+    host_control: [16]struct { word: ControlWord, at: u16 } = undefined,
+    host_control_len: u8 = 0,
+    /// the last result of +, and, or, negate, 2* or 2/, as the x86's flags,
+    /// which a host word's if and until test
+    host_flag: i32 = 0,
+    /// the words and numbers host words have run in the load
+    host_steps: u32 = 0,
     /// whether yellow words have run in the definition since its last green
     /// word, so that the next green word compiles the number they leave
     defining_yellow: bool = false,
@@ -1452,8 +1494,9 @@ const Interpreter = struct {
         // after compile, though a block loaded from one goes on in its node
         self.color_node = false;
         // a definition that a load before left open, as one ends without ;
-        self.defining = null;
+        self.endHostWord();
         self.defining_yellow = false;
+        self.host_steps = 0;
         self.learnSystemNames();
         try self.pushColorBlock(block);
         while (self.color_depth > 0) {
@@ -1514,13 +1557,10 @@ const Interpreter = struct {
         // the last word moved, whose body the words falling through into
         // it end with, where it was and where it is
         var moved: struct { start: u16 = 0, end: u16 = 0, to: u16 = 0 } = .{};
+        self.endHostWord();
         for (self.host_words[0..self.host_word_count], 0..) |word, i| {
             if (i == self.host_mark) mark = words;
-            if (from(word.block, block)) {
-                if (self.defining != null and self.defining.? == i) self.defining = null;
-                continue;
-            }
-            if (self.defining != null and self.defining.? == i) self.defining = words;
+            if (from(word.block, block)) continue;
             self.host_words[words] = word;
             if (words > 0 and word.start >= moved.start and word.start + word.len <= moved.end) {
                 self.host_words[words].start = moved.to + (word.start - moved.start);
@@ -1686,7 +1726,7 @@ const Interpreter = struct {
     fn colorToken(self: *Interpreter, token: colorforth.Token) Error!void {
         // a yellow : leaves the address of the word right after it
         if (token.tag != .execute) self.color_address = false;
-        if (self.host_mode or self.defining != null) return self.hostToken(token);
+        if (self.host_mode or self.defining != null or (self.host_continue != null and !self.color_node)) return self.hostToken(token);
         switch (token.tag.color()) {
             .white, .blue, .none => {},
             // where arrayForth 2 had assembled to, once a node has code
@@ -1733,13 +1773,18 @@ const Interpreter = struct {
             .white, .blue, .gray, .none => {},
             .cyan, .magenta => return error.HostCode,
             .red => {
+                // a branch would go from one word into another
+                if (self.host_control_len > 0) try self.leaveUnmatched(error.UnclosedControl);
+                self.host_continue = null;
+                if (self.defining == null) self.defining_yellow = false;
                 if (self.host_word_count == self.host_words.len) return error.TooManyLabels;
                 self.host_words[self.host_word_count] = .{ .name = try self.keepName(token.text()), .start = self.host_body_len, .len = 0, .block = self.color_load, .outside = !self.host_mode };
                 // a word before it that has no ; yet falls through into it
                 if (self.defining == null) self.defining = self.host_word_count;
                 self.host_word_count += 1;
             },
-            .yellow, .green => if (self.defining) |i| {
+            .yellow, .green => if (self.defining orelse if (token.tag.color() == .green) self.host_continue else null) |i| {
+                self.defining = i;
                 // yellow words and numbers run as the word is defined, and
                 // the next green word compiles the number they leave, as
                 // colorForth compiles a literal from yellow to green
@@ -1753,12 +1798,15 @@ const Interpreter = struct {
                     self.defining_yellow = false;
                     try self.defineHostPart(i, .{ .number = try self.pop() });
                 }
-                if (!token.tag.isNumber() and eql(token.text(), ";")) {
-                    self.defining = null;
-                    return;
-                }
+                if (!token.tag.isNumber()) if (std.meta.stringToEnum(HostControl, token.text())) |control| return self.defineHostControl(i, control) catch |err| switch (err) {
+                    error.UnmatchedControl, error.ControlTooDeep => self.leaveUnmatched(err),
+                    else => err,
+                };
                 try self.defineHostPart(i, if (token.tag.isNumber()) .{ .number = token.value } else .{ .word = try self.keepName(token.text()) });
             } else if (token.tag.color() == .yellow) {
+                // a number the next green word compiles, if it goes on in a
+                // word a ; returned from
+                if (self.host_continue != null) self.defining_yellow = true;
                 if (token.tag.isNumber()) return self.push(token.value);
                 return self.yellowWord(token.text());
             } else return error.HostCode,
@@ -1772,6 +1820,101 @@ const Interpreter = struct {
         self.host_body[self.host_body_len] = part;
         self.host_body_len += 1;
         for (self.host_words[first..self.host_word_count]) |*word| word.len += 1;
+    }
+
+    /// compiles a control word into the host word being defined, its
+    /// branches by how far they go, as a session moves bodies
+    fn defineHostControl(self: *Interpreter, first: u8, control: HostControl) Error!void {
+        const here = self.host_body_len;
+        switch (control) {
+            .@";" => {
+                try self.defineHostPart(first, .exit);
+                self.defining = null;
+                self.host_continue = first;
+            },
+            .@"if", .@"-if", .@"while", .@"-while" => {
+                try self.defineHostPart(first, .{ .branch = .{ .by = HostWord.Part.unresolved, .when = if (control == .@"if" or control == .@"while") .zero else .not_negative } });
+                try self.pushHostControl(.IF, here);
+                // the loop's begin, which end goes back to, above it
+                if (control == .@"while" or control == .@"-while") {
+                    if (self.host_control_len < 2) return error.UnmatchedControl;
+                    const top = &self.host_control[self.host_control_len - 1];
+                    const under = &self.host_control[self.host_control_len - 2];
+                    std.mem.swap(@TypeOf(top.*), top, under);
+                }
+            },
+            .then => {
+                const at = try self.popHostControl(.IF);
+                self.host_body[at].branch.by = @intCast(here - at);
+            },
+            .begin => try self.pushHostControl(.BEGIN, here),
+            .end, .until, .@"-until" => {
+                const at = try self.popHostControl(.BEGIN);
+                const when: @FieldType(@FieldType(HostWord.Part, "branch"), "when") = switch (control) {
+                    .end => .always,
+                    .until => .zero,
+                    else => .not_negative,
+                };
+                try self.defineHostPart(first, .{ .branch = .{ .by = @as(i16, @intCast(at)) - @as(i16, @intCast(here)), .when = when } });
+            },
+            .@"for" => {
+                try self.defineHostPart(first, .@"for");
+                try self.pushHostControl(.FOR, here + 1);
+            },
+            .next => {
+                const at = try self.popHostControl(.FOR);
+                try self.defineHostPart(first, .{ .next = @as(i16, @intCast(at)) - @as(i16, @intCast(here)) });
+            },
+            .i => try self.defineHostPart(first, .index),
+            .push => try self.defineHostPart(first, .push),
+            .pop => try self.defineHostPart(first, .pop),
+        }
+    }
+
+    /// fails with `err` for control words that don't match in a host word,
+    /// but for one defined outside host, which fails when it runs
+    fn leaveUnmatched(self: *Interpreter, err: Error) Error!void {
+        const first = self.defining orelse self.host_continue orelse return err;
+        if (!self.host_words[first].outside) return err;
+        self.markUnmatched();
+    }
+
+    /// marks the host word being defined, and those falling through into
+    /// it, as failing when they run, forgetting its control words
+    fn markUnmatched(self: *Interpreter) void {
+        self.host_control_len = 0;
+        const first = self.defining orelse self.host_continue orelse return;
+        for (self.host_words[first..self.host_word_count]) |*word| word.unmatched = true;
+    }
+
+    fn pushHostControl(self: *Interpreter, word: ControlWord, at: u16) Error!void {
+        if (self.host_control_len == self.host_control.len) return error.ControlTooDeep;
+        self.host_control[self.host_control_len] = .{ .word = word, .at = at };
+        self.host_control_len += 1;
+    }
+
+    fn popHostControl(self: *Interpreter, word: ControlWord) Error!u16 {
+        if (self.host_control_len == 0 or self.host_control[self.host_control_len - 1].word != word) return error.UnmatchedControl;
+        self.host_control_len -= 1;
+        return self.host_control[self.host_control_len].at;
+    }
+
+    /// ends the host word being defined, and any a ; returned from, as a
+    /// load ends
+    fn endHostWord(self: *Interpreter) void {
+        self.endContinued();
+        if (self.host_control_len > 0) self.markUnmatched();
+        self.defining = null;
+    }
+
+    /// stops the green words after a ; going on in the word it returned
+    /// from, as node does, which fails when it runs if a branch in it is
+    /// not resolved
+    fn endContinued(self: *Interpreter) void {
+        if (self.defining != null) return;
+        if (self.host_control_len > 0) self.markUnmatched();
+        self.host_continue = null;
+        self.defining_yellow = false;
     }
 
     /// a label of a node compiled before this one, searching the nodes in
@@ -1811,10 +1954,59 @@ const Interpreter = struct {
         if (self.host_depth == self.color_frames.len) return error.LoadTooDeep;
         self.host_depth += 1;
         defer self.host_depth -= 1;
-        for (self.host_body[word.start..][0..word.len]) |part| switch (part) {
-            .number => |n| try self.push(n),
-            .word => |text| try self.yellowWord(text),
+        if (word.unmatched) return error.UnmatchedControl;
+        // or still being defined, with a branch not yet resolved
+        if (self.host_control_len > 0) if (self.defining orelse self.host_continue) |first| {
+            if (word.start >= self.host_words[first].start) return error.UnmatchedControl;
         };
+        // its own return stack, which for, push and i use, as the x86's
+        var returns: [16]i32 = undefined;
+        var depth: usize = 0;
+        const end: i32 = word.start + word.len;
+        var at: i32 = word.start;
+        while (at < end) : (at += 1) {
+            self.host_steps += 1;
+            if (self.host_steps > 1 << 24) return error.HostWordTooLong;
+            switch (self.host_body[@intCast(at)]) {
+                .number => |n| try self.push(n),
+                .word => |text| try self.yellowWord(text),
+                .branch => |branch| {
+                    const taken = switch (branch.when) {
+                        .always => true,
+                        .zero => self.host_flag == 0,
+                        .not_negative => self.host_flag >= 0,
+                    };
+                    if (taken and branch.by == HostWord.Part.unresolved) return error.UnmatchedControl;
+                    // and then on to the part it jumps to
+                    if (taken) at += branch.by - 1;
+                },
+                .@"for" => {
+                    // which x86 colorForth would run 2^32 times
+                    const count = try self.pop();
+                    if (count < 1) return error.NumberOutOfRange;
+                    if (depth == returns.len) return error.StackOverflow;
+                    returns[depth] = count;
+                    depth += 1;
+                },
+                .next => |by| {
+                    if (depth == 0) return error.NoLoop;
+                    returns[depth - 1] -= 1;
+                    if (returns[depth - 1] != 0) at += by - 1 else depth -= 1;
+                },
+                .index => try self.push(if (depth == 0) return error.NoLoop else returns[depth - 1]),
+                .push => {
+                    if (depth == returns.len) return error.StackOverflow;
+                    returns[depth] = try self.pop();
+                    depth += 1;
+                },
+                .pop => {
+                    if (depth == 0) return error.StackUnderflow;
+                    depth -= 1;
+                    try self.push(returns[depth]);
+                },
+                .exit => return,
+            }
+        }
     }
 
     /// keeps the name of a label, which outlives the token it came from,
@@ -1910,6 +2102,7 @@ const Interpreter = struct {
                 if (self.bin) |bin| if (bin.changed) try self.save();
                 try self.node();
                 self.color_node = true;
+                self.endContinued();
             },
             // saves the node's code as a bin of another number, as
             // arrayForth 3's BIN does
@@ -1926,7 +2119,9 @@ const Interpreter = struct {
             .host => self.host_mode = true,
             .target => {
                 if (self.defining != null) return error.UnclosedDefinition;
+                if (self.host_control_len > 0) try self.leaveUnmatched(error.UnclosedControl);
                 self.host_mode = false;
+                self.endContinued();
             },
             .lit => try (try self.builder()).literal(word18(try self.pop())),
             .org => try self.runAsm(.org),
@@ -1962,6 +2157,7 @@ const Interpreter = struct {
             .empty, .reclaim => {
                 // which would forget the words being defined
                 if (self.defining != null) return error.UnclosedDefinition;
+                self.endContinued();
                 self.color_reclaims +%= 1;
                 if (self.bin) |*bin| bin.reclaimed = @intCast(bin.label_count - bin.rom_labels.len);
                 self.host_word_count = self.host_mark;
@@ -1986,7 +2182,7 @@ const Interpreter = struct {
                 _ = try self.pop();
                 try self.push(t);
             },
-            .negate => try self.push(-%try self.pop()),
+            .negate => try self.pushFlag(-%try self.pop()),
             // boot descriptors, as arrayForth 3's, but of single numbers, and
             // +node leaves F18 code, as arrayForth 2's loaders read them
             .@"+node" => {
@@ -2018,14 +2214,7 @@ const Interpreter = struct {
             },
             .@"/stack" => {
                 const d = try self.bootDescriptor();
-                const n = try self.pop();
-                if (n < 1 or n > d.stack.len) return error.NumberOutOfRange;
-                var i: usize = @intCast(n);
-                while (i > 0) {
-                    i -= 1;
-                    d.stack[i] = word18(try self.pop());
-                }
-                d.stack_len = @intCast(n);
+                d.stack_len = try self.popSingles(&d.stack);
             },
             .@"@" => try self.push((try self.hostCell(try self.pop())).*),
             .@"!" => {
@@ -2033,8 +2222,8 @@ const Interpreter = struct {
                 stored.* = try self.pop();
             },
             .@"-" => try self.push(~try self.pop()),
-            .@"2*" => try self.push(try self.pop() << 1),
-            .@"2/" => try self.push(try self.pop() >> 1),
+            .@"2*" => try self.pushFlag(try self.pop() << 1),
+            .@"2/" => try self.pushFlag(try self.pop() >> 1),
             .@"*/" => {
                 const u = try self.pop();
                 const t = try self.pop();
@@ -2046,10 +2235,10 @@ const Interpreter = struct {
                 const t = try self.pop();
                 const s = try self.pop();
                 switch (word) {
-                    .@"+" => try self.push(s +% t),
+                    .@"+" => try self.pushFlag(s +% t),
                     .@"*" => try self.push(s *% t),
-                    .@"and" => try self.push(s & t),
-                    .@"or" => try self.push(s ^ t),
+                    .@"and" => try self.pushFlag(s & t),
+                    .@"or" => try self.pushFlag(s ^ t),
                     // as the x86 divides, rounding towards zero
                     .@"/", .mod, .@"/mod" => {
                         if (t == 0 or (s == std.math.minInt(i32) and t == -1)) return error.NumberOutOfRange;
@@ -2936,6 +3125,18 @@ const Interpreter = struct {
         d.load_count += 1;
     }
 
+    /// pops a count and that many single numbers, as colorForth's /stack
+    fn popSingles(self: *Interpreter, values: []Word) Error!u4 {
+        const n = try self.pop();
+        if (n < 1 or n > values.len) return error.NumberOutOfRange;
+        var i: usize = @intCast(n);
+        while (i > 0) {
+            i -= 1;
+            values[i] = word18(try self.pop());
+        }
+        return @intCast(n);
+    }
+
     /// Pops a count of up to `values.len` doubles and the doubles, the last
     /// of which goes on top
     fn popValues(self: *Interpreter, values: []Word) Error!u4 {
@@ -3118,6 +3319,12 @@ const Interpreter = struct {
         if (self.depth == self.stack.len) return error.StackOverflow;
         self.stack[self.depth] = value;
         self.depth += 1;
+    }
+
+    /// pushes the result of arithmetic that sets the x86's flags
+    fn pushFlag(self: *Interpreter, value: i32) Error!void {
+        self.host_flag = value;
+        try self.push(value);
     }
 
     fn pop(self: *Interpreter) Error!i32 {
@@ -5091,6 +5298,82 @@ test "a block loaded from F18 code goes on in its node, but one loaded after it 
     try expectEqual(7, assembled.descriptors[0].p);
     // an x86 word F18 code has no word for still runs in it
     try expectEqual(7, assembled.programs[1].ram[0]);
+}
+
+test "colorForth's host words branch and loop as x86 colorForth's do" {
+    // as block 230's ?rl, if and -if test the flags of the last arithmetic,
+    // and a ; returns, with then going on in the word after it
+    const bytes = try colorBlocks(&.{
+        \\: up ] for i next ;
+        \\: one? ] dup and if drop 1 ; then drop 2 ;
+        \\: neg? ] 0 + -if drop 1 ; then drop 2 ;
+        \\: pad ] begin dup 3 and drop while 1 + end then ;
+        \\: down ] begin -1 + -until ;
+        \\: odd ] begin 1 + dup 3 and drop until ;
+        \\: under ] push 10 i + pop ;
+        \\[ 1 +node 3 up 3 /stack
+        \\[ 2 +node 5 one? 0 one? -3 neg? 3 neg? 4 /stack
+        \\[ 3 +node 5 pad 2 down 3 odd 7 under 5 /stack
+    });
+    var programs: [4]Program = undefined;
+    var descriptors: [4]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    const assembled = try assembleColorForth(&bytes, &.{0}, &programs, &descriptors, &diagnostic);
+    try expectEqualSlices(Word, &.{ 3, 2, 1 }, assembled.descriptors[0].stack[0..assembled.descriptors[0].stack_len]);
+    try expectEqualSlices(Word, &.{ 1, 2, 1, 2 }, assembled.descriptors[1].stack[0..assembled.descriptors[1].stack_len]);
+    try expectEqualSlices(Word, &.{ 8, word18(-1), 5, 17, 7 }, assembled.descriptors[2].stack[0..assembled.descriptors[2].stack_len]);
+
+    const cases = .{
+        // a branch from one word into another, between host and target
+        .{ error.UnclosedControl, "[ host : x ] if ; : y ] ;", "y" },
+        .{ error.UnmatchedControl, "[ host : x ] then ;", "then" },
+        .{ error.UnmatchedControl, "[ host : x ] for end ;", "end" },
+        // and outside them, where it can be F18 code, as a ROM source's,
+        // when the word runs
+        .{ error.UnmatchedControl, ": x ] begin dup unext ; [ x", "x" },
+        .{ error.UnmatchedControl, ": x ] if : y ] 1 ; [ y x", "x" },
+        // which x86 colorForth would run 2^32 times
+        .{ error.NumberOutOfRange, ": x ] for next ; [ 0 x", "x" },
+        .{ error.NoLoop, ": x ] i ; [ x", "x" },
+        // a word whose if node left unresolved, rather than a jump to itself
+        .{ error.UnmatchedControl, ": x ] if ; [ 5 node 0 org : main ] ; [ 3 +node x", "x" },
+        // a loop that never ends
+        .{ error.HostWordTooLong, ": x ] begin end ; [ x", "x" },
+    };
+    inline for (cases) |case| {
+        const errors = try colorBlocks(&.{case[1]});
+        try expectError(case[0], assembleColorForth(&errors, &.{0}, &programs, &descriptors, &diagnostic));
+        try expectEqualStrings(case[2], diagnostic.token);
+    }
+
+    // F18 code's control words, outside host, leave nothing to fail what
+    // follows them
+    const fine = try colorBlocks(&.{
+        \\: x ] begin dup unext ; [ 5 node 0 org : main ] ; [ 3 +node : y ] ;
+        \\: z ] begin dup unext ; [ empty : y ] ;
+        \\: w ] begin dup unext ; [ 6 node 0 org host target
+    });
+    _ = try assembleColorForth(&fine, &.{0}, &programs, &descriptors, &diagnostic);
+
+    // and a yellow number after a ; compiles into the word it goes on in,
+    // before the then, as colorForth's, leaving nothing on the stack
+    const after = try colorBlocks(&.{
+        \\: x ] if ; [ 3 ] then
+        \\[ 1 +node 1 /stack
+    });
+    try expectError(error.StackUnderflow, assembleColorForth(&after, &.{0}, &programs, &descriptors, &diagnostic));
+}
+
+test "a session's compile leaves no branch of a host word unresolved" {
+    var programs: [4]Program = undefined;
+    var descriptors: [4]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+    const bytes = try colorBlocks(&.{ ": x ] if ;", "", "[ x" });
+    try session.loadColorForth(&bytes, 0);
+    try expectError(error.UnmatchedControl, session.loadColorForth(&bytes, 2));
 }
 
 test "colorForth's red words before a node define words for the host" {

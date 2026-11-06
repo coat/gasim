@@ -314,8 +314,8 @@ new feature should come with a CLI form, or a reason it can't.
 ### colorForth
 
 Not done: `kind`/`reset` for the ROM builds, the ROM labels arrayForth 2 has
-that arrayForth 3's tables lack (`-++`), host words with control flow or that
-use host memory but for system variables, and node state kept across
+that arrayForth 3's tables lack (`-++`), host words that use host memory
+but for system variables, and node state kept across
 `node`. Also not done: host words that read the compiler's object code,
 as block 1172's `resume` does; magenta variables defined outside the
 system's blocks; the names of blocks 34 and 36, which block 18 loads
