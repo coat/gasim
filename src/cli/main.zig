@@ -580,6 +580,11 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     // as a stream's frame does even if it describes no node. Without them,
     // each program in its node's own bin is loaded and started at its
     // entry, and code saved in other bins is not loaded.
+    //
+    // Streams and pF/144's nucleus sent one after another, as block 1665
+    // sends them, are not yet (ROADMAP step 6).
+    if (assembled.sends().len > 0)
+        fatal("{s} sends streams or pF/144's nucleus with !STREAM, !stream or !NUCLEUS, which gasim doesn't send yet", .{source_path});
     // the parts of a stream set nodes up one after another, and /ROOT and
     // FORWARD are for the root's ROM, which only the STREAMER's stream
     // does, through 708's UART, 300's synchronous line or 705's flash

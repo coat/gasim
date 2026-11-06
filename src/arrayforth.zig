@@ -133,6 +133,19 @@
 //!                       flash, and patches that address into the root's
 //!                       RAM, at x23 and x31, for the root's code to read
 //!                       the next frame from (`streamer.Part.forward`)
+//!     ?RAM              after STREAMER LOAD, until HOST LOAD, the
+//!                       STREAMER's count of the loads of the node being
+//!                       described, -1 for none, which -1 ?RAM ! empties
+//!     S-ORG S-LNG  HOST LOAD  !STREAM  !stream  !NUCLEUS
+//!                       send a stream, after resetting the chip, or
+//!                       without, and pF/144's nucleus, as block 1665 does
+//!                       (`Assembled.sends`), up to 4, but not at a prompt.
+//!                       HOST LOAD, arrayForth 3's IDE, sets DECIMAL. A bin
+//!                       a stream sent loads is not saved again.
+//!     DO-ROM  PTB       nothing, as gasim assembles the ROM itself, and
+//!                       the IDE's path table, which gasim keeps but does
+//!                       not use, so that pF/144's stock code (block 2280)
+//!                       and stream blocks load
 
 pub const Error = assembler.Error || error{
     StackUnderflow,
@@ -155,6 +168,12 @@ pub const Error = assembler.Error || error{
     LoadTooDeep,
     /// a definition without its ;
     UnclosedDefinition,
+    /// more than 4 streams and nuclei sent, by !STREAM, !stream and
+    /// !NUCLEUS
+    TooManySends,
+    /// !STREAM, !stream or !NUCLEUS at a prompt or in an editor's compile,
+    /// which gasim doesn't send
+    CannotSend,
     /// colorForth host words that run more than 2^24 of their words and
     /// numbers in a load, as a loop that never ends
     HostWordTooLong,
@@ -350,12 +369,17 @@ pub const Session = struct {
         // descriptors its FRAME[ began, which dropped those before
         if (it.stream_root != null) {
             if (it.framing or it.stream.?.frame_count > 0) {
-                it.descriptor_count = 0;
+                it.descriptor_count = it.sent_descriptors;
                 it.boot_node = null;
-                it.unsaved_count = 0;
+                var unsaved_count: u8 = 0;
+                for (it.unsaved_loads[0..it.unsaved_count]) |unsaved| if (unsaved.descriptor < it.sent_descriptors) {
+                    it.unsaved_loads[unsaved_count] = unsaved;
+                    unsaved_count += 1;
+                };
+                it.unsaved_count = unsaved_count;
             }
             it.stream = null;
-            it.descriptor_start = 0;
+            it.descriptor_start = it.sent_descriptors;
         }
         it.stream_root = null;
         it.framing = false;
@@ -404,16 +428,29 @@ pub const Assembled = struct {
     unresolved_then: ?usize = null,
     /// the frames of a stream, from STREAM[ ... ]STREAM, for
     /// `streamer.stream` to lay out, whose descriptors are then all of
-    /// `descriptors`
+    /// `descriptors` but those of the streams in `sends`
     stream: ?Stream = null,
+    /// what a stream block sent the chip, in order, as pF/144's block
+    /// 1665 sends its streams and nucleus (see `sends`)
+    sent: [Send.max]Send = undefined,
+    sent_count: u8 = 0,
+
+    pub fn sends(self: *const Assembled) []const Send {
+        return self.sent[0..self.sent_count];
+    }
 
     /// the stream's parts, into `buffer`, or none without a stream, for
     /// `streamer.stream`. Their paths are in `self`, and their
     /// descriptors in `descriptors`.
     pub fn parts(self: *const Assembled, buffer: *[Stream.max_parts]streamer.Part) []const streamer.Part {
-        const s = if (self.stream) |*stream| stream else return buffer[0..0];
+        return if (self.stream) |*stream| self.partsOf(stream, buffer) else buffer[0..0];
+    }
+
+    /// the parts of a stream, `self.stream` or one of `sends`, into
+    /// `buffer`
+    pub fn partsOf(self: *const Assembled, s: *const Stream, buffer: *[Stream.max_parts]streamer.Part) []const streamer.Part {
         var frame_buffer: [Stream.max_frames]streamer.Frame = undefined;
-        const all = self.frames(&frame_buffer);
+        const all = self.framesOf(s, &frame_buffer);
         var k: usize = 0;
         for (s.parts[0..s.part_count], buffer[0..s.part_count]) |kind, *part| part.* = switch (kind) {
             .frame => frame: {
@@ -429,9 +466,14 @@ pub const Assembled = struct {
     /// the stream's frames, into `buffer`, or none without a stream. Their
     /// paths are in `self`, and their descriptors in `descriptors`.
     pub fn frames(self: *const Assembled, buffer: *[Stream.max_frames]streamer.Frame) []const streamer.Frame {
-        const s = if (self.stream) |*stream| stream else return buffer[0..0];
+        return if (self.stream) |*stream| self.framesOf(stream, buffer) else buffer[0..0];
+    }
+
+    /// the frames of a stream, `self.stream` or one of `sends`, into
+    /// `buffer`
+    pub fn framesOf(self: *const Assembled, s: *const Stream, buffer: *[Stream.max_frames]streamer.Frame) []const streamer.Frame {
         var path_start: usize = 0;
-        var descriptor_start: usize = 0;
+        var descriptor_start: usize = s.descriptor_base;
         for (s.ends[0..s.frame_count], buffer[0..s.frame_count]) |end, *f| {
             f.* = .{ .path = s.nodes[path_start..end.path], .descriptors = self.descriptors[descriptor_start..end.descriptors] };
             path_start = end.path;
@@ -441,6 +483,20 @@ pub const Assembled = struct {
     }
 };
 
+/// what arrayForth 3's host words send the chip through the IDE's port
+pub const Send = union(enum) {
+    /// a stream, as !STREAM sends it, after resetting the chip, or as
+    /// !stream does, without
+    stream: struct { stream: Stream, reset: bool },
+    /// pF/144's nucleus, as !NUCLEUS sends it (block 1638): a frame for
+    /// node 708's ser-exec to pass down to node 108, which writes it to the
+    /// SRAM from address 0, of its length and then each 16-bit cell of the
+    /// first 9 blocks of the disk
+    nucleus,
+
+    pub const max = 4;
+};
+
 /// the parts of a stream from its root, each frame with the path ]FRAME
 /// found
 pub const Stream = struct {
@@ -448,6 +504,9 @@ pub const Stream = struct {
     pub const max_parts = 32;
 
     root: u16,
+    /// where its descriptors begin in `Assembled.descriptors`, after those
+    /// of the streams sent before it
+    descriptor_base: usize = 0,
     /// its frames, /ROOTs and FORWARDs, in order
     parts: [max_parts]Kind = undefined,
     part_count: u8 = 0,
@@ -479,7 +538,7 @@ pub const Stream = struct {
     }
 
     fn end(self: *const Stream) End {
-        return if (self.frame_count == 0) .{ .path = 0, .descriptors = 0 } else self.ends[self.frame_count - 1];
+        return if (self.frame_count == 0) .{ .path = 0, .descriptors = self.descriptor_base } else self.ends[self.frame_count - 1];
     }
 };
 
@@ -708,6 +767,19 @@ const max_labels = 128;
 
 /// arrayForth 3's STREAMER, block 42 FH of its environment, block 1560
 const streamer_block = 1602;
+/// arrayForth 3's IDE for the host port, block 1 FH of SER in its
+/// environment, block 1560
+const host_block = 1621;
+/// cells of host memory, the last of which hold the IDE's path table
+const memory_cells = 4096;
+/// the IDE's table of paths, PTB, which pF/144's stream block 1666 sets,
+/// and gasim keeps but does not use, as it reaches every node directly
+const path_table = memory_cells - path_table_len;
+const path_table_len = 8;
+/// the address of the STREAMER's ?RAM in a stream, the count of loads of
+/// the node being described, which -1 ?RAM ! empties, as block 1982's
+/// /WIRE does before its /PART
+const loads_cell = -2;
 /// what ENTIRE gives COURSE for the default path, which is not in host
 /// memory as the STREAMER's is
 const entire_course = -1;
@@ -892,6 +964,11 @@ const Interpreter = struct {
     /// selects from begin, after those of a stream's frames
     boot_node: ?usize = null,
     descriptor_start: usize = 0,
+    /// what !STREAM, !stream and !NUCLEUS sent, and the end of the
+    /// descriptors of the streams sent, which the next stream's follow
+    sends: [Send.max]Send = undefined,
+    send_count: u8 = 0,
+    sent_descriptors: usize = 0,
     /// where words such as . and UPD write, if anywhere
     out: ?*Io.Writer = null,
     /// the chip that IDE words act on, and the node they target
@@ -929,7 +1006,12 @@ const Interpreter = struct {
     compiling: ?struct { name: []const u8, start: u16, names: u8, directive: Diagnostic, interpreting: bool = false } = null,
     /// host memory, of cells, the first `here` of which are used by
     /// VARIABLE, CREATE, ARRAY, ALLOT and ,
-    memory: [4096]i32 = undefined,
+    memory: [path_table]i32 = undefined,
+    /// the IDE's path table, at `path_table` in host memory
+    paths: [path_table_len]i32 = @splat(0),
+    /// whether ?RAM is the STREAMER's, from STREAMER LOAD, until HOST LOAD
+    /// loads the IDE, whose ?RAM shows a node's memory
+    streamer_loaded: bool = false,
     here: u16 = 0,
     /// branches being compiled, waiting for where they go, and where loops
     /// start
@@ -1020,6 +1102,8 @@ const Interpreter = struct {
 
     fn assembled(self: Interpreter) Assembled {
         return .{
+            .sent = self.sends,
+            .sent_count = self.send_count,
             .programs = self.programs[0..self.count],
             .descriptors = self.descriptors[0..self.descriptorEnd()],
             .feedback_differs = self.feedback_differs,
@@ -1079,10 +1163,9 @@ const Interpreter = struct {
         return if (s.part_count == 0) null else s;
     }
 
-    /// fails, at the end of a program, if a boot descriptor loads a bin
-    /// that was never saved, at where it was loaded if that is known
-    fn checkLoads(self: *Interpreter) Error!void {
-        if (self.stream) |*s| for (s.parts[0..s.part_count]) |kind| if (kind == .root) {
+    /// fails if a /ROOT of a stream loads a bin that was never saved
+    fn checkRoots(self: *Interpreter, s: *const Stream) Error!void {
+        for (s.parts[0..s.part_count]) |kind| if (kind == .root) {
             for (self.saved[0..self.saved_count]) |saved| {
                 if (saved.number == kind.root.bin) break;
             } else {
@@ -1090,6 +1173,13 @@ const Interpreter = struct {
                 return error.NoSuchBin;
             }
         };
+    }
+
+    /// fails, at the end of a program, if a boot descriptor loads a bin
+    /// that was never saved, at where it was loaded if that is known
+    fn checkLoads(self: *Interpreter) Error!void {
+        if (self.stream) |*s| try self.checkRoots(s);
+        for (self.sends[0..self.send_count]) |*sent| if (sent.* == .stream) try self.checkRoots(&sent.stream.stream);
         for (self.descriptors[0..self.descriptorEnd()], 0..) |d, i| for (d.loads[0..d.load_count]) |part| {
             for (self.saved[0..self.saved_count]) |saved| {
                 if (saved.number == part.bin) break;
@@ -2492,6 +2582,13 @@ const Interpreter = struct {
             };
             if (s.loadsBin(bin.number)) return error.FrameLoadsBin;
         };
+        // or once sent, which has its code as it was
+        if (again != null) {
+            for (self.descriptors[0..self.sent_descriptors]) |d| for (d.loads[0..d.load_count]) |part| {
+                if (part.bin == bin.number) return error.FrameLoadsBin;
+            };
+            for (self.sends[0..self.send_count]) |*sent| if (sent.* == .stream and sent.stream.stream.loadsBin(bin.number)) return error.FrameLoadsBin;
+        }
         if (again) |i| self.saved[i].labels = &.{};
 
         // keeps the bin's own labels, sharing them with a bin that has the
@@ -2706,7 +2803,15 @@ const Interpreter = struct {
             .PATH, .@"-HOOK" => _ = try self.pop(),
             .FOCUS, .VIRGIN => _ = try self.targetNode(),
             .UPD, .@".STK" => try self.showStacks(),
-            .@"?RAM" => try self.showMemory(0),
+            // the STREAMER's from STREAMER LOAD, as the stream blocks load it
+            // after HOST, and block 1674 for softsim without a stream, and
+            // the IDE's after HOST LOAD, as the later definition wins
+            .@"?RAM" => if (self.streamer_loaded) try self.push(loads_cell) else try self.showMemory(0),
+            .PTB => {
+                const path = try self.pop();
+                if (path < 0 or path >= path_table_len) return error.NumberOutOfRange;
+                try self.push(path_table + path);
+            },
             .@"?ROM" => try self.showMemory(0x80),
             .@"-ASM" => {
                 const n = try self.pop();
@@ -2773,8 +2878,18 @@ const Interpreter = struct {
             .CONSTANT => try self.define(.constant, try self.pop()),
             .LOAD => {
                 const block = try self.pop();
-                // the STREAMER is built in, which its block leaves in DECIMAL
-                if (block == streamer_block) self.base = 10 else try self.load(block, block);
+                // the STREAMER is built in, which its block leaves in
+                // DECIMAL, and the IDE for the host port, which sends what
+                // !STREAM and the others are given, and whose block begins
+                // EMPTY DECIMAL, though gasim doesn't forget the words
+                // since the mark, which arrayForth 3 keeps below GOLD
+                if (block == streamer_block) {
+                    self.base = 10;
+                    self.streamer_loaded = true;
+                } else if (block == host_block) {
+                    self.base = 10;
+                    self.streamer_loaded = false;
+                } else try self.load(block, block);
             },
             .THRU => {
                 const last = try self.pop();
@@ -2848,16 +2963,38 @@ const Interpreter = struct {
                 d.return_stack_len = d.return_stack.len;
             },
             .STREAMER => try self.push(streamer_block),
+            // which assembles every node's ROM, as gasim does on its own
+            // from the same disk (rom.zig), so STOCK can go on to the rest
+            .@"DO-ROM" => {},
+            // the stream as arrayForth 3 lays it out in host memory, its
+            // address and length, which gasim lays out as it sends it
+            .@"S-ORG", .@"S-LNG" => try self.push(0),
+            .HOST => try self.push(host_block),
+            .@"!STREAM", .@"!stream" => {
+                _ = try self.pop();
+                _ = try self.pop();
+                if (self.stream_root != null) return error.UnclosedStream;
+                const s = self.parted() orelse return error.NoStream;
+                try self.send(.{ .stream = .{ .stream = s, .reset = word == .@"!STREAM" } });
+                // but the descriptors given after its ]FRAME, as the
+                // STREAMER sends none of them
+                self.descriptor_count = s.end().descriptors;
+                self.sent_descriptors = self.descriptor_count;
+                self.descriptor_start = self.descriptor_count;
+                self.stream = null;
+            },
+            .@"!NUCLEUS" => try self.send(.nucleus),
             .@"STREAM[" => {
                 const root = try self.pop();
                 if (self.stream_root != null) return error.UnclosedStream;
                 const root_node = std.math.cast(u16, root) orelse return error.UnknownRoot;
                 if (streamer.entire(root_node) == null) return error.UnknownRoot;
-                // in place of any stream before, as at a prompt
+                // in place of any stream before, as at a prompt, but for
+                // those sent
                 self.stream_root = root_node;
                 self.course = null;
-                self.stream = .{ .root = root_node };
-                self.descriptor_start = 0;
+                self.stream = .{ .root = root_node, .descriptor_base = self.sent_descriptors };
+                self.descriptor_start = self.sent_descriptors;
             },
             .ENTIRE => try self.push(entire_course),
             .COURSE => {
@@ -3017,10 +3154,24 @@ const Interpreter = struct {
             .ALLOT => try self.allot(try self.pop()),
             .HERE => try self.push(self.here),
             .@"," => try self.comma(try self.pop()),
-            .@"@" => try self.push((try self.cell(try self.pop())).*),
+            .@"@" => {
+                const address = try self.pop();
+                if (address == loads_cell and self.streamer_loaded) {
+                    // as the STREAMER keeps -1 for none
+                    const count = (try self.bootDescriptor()).load_count;
+                    try self.push(if (count == 0) -1 else count);
+                } else try self.push((try self.cell(address)).*);
+            },
             .@"!" => {
-                const address = try self.cell(try self.pop());
-                address.* = try self.pop();
+                const address = try self.pop();
+                if (address == loads_cell and self.streamer_loaded) {
+                    // keeping the first loads, or none for 0 or -1, as the
+                    // STREAMER's next load then goes in first
+                    const d = try self.bootDescriptor();
+                    const count = try self.pop();
+                    if (count > d.load_count) return error.NumberOutOfRange;
+                    d.load_count = @intCast(@max(count, 0));
+                } else (try self.cell(address)).* = try self.pop();
             },
             .@"+!" => {
                 const address = try self.cell(try self.pop());
@@ -3303,14 +3454,24 @@ const Interpreter = struct {
 
     /// `count` as a number of cells, if there is room for that many more
     fn room(self: *Interpreter, count: i32) Error!u16 {
-        if (count < 0 or count > self.memory.len - self.here) return error.NumberOutOfRange;
+        if (count < 0 or count > path_table - self.here) return error.NumberOutOfRange;
         return @intCast(count);
     }
 
     /// a cell of host memory that is in use
     fn cell(self: *Interpreter, address: i32) Error!*i32 {
+        if (address >= path_table and address < memory_cells) return &self.paths[@intCast(address - path_table)];
         if (address < 0 or address >= self.here) return error.NumberOutOfRange;
         return &self.memory[@intCast(address)];
+    }
+
+    fn send(self: *Interpreter, what: Send) Error!void {
+        // where nothing would send it, as a stream laid out at a prompt is
+        // only shown
+        if (self.interactive) return error.CannotSend;
+        if (self.send_count == self.sends.len) return error.TooManySends;
+        self.sends[self.send_count] = what;
+        self.send_count += 1;
     }
 
     fn swap(self: *Interpreter) Error!void {
@@ -3563,6 +3724,7 @@ const ForthWord = enum {
     HOOK,
     PATH,
     @"-HOOK",
+    PTB,
     FOCUS,
     VIRGIN,
     UPD,
@@ -3611,6 +3773,13 @@ const ForthWord = enum {
     @"+ND",
     @"+wire",
     STREAMER,
+    @"DO-ROM",
+    @"S-ORG",
+    @"S-LNG",
+    HOST,
+    @"!STREAM",
+    @"!stream",
+    @"!NUCLEUS",
     ENTIRE,
     @"/ROOT",
     FORWARD,
@@ -4360,6 +4529,75 @@ test "a stream's frame, as the STREAMER builds it" {
     const after = try assembleNodes("HEX STREAMER LOAD  708 STREAM[ FRAME[ 708 +NODE ]FRAME ]STREAM  9 +NODE", &programs, &descriptors, &diagnostic);
     try expectEqual(1, after.descriptors.len);
     try expectEqual(708, after.descriptors[0].node);
+}
+
+test "streams sent as pF/144's block 1665 sends them, each with its own descriptors" {
+    var programs: [1]Program = undefined;
+    var descriptors: [4]boot.Descriptor = undefined;
+    var diagnostic: Diagnostic = .{};
+    // as blocks 1666 and 1665 send a stream, the nucleus and then a stream
+    // without a reset, each after STREAMER LOAD, and as block 1982's /WIRE
+    // empties a node's loads, through the STREAMER's ?RAM, before its own.
+    // DO-ROM is gasim's, and descriptors after a ]FRAME aren't sent.
+    const assembled = try assembleNodes(
+        \\ DO-ROM  STREAMER LOAD
+        \\ ASM[ # 715 NODE ERS # 0 org  begin begin !b unext unext  >BIN ]ASM
+        \\ 0 ARRAY MYP  708 ORGN 715 TO -1 ,
+        \\ 708 STREAM[  ' MYP COURSE  FRAME[  715 +NODE 715 /RAM 0 /P  ]FRAME  9 +NODE  ]STREAM
+        \\ S-ORG S-LNG  HOST LOAD  !STREAM !NUCLEUS
+        \\ STREAMER LOAD
+        \\ 708 STREAM[  ' MYP COURSE  FRAME[  715 +NODE 0 4 715 /PART
+        \\    -1 ?RAM !  ?RAM @ S>D /IO  32 1 715 /PART  ?RAM @ /P
+        \\    708 +NODE xAA /P  ]FRAME  ]STREAM
+        \\ S-ORG S-LNG  HOST LOAD  !stream
+        \\ CREATE 1PAr  708 ORGN 715 TO -1 ,  1PAr 1 PTB !
+    , &programs, &descriptors, &diagnostic);
+    const sends = assembled.sends();
+    try expectEqual(3, sends.len);
+    try expectEqual(true, sends[0].stream.reset);
+    try expectEqual(.nucleus, std.meta.activeTag(sends[1]));
+    try expectEqual(false, sends[2].stream.reset);
+    var frames: [Stream.max_frames]streamer.Frame = undefined;
+    const first = assembled.framesOf(&sends[0].stream.stream, &frames)[0].descriptors;
+    try expectEqual(1, first.len);
+    try expectEqual(0, first[0].p);
+    const second = assembled.framesOf(&sends[2].stream.stream, &frames)[0].descriptors;
+    try expectEqual(2, second.len);
+    try expectEqual(1, second[0].load_count);
+    try expectEqual(boot.Descriptor.Load{ .bin = 715, .source = 32, .destination = 32, .len = 1 }, second[0].loads[0]);
+    // ?RAM @ gives -1 for no loads, as the STREAMER keeps it, then 1
+    try expectEqual(@as(?Word, word18(-1)), second[0].io);
+    try expectEqual(1, second[0].p);
+    try expectEqual(0xaa, second[1].p);
+    try expectEqual(null, assembled.stream);
+    // without node 009's descriptor, given after the first ]FRAME
+    try expectEqual(3, assembled.descriptors.len);
+
+    // a stream not yet closed can't be sent, nor more than four things
+    try expectError(error.UnclosedStream, assembleNodes("708 STREAM[ FRAME[ ]FRAME 0 0 !STREAM", &programs, &descriptors, &diagnostic));
+    try expectError(error.NoStream, assembleNodes("0 0 !stream", &programs, &descriptors, &diagnostic));
+    try expectError(error.TooManySends, assembleNodes("!NUCLEUS !NUCLEUS !NUCLEUS !NUCLEUS !NUCLEUS", &programs, &descriptors, &diagnostic));
+    // the IDE's path table keeps what is stored, from 0
+    const paths = try assembleNodes("7 1 PTB !  715 +NODE  1 PTB @ 2 PTB @ + /P", &programs, &descriptors, &diagnostic);
+    try expectEqual(7, paths.descriptors[0].p);
+    // ?RAM is the IDE's after HOST LOAD, whose address the STREAMER's isn't
+    try expectError(error.NoChip, assembleNodes("STREAMER LOAD  HOST LOAD  ?RAM", &programs, &descriptors, &diagnostic));
+    try expectError(error.NumberOutOfRange, assembleNodes("715 +NODE  -2 @", &programs, &descriptors, &diagnostic));
+    // a /ROOT's bin is checked in a stream sent too
+    try expectError(error.NoSuchBin, assembleNodes("708 STREAM[ 0 0 1 9999 /ROOT FRAME[ ]FRAME ]STREAM  0 0 !STREAM", &programs, &descriptors, &diagnostic));
+    // and a bin sent is not saved again, as the chip has had it
+    try expectError(error.FrameLoadsBin, assembleNodes(
+        \\ ASM[ # 715 NODE ERS dup >BIN ]ASM
+        \\ 708 STREAM[ FRAME[ 715 +NODE 715 /RAM ]FRAME ]STREAM  0 0 !STREAM
+        \\ ASM[ # 715 NODE ERS drop >BIN ]ASM
+    , &programs, &descriptors, &diagnostic));
+
+    // nor is anything sent at a prompt, which would only show it
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+    try expectError(error.CannotSend, session.interpret("!NUCLEUS"));
+    try expectEqual(0, session.assembled().sends().len);
 }
 
 test "a stream of several frames, each with its own path and descriptors" {
