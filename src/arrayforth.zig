@@ -1438,13 +1438,21 @@ const Interpreter = struct {
         var words: u8 = 0;
         var body: u16 = 0;
         var mark: u8 = 0;
+        // the last word moved, whose body the words falling through into
+        // it end with, where it was and where it is
+        var moved: struct { start: u16 = 0, end: u16 = 0, to: u16 = 0 } = .{};
         for (self.host_words[0..self.host_word_count], 0..) |word, i| {
             if (i == self.host_mark) mark = words;
             if (from(word.block, block)) continue;
-            std.mem.copyForwards(HostWord.Part, self.host_body[body..][0..word.len], self.host_body[word.start..][0..word.len]);
             self.host_words[words] = word;
-            self.host_words[words].start = body;
-            body += word.len;
+            if (words > 0 and word.start >= moved.start and word.start + word.len <= moved.end) {
+                self.host_words[words].start = moved.to + (word.start - moved.start);
+            } else {
+                std.mem.copyForwards(HostWord.Part, self.host_body[body..][0..word.len], self.host_body[word.start..][0..word.len]);
+                moved = .{ .start = word.start, .end = word.start + word.len, .to = body };
+                self.host_words[words].start = body;
+                body += word.len;
+            }
             words += 1;
         }
         if (self.host_mark == self.host_word_count) mark = words;
@@ -1538,11 +1546,11 @@ const Interpreter = struct {
             .red => {
                 if (self.host_word_count == self.host_words.len) return error.TooManyLabels;
                 self.host_words[self.host_word_count] = .{ .name = try self.keepName(token.text()), .start = self.host_body_len, .len = 0, .block = self.color_load };
-                self.defining = self.host_word_count;
+                // a word before it that has no ; yet falls through into it
+                if (self.defining == null) self.defining = self.host_word_count;
                 self.host_word_count += 1;
             },
             .yellow, .green => if (self.defining) |i| {
-                const word = &self.host_words[i];
                 if (token.tag.color() == .green and !token.tag.isNumber() and eql(token.text(), ";")) {
                     self.defining = null;
                     return;
@@ -1555,7 +1563,7 @@ const Interpreter = struct {
                 if (self.host_body_len == self.host_body.len) return error.DefinitionsTooLong;
                 self.host_body[self.host_body_len] = if (token.tag.isNumber()) .{ .number = token.value } else .{ .word = try self.keepName(token.text()) };
                 self.host_body_len += 1;
-                word.len += 1;
+                for (self.host_words[i..self.host_word_count]) |*word| word.len += 1;
             } else if (token.tag.color() == .yellow) {
                 if (token.tag.isNumber()) return self.push(token.value);
                 return self.yellowWord(token.text());
@@ -4543,6 +4551,49 @@ test "colorForth's yellow words assemble only once a node has begun in that load
     // exit run by a host word after its block has ended
     const exits = try colorBlocks(&.{"[ host : x ] exit exit ; [ target x"});
     _ = try assembleColorForth(&exits, &.{0}, &programs, &.{}, &diagnostic);
+}
+
+test "colorForth's red words without code fall through into the next" {
+    // a host word that falls into the next, as block 1110's head into pipe
+    try expectSameAsColorForth(&.{
+        \\[ host
+        \\: head
+        \\: pipe ] 2 + lit ;
+        \\: one ] 1 head ; [ target 0 node 0 org
+        \\: main ] [ 4 head 5 pipe one ] ;
+    },
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : main  6. 7. 3. ;
+        \\ >BIN ]ASM
+    );
+
+    // and keep doing so when a session forgets a word before them
+    var programs: [4]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+    const bytes = try colorBlocks(&.{
+        \\[ host
+        \\: first ] 9 lit ; [ target
+        ,
+        \\
+        ,
+        \\[ host
+        \\: head
+        \\: pipe ] 2 + lit ; [ target
+        ,
+        \\
+        ,
+        \\[ 1 node 0 org
+        \\: main ] [ 4 head ] ;
+    });
+    for ([_]u32{ 0, 2, 0, 4 }) |block| try session.loadColorForth(&bytes, block);
+    const assembled = session.assembled().programs;
+    try expectEqual(1, assembled.len);
+    try expectEqual(opcodes(.@"@p", .@";", .@";", .@";"), assembled[0].ram[0]);
+    try expectEqual(6, assembled[0].ram[1]);
 }
 
 test "colorForth errors say where they are" {
