@@ -112,8 +112,9 @@ of the SRAM cluster: `[sram load`. Boot descriptors say what to load into
 nodes and how to start them, as arrayForth 3's do but with single
 numbers: `n +node` picks node n, and leaves F18 code, `bin /ram` loads all
 of its RAM, `a n bin /part` n words at a, in place of the loads before,
-`x /a`, `x /b`, `x /io` and `a /p` set its registers, and `v1 … vn n
-/stack` its stack, as block 266 describes the SRAM cluster's nodes:
+`x /a`, `x /b`, `x /io` and `a /p` set its registers, `v1 … vn n
+/stack` its stack and `v1 … vn n /rstack` its return stack, as block 266
+describes the SRAM cluster's nodes:
 `[107 +node 1614 /ram down /b`. A program with them is set up as they
 say, by `gasim run` and by `L`, which sets the code compiled up first and
 leaves out a node whose bin was not saved. `spispeed`, `spicmd` and `spiadr`

@@ -671,7 +671,7 @@ const HostWord = struct {
 const HostControl = enum { @";", @"if", @"-if", then, begin, end, until, @"-until", @"while", @"-while", @"for", next, i, push, pop };
 
 /// the yellow words that colorForth runs on the host
-const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, thru, fh, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/", @"@", @"!", @"+node", @"/ram", @"/part", @"/a", @"/b", @"/io", @"/p", @"/stack" };
+const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, thru, fh, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/", @"@", @"!", @"+node", @"/ram", @"/part", @"/a", @"/b", @"/io", @"/p", @"/stack", @"/rstack" };
 
 /// arrayForth 2's names for opcodes that arrayForth 3 renamed
 const colorforth_opcodes: std.StaticStringMap([]const u8) = .initComptime(.{
@@ -2215,6 +2215,11 @@ const Interpreter = struct {
             .@"/stack" => {
                 const d = try self.bootDescriptor();
                 d.stack_len = try self.popSingles(&d.stack);
+            },
+            // as block 242's, for block 228's +wire
+            .@"/rstack" => {
+                const d = try self.bootDescriptor();
+                d.return_stack_len = try self.popSingles(&d.return_stack);
             },
             .@"@" => try self.push((try self.hostCell(try self.pop())).*),
             .@"!" => {
@@ -5132,7 +5137,7 @@ test "colorForth's boot descriptors say what to load into nodes and how to start
         \\[ 1614 bin 7 node 0 org
         \\: main ] drop ;
         \\[ 107 +node 1614 /ram down /b $8a00 1 /stack $17 /p
-        \\[ 7 +node 3 2 + 4 7 /part 1 2 2 /stack 5 /a $20000 /io
+        \\[ 7 +node 3 2 + 4 7 /part 1 2 2 /stack 5 /a $20000 /io 3 4 2 /rstack
     });
     var programs: [4]Program = undefined;
     var descriptors: [4]boot.Descriptor = undefined;
@@ -5151,6 +5156,8 @@ test "colorForth's boot descriptors say what to load into nodes and how to start
     try expectEqual(7, data.node);
     try expectEqual(boot.Descriptor.Load{ .bin = 7, .source = 5, .destination = 5, .len = 4 }, data.loads[0]);
     try expectEqualSlices(Word, &.{ 1, 2 }, data.stack[0..data.stack_len]);
+    // with the rightmost on top, as block 228's +wire fills it
+    try expectEqualSlices(Word, &.{ 3, 4 }, data.return_stack[0..data.return_stack_len]);
     try expectEqual(@as(?Word, 5), data.a);
     try expectEqual(@as(?Word, word18(0x20000)), data.io);
     // the default P, warm
