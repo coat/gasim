@@ -331,7 +331,12 @@ Each new feature should come with a CLI form, or a reason it can't.
 
 Not done: `kind`/`reset` for the ROM builds, the ROM labels arrayForth 2 has
 that arrayForth 3's tables lack (`-++`), host words with control flow or that
-use host memory, and node state kept across `node`. In the editor: the
+use host memory, and node state kept across `node`. The names that x86 code
+gives blocks, such as `sram load` in polyFORTH's block 360 (`:sram [264 ];`
+in block 202), and boot descriptors (`+node /ram /p /b`), which arrayForth
+3's `.blk` files have. Block 792's yellow `then`, whose `if` is in a
+comment, stops the 10BASE-T load block 720 of `OkadBack.cf`, though
+arrayForth 2, with no check on its stack, went past it. In the editor: the
 selected node's stacks beside it, and finding a word's definition across
 blocks.
 
