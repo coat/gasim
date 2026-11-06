@@ -586,10 +586,12 @@ const ColorFrame = struct {
 };
 
 /// a number that arrayForth 2's system names as it starts, such as sram,
-/// the block of the SRAM cluster
+/// the block of the SRAM cluster, or one of its variables, whose value is
+/// kept in its block, such as block 202's @res2
 const SystemName = struct {
     name: []const u8,
     value: i32,
+    variable: bool = false,
 };
 
 /// a word defined for the host, between host and target, and the words and
@@ -605,7 +607,7 @@ const HostWord = struct {
 };
 
 /// the yellow words that colorForth runs on the host
-const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, thru, fh, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/" };
+const ColorWord = enum { node, bin, @":", host, target, lit, org, here, @"+cy", @"-cy", @",", load, loads, thru, fh, exit, empty, mark, reclaim, dup, drop, swap, over, nip, negate, @"-", @"2*", @"2/", @"+", @"*", @"and", @"or", @"/", mod, @"/mod", @"*/", @"@", @"!" };
 
 /// arrayForth 2's names for opcodes that arrayForth 3 renamed
 const colorforth_opcodes: std.StaticStringMap([]const u8) = .initComptime(.{
@@ -899,7 +901,7 @@ const Interpreter = struct {
     color_node: bool = false,
     /// the numbers an arrayForth 2 image's system names as it starts,
     /// which yellow words that are nothing else leave
-    system_names: [64]SystemName = undefined,
+    system_names: [256]SystemName = undefined,
     system_name_count: u8 = 0,
     /// the names of colorForth labels, which are not kept as text in blocks
     names_text: [16 * 1024]u8 = undefined,
@@ -930,6 +932,9 @@ const Interpreter = struct {
     host_body_len: u16 = 0,
     /// the host word being defined, until its ;
     defining: ?u8 = null,
+    /// whether yellow words have run in the definition since its last green
+    /// word, so that the next green word compiles the number they leave
+    defining_yellow: bool = false,
     /// host words running host words
     host_depth: u8 = 0,
 
@@ -1405,6 +1410,9 @@ const Interpreter = struct {
         defer self.color_line = null;
         self.color_address = false;
         self.color_node = false;
+        // a definition that a load before left open, as one ends without ;
+        self.defining = null;
+        self.defining_yellow = false;
         self.learnSystemNames();
         try self.pushColorBlock(block);
         while (self.color_depth > 0) {
@@ -1527,6 +1535,12 @@ const Interpreter = struct {
                 .white, .blue, .gray, .none => continue,
                 else => {},
             }
+            if (token.tag == .variable) {
+                self.nameSystemNumber(token.text(), token.value, true);
+                red_len = null;
+                count = 0;
+                continue;
+            }
             if (color == .yellow and token.tag.isNumber()) {
                 numbers = .{ numbers[1], token.value };
                 count = @min(count + 1, 2);
@@ -1545,7 +1559,7 @@ const Interpreter = struct {
                     @memcpy(red[0..text.len], text);
                     red_len = text.len;
                 },
-                .green => if (eql(text, ";")) if (defined) |len| if (red_value) |n| self.nameSystemNumber(red[0..len], n),
+                .green => if (eql(text, ";")) if (defined) |len| if (red_value) |n| self.nameSystemNumber(red[0..len], n, false),
                 .yellow => if (eql(text, "exit")) {
                     return;
                 } else if (eql(text, "fh") and count > 0) {
@@ -1564,20 +1578,31 @@ const Interpreter = struct {
         }
     }
 
-    fn nameSystemNumber(self: *Interpreter, text: []const u8, value: i32) void {
+    fn nameSystemNumber(self: *Interpreter, text: []const u8, value: i32, variable: bool) void {
         for (self.system_names[0..self.system_name_count]) |*named| if (eql(named.name, text)) {
-            named.value = value;
+            named.* = .{ .name = named.name, .value = value, .variable = variable };
             return;
         };
         if (self.system_name_count == self.system_names.len) return;
         const kept = self.keepName(text) catch return;
-        self.system_names[self.system_name_count] = .{ .name = kept, .value = value };
+        self.system_names[self.system_name_count] = .{ .name = kept, .value = value, .variable = variable };
         self.system_name_count += 1;
     }
 
+    /// the number a system name leaves: its number, or a variable's
+    /// address, which follows host memory
     fn systemName(self: *const Interpreter, text: []const u8) ?i32 {
-        for (self.system_names[0..self.system_name_count]) |named| if (eql(named.name, text)) return named.value;
+        for (self.system_names[0..self.system_name_count], 0..) |named, i| if (eql(named.name, text)) {
+            return if (named.variable) @intCast(self.memory.len + i) else named.value;
+        };
         return null;
+    }
+
+    /// a cell of host memory, or the value of a system variable
+    fn hostCell(self: *Interpreter, address: i32) Error!*i32 {
+        const after = address -% @as(i32, @intCast(self.memory.len));
+        if (after >= 0 and after < self.system_name_count and self.system_names[@intCast(after)].variable) return &self.system_names[@intCast(after)].value;
+        return self.cell(address);
     }
 
     fn colorFrame(blocks: []const u8, at: usize) ColorFrame {
@@ -1635,8 +1660,9 @@ const Interpreter = struct {
     }
 
     /// Defines host words between host and target: a red word starts one,
-    /// whose green words and numbers it runs, and yellow numbers, until a
-    /// green ;
+    /// whose green words and numbers it runs, until a green ;, and yellow
+    /// words and numbers run as it is defined, leaving the number the next
+    /// green word compiles
     fn hostToken(self: *Interpreter, token: colorforth.Token) Error!void {
         switch (token.tag.color()) {
             .white, .blue, .gray, .none => {},
@@ -1649,24 +1675,38 @@ const Interpreter = struct {
                 self.host_word_count += 1;
             },
             .yellow, .green => if (self.defining) |i| {
-                if (token.tag.color() == .green and !token.tag.isNumber() and eql(token.text(), ";")) {
+                // yellow words and numbers run as the word is defined, and
+                // the next green word compiles the number they leave, as
+                // colorForth compiles a literal from yellow to green
+                if (token.tag.color() == .yellow) {
+                    if (!token.tag.isNumber() and eql(token.text(), "target")) return error.UnclosedDefinition;
+                    self.defining_yellow = true;
+                    if (token.tag.isNumber()) return self.push(token.value);
+                    return self.yellowWord(token.text());
+                }
+                if (self.defining_yellow) {
+                    self.defining_yellow = false;
+                    try self.defineHostPart(i, .{ .number = try self.pop() });
+                }
+                if (!token.tag.isNumber() and eql(token.text(), ";")) {
                     self.defining = null;
                     return;
                 }
-                // yellow words would run as the word is defined
-                if (token.tag.color() == .yellow and !token.tag.isNumber()) {
-                    if (eql(token.text(), "target")) return error.UnclosedDefinition;
-                    return error.HostCode;
-                }
-                if (self.host_body_len == self.host_body.len) return error.DefinitionsTooLong;
-                self.host_body[self.host_body_len] = if (token.tag.isNumber()) .{ .number = token.value } else .{ .word = try self.keepName(token.text()) };
-                self.host_body_len += 1;
-                for (self.host_words[i..self.host_word_count]) |*word| word.len += 1;
+                try self.defineHostPart(i, if (token.tag.isNumber()) .{ .number = token.value } else .{ .word = try self.keepName(token.text()) });
             } else if (token.tag.color() == .yellow) {
                 if (token.tag.isNumber()) return self.push(token.value);
                 return self.yellowWord(token.text());
             } else return error.HostCode,
         }
+    }
+
+    /// adds a word or number to the host word being defined, and to those
+    /// falling through into it
+    fn defineHostPart(self: *Interpreter, first: u8, part: HostWord.Part) Error!void {
+        if (self.host_body_len == self.host_body.len) return error.DefinitionsTooLong;
+        self.host_body[self.host_body_len] = part;
+        self.host_body_len += 1;
+        for (self.host_words[first..self.host_word_count]) |*word| word.len += 1;
     }
 
     /// a label of a node compiled before this one, searching the nodes in
@@ -1728,6 +1768,7 @@ const Interpreter = struct {
         if (self.findHostWord(text)) |word| return self.runHostWord(word);
         if (self.bin == null) return error.NoNode;
         if (self.earlierLabel(text)) |value| return self.callOrPush(value, true);
+        if (colorforth_literals.get(text)) |value| return self.namedLiteral(value);
         if (eql(text, ",")) return (try self.builder()).data(word18(try self.pop()));
         if (eql(text, "lit")) return (try self.builder()).literal(word18(try self.pop()));
         // words of arrayForth 3 that read a name after them, as colorForth
@@ -1760,6 +1801,7 @@ const Interpreter = struct {
             if (self.bin) |*bin| if (bin.findColor(text)) |value| return self.push(value);
             if (self.earlierLabel(text)) |value| return self.push(value);
             if (named_literals.get(text)) |value| return self.push(value);
+            if (colorforth_literals.get(text)) |value| return self.push(value);
             if (named_calls.get(text)) |value| return self.push(value);
         }
         // as host words assemble the words of the F18 compiler that are not
@@ -1772,7 +1814,7 @@ const Interpreter = struct {
             return error.UnknownWord;
         };
         if (in_code) switch (word) {
-            .dup, .drop, .over, .@"-", .@"2*", .@"2/", .@"+", .@"and", .@"or" => return self.greenWord(text),
+            .dup, .drop, .over, .@"-", .@"2*", .@"2/", .@"+", .@"and", .@"or", .@"@", .@"!" => return self.greenWord(text),
             else => {},
         };
         switch (word) {
@@ -1830,6 +1872,8 @@ const Interpreter = struct {
             // the host words defined since mark, which empty forgets
             .mark => self.host_mark = self.host_word_count,
             .empty, .reclaim => {
+                // which would forget the words being defined
+                if (self.defining != null) return error.UnclosedDefinition;
                 self.color_reclaims +%= 1;
                 if (self.bin) |*bin| bin.reclaimed = @intCast(bin.label_count - bin.rom_labels.len);
                 self.host_word_count = self.host_mark;
@@ -1855,6 +1899,11 @@ const Interpreter = struct {
                 try self.push(t);
             },
             .negate => try self.push(-%try self.pop()),
+            .@"@" => try self.push((try self.hostCell(try self.pop())).*),
+            .@"!" => {
+                const stored = try self.hostCell(try self.pop());
+                stored.* = try self.pop();
+            },
             .@"-" => try self.push(~try self.pop()),
             .@"2*" => try self.push(try self.pop() << 1),
             .@"2/" => try self.push(try self.pop() >> 1),
@@ -3192,6 +3241,14 @@ const named_literals: std.StaticStringMap(u18) = .initComptime(.{
     .{ "top", 0x1b5 },   .{ "side", 0x185 }, .{ "corner", 0x195 },
 });
 
+/// the literals that arrayForth 2's F18 compiler names in block 1410, but
+/// arrayForth 3 does not: the SPI boot's half bit time, and the read
+/// command with the high byte and the rest of the address it boots from,
+/// 0, shifted up 2, which node 705's ROM takes
+const colorforth_literals: std.StaticStringMap(u18) = .initComptime(.{
+    .{ "spispeed", 497 }, .{ "spicmd", 0xc00 }, .{ "spiadr", 0 },
+});
+
 /// multiport addresses, which assemble calls
 const named_calls: std.StaticStringMap(u16) = .initComptime(.{
     .{ "---u", 0x145 }, .{ "--l-", 0x175 }, .{ "--lu", 0x165 },
@@ -4414,6 +4471,15 @@ fn colorBlocks(comptime blocks: []const []const u8) ![blocks.len * colorforth.bl
                 };
                 continue;
             }
+            // \@ name value is a magenta variable
+            if (std.mem.eql(u8, text_word, "\\@")) {
+                const name = words.next().?;
+                tokens[len] = .{ .tag = .variable, .value = try std.fmt.parseInt(i32, words.next().?, 10) };
+                @memcpy(tokens[len].chars[0..name.len], name);
+                tokens[len].len = @intCast(name.len);
+                len += 1;
+                continue;
+            }
             // \: is the word :, in the color before it
             const word = if (std.mem.eql(u8, text_word, "\\:")) ":" else text_word;
             const negative = word[0] == '-' and word.len > 1;
@@ -4659,6 +4725,43 @@ test "colorForth's yellow words assemble only once a node has begun in that load
     _ = try assembleColorForth(&exits, &.{0}, &programs, &.{}, &diagnostic);
 }
 
+test "colorForth runs yellow words as a host word is defined" {
+    // the next green word compiles the number they leave, the last of them
+    try expectSameAsColorForth(&.{
+        \\[ 9 0 node 0 org host
+        \\: seven ] [ 3 4 + ] lit ;
+        \\: pair ] [ 1 2 ] lit ; [ target
+        \\: main ] seven pair [ ] lit ;
+    },
+        \\ ASM[ # 0 NODE ERS  # 0 org
+        \\ : main  7. 2. 1. ;
+        \\ >BIN ]ASM
+    );
+
+    // a load that ends in a definition does not leave it to the next, as
+    // a session compiles the block again
+    var programs: [4]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+    const open = try colorBlocks(&.{
+        \\[ host
+        \\: b ] 2 ;
+        \\: c ] 3
+    });
+    try session.loadColorForth(&open, 0);
+    const edited = try colorBlocks(&.{
+        \\[ host
+        \\: b ] 2 ;
+        \\: c ] 9 ; [ target 0 node 0 org
+        \\: main ] c lit ;
+    });
+    try session.loadColorForth(&edited, 0);
+    try expectEqual(9, session.assembled().programs[0].ram[1]);
+}
+
 test "colorForth's red words without code fall through into the next" {
     // a host word that falls into the next, as block 1110's head into pipe
     try expectSameAsColorForth(&.{
@@ -4731,6 +4834,7 @@ test "colorForth finds the numbers that arrayForth 2's system names as it starts
         empty,
         // 20
         \\: sram [ 30 ] ;
+        \\\@ res 40
         \\: host [ 206 ] ;
         \\: notone ] 1 ;
         ,
@@ -4752,8 +4856,9 @@ test "colorForth finds the numbers that arrayForth 2's system names as it starts
         empty,
         // 30, which sram names, and 32, which loads it
         \\[ 1 node 0 org host
-        \\: x ] 5 lit ; [ target
-        \\: pf ] [ tag ] lit x [ pf ] ;
+        \\: x ] 5 lit ;
+        \\: y [ res ] @ lit ; [ target
+        \\: pf ] [ tag ] lit x y [ pf ] ;
         ,
         empty,
         \\[ sram load
@@ -4763,7 +4868,7 @@ test "colorForth finds the numbers that arrayForth 2's system names as it starts
     const image = try colorImage(&blocks);
     try expectSameAsColorBlocks(&image, 32,
         \\ ASM[ # 1 NODE ERS  # 0 org
-        \\ : pf  3. 5. pf ;
+        \\ : pf  3. 5. 40. pf ;
         \\ >BIN ]ASM
     );
     var programs: [4]Program = undefined;
@@ -4845,7 +4950,11 @@ test "colorForth defines words for the host between host and target" {
 
     // and errors
     const cases = .{
-        .{ error.HostCode, "[ host : x ] 1 [ dup", "dup" },
+        // a yellow word runs as the word is defined, but cannot forget the
+        // words it is defined among
+        .{ error.StackUnderflow, "[ host : x ] 1 [ dup", "dup" },
+        .{ error.UnclosedDefinition, "[ host : a ] 1 ; : b [ 5 empty ] 3 ;", "empty" },
+        .{ error.UnclosedDefinition, "[ host : e ] empty ; : b [ e ] 3 ;", "e" },
         .{ error.HostCode, "[ host ] dup", "dup" },
         .{ error.UnclosedDefinition, "[ host : x ] 1 [ target", "target" },
         .{ error.UnknownWord, "[ host : x ] 1 ; [ target empty x", "x" },
