@@ -222,6 +222,10 @@ fn assemble(self: *Sim, kind: Kind, source: []const u8, loads: []const u32) !arr
 /// own node, and saves the chip to start from
 fn setUp(self: *Sim, kind: Kind, assembled: arrayforth.Assembled) error{ LoadFailed, OutOfMemory }!void {
     const programs = assembled.programs;
+    // streams and pF/144's nucleus sent one after another, as block 1665
+    // sends them, are not yet (ROADMAP step 6)
+    if (assembled.sends().len > 0)
+        return self.fail("the blocks send streams or pF/144's nucleus with !STREAM, !stream or !NUCLEUS, which gasim doesn't send yet", .{});
     // the parts of a stream set nodes up one after another, and /ROOT and
     // FORWARD are for the root's ROM, through node 708's UART, 300's
     // synchronous line or 705's flash
