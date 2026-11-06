@@ -514,7 +514,10 @@ fn byteOf(bit: usize) usize {
 /// Writes a block's tokens as text, with a mark before a token whose color
 /// differs from the one before it, as muforth lists colorForth: `:` red,
 /// `[` yellow, `]` green, `\` cyan, `(` white, `@` magenta, `^` gray and
-/// `~` blue. Lines start as `startsLine` says.
+/// `~` blue. Lines start as `startsLine` says. `TextReader` reads it back: a
+/// word that could read as a mark or a block's heading has its mark though
+/// its color is the same, one that reads as a number has `'` before it, and
+/// a number in a cell of its own that would fit in one has `#`.
 pub fn writeText(tokens: []const Token, writer: *Io.Writer) Io.Writer.Error!void {
     var color: Color = .none;
     var before: ?Token = null;
@@ -525,14 +528,198 @@ pub fn writeText(tokens: []const Token, writer: *Io.Writer) Io.Writer.Error!void
             } else try writer.writeByte(' ');
         }
         const c = token.tag.color();
-        if (c != color or c == .red or c == .magenta) if (mark(c)) |m| try writer.writeByte(m);
+        if (c != color or c == .red or c == .magenta or readsAsMark(token)) if (mark(c)) |m| try writer.writeByte(m);
         color = c;
+        if (readsAsNumber(token)) try writer.writeByte('\'');
+        if (token.tag.isLong() and fitsShort(token.value)) try writer.writeByte('#');
         try writer.print("{f}", .{token});
         if (token.tag == .variable) try writer.print(" {d}", .{token.value});
         before = token;
     }
     if (before != null) try writer.writeByte('\n');
 }
+
+/// whether a word would read as a red or magenta mark without its own mark
+/// before it, or as the heading of a block
+fn readsAsMark(token: Token) bool {
+    if (token.tag.isNumber()) return false;
+    const text = token.text();
+    return text.len > 0 and (text[0] == ':' or text[0] == '@') or std.mem.eql(u8, text, "block");
+}
+
+/// whether a word has to say it is one, being empty or reading as a number
+fn readsAsNumber(token: Token) bool {
+    if (token.tag.isNumber()) return false;
+    if (token.len == 0) return true;
+    const color = token.tag.color();
+    return (color == .yellow or color == .green or color == .white) and parseNumber(token.text()) != null;
+}
+
+/// a number as typed: decimal digits or `$` and hex digits, after an
+/// optional `-`
+pub fn parseNumber(text: []const u8) ?struct { value: i32, hex: bool } {
+    var digits = text;
+    const negative = digits.len > 0 and digits[0] == '-';
+    if (negative) digits = digits[1..];
+    const hex = digits.len > 0 and digits[0] == '$';
+    if (hex) digits = digits[1..];
+    if (digits.len == 0) return null;
+    for (digits) |c| if (!std.ascii.isDigit(c) and !(hex and std.ascii.isHex(c))) return null;
+    const magnitude = std.fmt.parseInt(u32, digits, if (hex) 16 else 10) catch return null;
+    // hex numbers wrap, as colorForth shows cells, and decimal ones do not
+    if (!hex and magnitude > @as(u32, if (negative) 1 << 31 else (1 << 31) - 1)) return null;
+    const value: i32 = @bitCast(magnitude);
+    return .{ .value = if (negative) -%value else value, .hex = hex };
+}
+
+/// the tag of a word in a color
+pub fn wordTag(color: Color) Tag {
+    return switch (color) {
+        .red => .define,
+        .yellow => .execute,
+        .green, .none, .gray => .compile,
+        .cyan => .macro,
+        .white => .comment,
+        .magenta => .variable,
+        .blue => .format,
+    };
+}
+
+pub const TextError = Error || error{
+    /// a word before any mark has said its color
+    NoColor,
+    /// a mark with nothing after it
+    NoWord,
+    /// a gray word that is not a number, or a variable's value that is not
+    /// one
+    InvalidNumber,
+    /// a variable with no value after its name
+    NoValue,
+};
+
+/// Reads blocks of colorForth as `writeText` writes them, each after a line
+/// `block <n>` unless it is the first, block 0. Words are separated by spaces
+/// and lines, which `cr` and `br` say otherwise. A word without a mark takes
+/// the color before it, or green after a red or magenta one.
+pub const TextReader = struct {
+    lines: std.mem.SplitIterator(u8, .scalar),
+    /// the line being read, from 1, and the word on it, for an error
+    line: usize = 0,
+    word: []const u8 = "",
+    /// the block being read, if it is one to read
+    number: ?usize = 0,
+    started: bool = false,
+    done: bool = false,
+    color: Color = .none,
+    /// a variable's value is next
+    value_next: bool = false,
+    tokens: [cells_per_block]Token = undefined,
+    len: usize = 0,
+
+    pub const Block = struct { number: usize, tokens: []const Token };
+
+    pub fn init(text: []const u8) TextReader {
+        return .{ .lines = std.mem.splitScalar(u8, text, '\n') };
+    }
+
+    const Heading = union(enum) {
+        block: usize,
+        /// one that `gasim blocks` could not read as source
+        unreadable,
+    };
+
+    fn heading(text: []const u8) ?Heading {
+        var words = std.mem.tokenizeAny(u8, text, " \t\r");
+        if (!std.mem.eql(u8, words.next() orelse return null, "block")) return null;
+        const word = words.next() orelse return null;
+        if (word[word.len - 1] == ':') {
+            _ = std.fmt.parseInt(usize, word[0 .. word.len - 1], 10) catch return null;
+            return .unreadable;
+        }
+        const number = std.fmt.parseInt(usize, word, 10) catch return null;
+        return if (words.next() == null) .{ .block = number } else null;
+    }
+
+    /// the next block, whose tokens last until the next call
+    pub fn next(self: *TextReader) TextError!?Block {
+        self.len = 0;
+        self.color = .none;
+        while (self.lines.next()) |text| {
+            self.line += 1;
+            if (heading(text)) |found| {
+                const ended = try self.end();
+                self.number = switch (found) {
+                    .block => |n| n,
+                    .unreadable => null,
+                };
+                self.started = self.number != null;
+                if (ended) |block| return block;
+                continue;
+            }
+            if (self.number == null) continue;
+            var words = std.mem.tokenizeAny(u8, text, " \t\r");
+            while (words.next()) |word| {
+                self.word = word;
+                self.started = true;
+                try self.add(word);
+            }
+        }
+        if (self.done) return null;
+        self.done = true;
+        return self.end();
+    }
+
+    /// the block read so far, if there is one
+    fn end(self: *TextReader) TextError!?Block {
+        if (self.value_next) return error.NoValue;
+        if (!self.started) return null;
+        const number = self.number orelse return null;
+        self.started = false;
+        return .{ .number = number, .tokens = self.tokens[0..self.len] };
+    }
+
+    fn add(self: *TextReader, word: []const u8) TextError!void {
+        if (self.value_next) {
+            self.tokens[self.len - 1].value = if (parseNumber(word)) |n| n.value else return error.InvalidNumber;
+            self.value_next = false;
+            return;
+        }
+        if (self.len == cells_per_block) return error.BlockFull;
+        var text = word;
+        const marked: ?Color = switch (text[0]) {
+            ':' => .red,
+            '[' => .yellow,
+            ']' => .green,
+            '\\' => .cyan,
+            '(' => .white,
+            '@' => .magenta,
+            '^' => .gray,
+            '~' => .blue,
+            else => null,
+        };
+        const color = marked orelse switch (self.color) {
+            .none => return error.NoColor,
+            .red, .magenta => .green,
+            else => |c| c,
+        };
+        if (marked != null) text = text[1..];
+        self.color = color;
+        const literal = text.len > 0 and text[0] == '\'';
+        if (literal) text = text[1..] else if (text.len == 0) return error.NoWord;
+        const long = !literal and text.len > 0 and text[0] == '#';
+        if (long) text = text[1..];
+
+        const numeric = color == .yellow or color == .green or color == .white or color == .gray;
+        const number = if (numeric and !literal) parseNumber(text) else null;
+        self.tokens[self.len] = if (number) |n| number: {
+            if (long) break :number .{ .tag = if (color == .yellow) .execute_long else if (color == .green) .compile_long else return error.InvalidNumber, .value = n.value, .hex = n.hex };
+            // a white word that only looks like a number
+            break :number Token.number(color, n.value, n.hex) catch |err| if (color == .white) try Token.word(.comment, text) else return err;
+        } else if (color == .gray or long) return error.InvalidNumber else try Token.word(wordTag(color), text);
+        self.len += 1;
+        self.value_next = color == .magenta;
+    }
+};
 
 /// Whether a token starts a line, as colorForth shows a block, after the
 /// token before it: a red or magenta one does, unless a blue `-cr` comes
@@ -833,6 +1020,101 @@ test "blocks as text" {
         \\:x [$1f \dup
         \\
     , writer.buffered());
+}
+
+/// the same tokens, after blocks are written as text and read back
+fn expectTextRoundTrip(tokens: []const Token) !void {
+    var buffer: [8192]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    try writeText(tokens, &writer);
+    var reader: TextReader = .init(writer.buffered());
+    const block = (try reader.next()).?;
+    try expectEqual(0, block.number);
+    try expectSameTokens(tokens, block.tokens);
+    try expectEqual(null, try reader.next());
+}
+
+test "text reads back as the tokens it was written from" {
+    var variable = try Token.word(.variable, "count");
+    variable.value = -3;
+    try expectTextRoundTrip(&.{
+        try Token.word(.comment, "Counts"),
+        try Token.word(.define, "inc"),
+        try Token.number(.green, 1, false),
+        // a green word that reads as a magenta mark, and one as a red mark
+        try Token.word(.compile, "@+"),
+        try Token.word(.compile, "@"),
+        try Token.number(.green, 2, false),
+        try Token.word(.compile, ":x"),
+        // and a heading
+        try Token.word(.compile, "block"),
+        try Token.number(.green, 2, false),
+        // a word that reads as a number
+        try Token.word(.compile, "12"),
+        try Token.word(.comment, "34"),
+        .{ .tag = .comment },
+        // a small number in a cell of its own
+        .{ .tag = .compile_long, .value = 5 },
+        .{ .tag = .execute_long, .value = -0x1f, .hex = true },
+        try Token.number(.yellow, 1 << 28, false),
+        try Token.number(.gray, 0x175, true),
+        try Token.word(.format, "cr"),
+        variable,
+        try Token.word(.macro, "dup"),
+        try Token.word(.macro, "drop"),
+    });
+}
+
+test "reading text" {
+    var reader: TextReader = .init(
+        \\block 2
+        \\:inc 1 + ;
+        \\(a comment
+        \\
+        \\block 5
+        \\block 9
+        \\:x
+        \\block 3: InvalidCharacter
+        \\:skipped
+    );
+    const first = (try reader.next()).?;
+    try expectEqual(2, first.number);
+    try expectEqual(6, first.tokens.len);
+    // after a red name, green
+    try expectEqual(.compile_short, first.tokens[1].tag);
+    try expectEqual(.compile, first.tokens[3].tag);
+    try expectEqual(.comment, first.tokens[5].tag);
+    // a heading with nothing under it empties the block
+    const empty = (try reader.next()).?;
+    try expectEqual(5, empty.number);
+    try expectEqual(0, empty.tokens.len);
+    try expectEqual(9, (try reader.next()).?.number);
+    try expectEqual(null, try reader.next());
+}
+
+test "text with no heading is block 0" {
+    var reader: TextReader = .init(":x ;\n");
+    try expectEqual(0, (try reader.next()).?.number);
+    try expectEqual(null, try reader.next());
+}
+
+test "what is wrong with text" {
+    for ([_]struct { []const u8, TextError }{
+        .{ "word", error.NoColor },
+        .{ "[", error.NoWord },
+        .{ "@x", error.NoValue },
+        .{ "@x y", error.InvalidNumber },
+        .{ "^word", error.InvalidNumber },
+        .{ ":Upper", error.InvalidCharacter },
+        .{ "(a'b", error.InvalidCharacter },
+    }) |case| {
+        var reader: TextReader = .init(case[0]);
+        try std.testing.expectError(case[1], reader.next());
+    }
+    var reader: TextReader = .init(":ok\n\n ]bad'word");
+    try std.testing.expectError(error.InvalidCharacter, reader.next());
+    try expectEqual(3, reader.line);
+    try expectEqualStrings("]bad'word", reader.word);
 }
 
 test "arrayForth 2 images compress and decompress" {

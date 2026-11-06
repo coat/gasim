@@ -52,6 +52,16 @@ hit: ?Stop = null,
 /// where a line is written for each step that executes code. Tracing stops
 /// if writing fails.
 trace: ?*Io.Writer = null,
+/// that each line of the trace is a JSON object
+trace_json: bool = false,
+/// the node to trace, by index, if not every one
+trace_only: ?u16 = null,
+/// where `run` stops of its own accord: once this many steps are taken, or
+/// the earliest running node reaches this time, checked after each round
+step_limit: u64 = std.math.maxInt(u64),
+time_limit: u64 = std.math.maxInt(u64),
+/// that `run` stopped at a limit
+limited: bool = false,
 
 /// the console, and the index of the node it is attached to
 console: ?struct { device: *Console, index: u16 } = null,
@@ -1249,7 +1259,7 @@ fn stepQueued(self: *Chip, i: u16) void {
     // unless the node is still waiting for a word to execute, or still
     // waiting on the same port
     const waited = n.suspended and !n.transfers.any() and (retrying or (fetching and n.state == .fetch));
-    if (self.trace) |writer| if (!waited) {
+    if (self.trace) |writer| if (!waited and (self.trace_only == null or self.trace_only == i)) {
         self.writeTrace(writer, i) catch {
             self.trace = null;
         };
@@ -1403,6 +1413,16 @@ noinline fn portChanged(self: *Chip, i: u16, direction: Direction, state: Port.S
 fn writeTrace(self: *const Chip, writer: *Io.Writer, i: u16) Io.Writer.Error!void {
     const n = &self.nodes[i];
     const address: u9 = @bitCast(n.word_address);
+    if (self.trace_json) {
+        try writer.print("{{\"node\":\"{f}\",\"address\":\"{x:0>3}\",\"word\":\"{x:0>5}\",\"code\":\"", .{ nodeName(self.layout.nodeNumber(i)), address, @as(u18, @bitCast(n.i)) });
+        try disassembler.write(writer, n.i, address);
+        return writer.print("\",\"t\":\"{x:0>5}\",\"s\":\"{x:0>5}\",\"r\":\"{x:0>5}\",\"waiting\":{}}}\n", .{
+            @as(u18, @bitCast(n.data_stack.t)),
+            @as(u18, @bitCast(n.data_stack.s)),
+            @as(u18, @bitCast(n.return_stack.t)),
+            n.suspended,
+        });
+    }
     try writer.print("{f} {x:0>3} {x:0>5} ", .{ nodeName(self.layout.nodeNumber(i)), address, @as(u18, @bitCast(n.i)) });
     try disassembler.write(writer, n.i, address);
     try writer.print("  T {x:0>5} S {x:0>5} R {x:0>5}{s}\n", .{
@@ -1523,15 +1543,17 @@ pub inline fn service(self: *Chip) !bool {
 /// Runs until every node is suspended on something the console or UART
 /// cannot complete, a node reaches a breakpoint or makes a watched transfer,
 /// or the console or UART is interrupted. Breakpoints and watches stop the
-/// run at once, with the round unfinished, leaving `hit` set.
+/// run at once, with the round unfinished, leaving `hit` set. Reaching
+/// `step_limit` or `time_limit` stops it too, setting `limited`.
 pub fn run(self: *Chip) !void {
     self.hit = null;
+    self.limited = false;
     if (self.console == null and self.uarts.len == 0) {
-        while (self.hit == null and (self.feed() or self.step())) {}
+        while (self.hit == null and !self.pastLimit() and (self.feed() or self.step())) {}
         return;
     }
     var quiet_rounds: u16 = 0;
-    while (self.hit == null and !self.interrupted()) {
+    while (self.hit == null and !self.pastLimit() and !self.interrupted()) {
         const pending = self.pendingOutput();
         _ = try self.service();
         // flush once output stops for a while, so a busy node does not hold
@@ -1577,7 +1599,14 @@ fn waitForInput(self: *Chip) !bool {
     return true;
 }
 
-fn interrupted(self: *const Chip) bool {
+/// whether a limit is reached, noting that it was
+inline fn pastLimit(self: *Chip) bool {
+    if (self.steps < self.step_limit and (self.queue_len == 0 or self.nodes[self.queue[0]].time < self.time_limit)) return false;
+    self.limited = true;
+    return true;
+}
+
+pub fn interrupted(self: *const Chip) bool {
     if (self.console) |console| if (console.device.interrupted.load(.monotonic)) return true;
     for (self.uarts.slice()) |uart| if (uart.device.interrupted.load(.monotonic)) return true;
     return false;
@@ -1591,7 +1620,7 @@ fn pendingOutput(self: *const Chip) usize {
     return pending;
 }
 
-fn flushOutput(self: *Chip) !void {
+pub fn flushOutput(self: *Chip) !void {
     if (self.console) |console| try console.device.output.flush();
     for (self.uarts.slice()) |uart| try uart.device.output.flush();
 }
@@ -2700,6 +2729,44 @@ test "traces each step" {
         \\000 003 29fb2 b! @b . .  T 00005 S 00000 R 00000  waiting
         \\
     , writer.buffered());
+}
+
+test "traces as JSON, and one node" {
+    for ([_]u16{ 1, 0 }, [_][]const u8{ "", "{\"node\":\"000\",\"address\":\"000\",\"word\":" }) |only, start| {
+        var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 2 });
+        defer chip.deinit(std.testing.allocator);
+        var diagnostic: assembler.Diagnostic = .{};
+        try chip.load(try assembler.assemble("5 dup drop left b! @b", &diagnostic));
+        var buffer: [512]u8 = undefined;
+        var writer: Io.Writer = .fixed(&buffer);
+        chip.trace = &writer;
+        chip.trace_json = true;
+        chip.trace_only = only;
+
+        while (chip.step()) {}
+        try expect(std.mem.startsWith(u8, writer.buffered(), start));
+        if (start.len == 0) try expectEqualStrings("", writer.buffered());
+    }
+}
+
+test "running stops at a limit" {
+    var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    // a loop that never waits
+    try chip.load(try assembler.assemble(": loop loop ;", &diagnostic));
+
+    chip.step_limit = 100;
+    try chip.run();
+    try expect(chip.limited);
+    try expect(chip.steps >= 100);
+
+    // going on from there, to a time
+    chip.step_limit = std.math.maxInt(u64);
+    chip.time_limit = chip.nodes[0].time + 100_000;
+    try chip.run();
+    try expect(chip.limited);
+    try expect(chip.nodes[0].time >= chip.time_limit);
 }
 
 test "traces a node waiting on a port once" {
