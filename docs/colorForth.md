@@ -80,7 +80,14 @@ node, saving the code of the one before, `a org` sets where code goes,
 `n m loads` and `n m thru` load a block, or m blocks of code from n, or
 the blocks of code from n to m, skipping the blocks of comments between
 them, `n fh` leaves the block n after the one being loaded, `exit` ends a
-block, and `n bin` saves the code as a bin of another number. Arithmetic
+block, and `n bin` saves the code as a bin of another number. In an
+arrayForth 2 image, a yellow word that is nothing else leaves the number
+that the image's system names as it starts, in block 18 and the blocks it
+loads, such as `sram`, which block 202's `:sram [264 ];` names, the block
+of the SRAM cluster: `[sram load`. gasim's directives, labels and the F18
+compiler's words come first, as block 202's `host` and `target` name
+blocks too, so `[host load`, in the IDE's blocks, still begins host
+words. Arithmetic
 is colorForth's, with `-` inverting and `or` exclusive, before a node's
 code and in host words. Once a node has begun in a load, other yellow
 words assemble code as green ones do, as arrayForth 2 compiles them, such as
