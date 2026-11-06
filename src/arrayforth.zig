@@ -585,6 +585,13 @@ const ColorFrame = struct {
     rest: u16 = 0,
 };
 
+/// a number that arrayForth 2's system names as it starts, such as sram,
+/// the block of the SRAM cluster
+const SystemName = struct {
+    name: []const u8,
+    value: i32,
+};
+
 /// a word defined for the host, between host and target, and the words and
 /// numbers it runs, which are part of `host_body`
 const HostWord = struct {
@@ -890,6 +897,10 @@ const Interpreter = struct {
     /// whether a node has begun in this load, after which yellow words
     /// assemble code
     color_node: bool = false,
+    /// the numbers an arrayForth 2 image's system names as it starts,
+    /// which yellow words that are nothing else leave
+    system_names: [64]SystemName = undefined,
+    system_name_count: u8 = 0,
     /// the names of colorForth labels, which are not kept as text in blocks
     names_text: [16 * 1024]u8 = undefined,
     names_len: u16 = 0,
@@ -1394,6 +1405,7 @@ const Interpreter = struct {
         defer self.color_line = null;
         self.color_address = false;
         self.color_node = false;
+        self.learnSystemNames();
         try self.pushColorBlock(block);
         while (self.color_depth > 0) {
             const frame = &self.color_frames[self.color_depth - 1];
@@ -1480,6 +1492,92 @@ const Interpreter = struct {
         self.color_frames[self.color_depth] = colorFrame(blocks, @intCast(block));
         self.color_frames[self.color_depth].rest = @intCast(count - 1);
         self.color_depth += 1;
+    }
+
+    /// Learns the numbers that an arrayForth 2 image's system names as it
+    /// starts, from block 18 and the blocks it loads with numbers written
+    /// before load, loads or thru: red words whose code is a yellow number,
+    /// such as block 202's :sram [264 ];, the block of the SRAM cluster
+    fn learnSystemNames(self: *Interpreter) void {
+        self.system_name_count = 0;
+        const blocks = self.color_blocks orelse return;
+        if (!colorforth.isImage(blocks)) return;
+        var seen: std.StaticBitSet(4096) = .empty;
+        self.scanSystemBlock(blocks, colorforth.header_block, 0, &seen);
+    }
+
+    fn scanSystemBlock(self: *Interpreter, blocks: []const u8, block: i64, depth: usize, seen: *std.StaticBitSet(4096)) void {
+        // whole blocks, as a file can end part of the way through one
+        const whole = blocks.len / colorforth.block_size;
+        if (depth == self.color_frames.len or block < 0 or block >= whole or block >= seen.capacity()) return;
+        const at: usize = @intCast(block);
+        if (seen.isSet(at)) return;
+        seen.set(at);
+        var reader: colorforth.Reader = .{ .block = blocks[at * colorforth.block_size ..][0..colorforth.block_size] };
+        // the yellow numbers before a word, the last two of them, and a
+        // red word with the yellow number after it, until its ;
+        var numbers: [2]i64 = .{ 0, 0 };
+        var count: u2 = 0;
+        var red: [colorforth.max_chars]u8 = undefined;
+        var red_len: ?usize = null;
+        var value: ?i32 = null;
+        while (reader.next() catch return) |token| {
+            const color = token.tag.color();
+            switch (color) {
+                .white, .blue, .gray, .none => continue,
+                else => {},
+            }
+            if (color == .yellow and token.tag.isNumber()) {
+                numbers = .{ numbers[1], token.value };
+                count = @min(count + 1, 2);
+                if (red_len != null) {
+                    if (value == null) value = token.value else red_len = null;
+                }
+                continue;
+            }
+            const text = token.text();
+            const defined = red_len;
+            const red_value = value;
+            red_len = null;
+            value = null;
+            switch (color) {
+                .red => {
+                    @memcpy(red[0..text.len], text);
+                    red_len = text.len;
+                },
+                .green => if (eql(text, ";")) if (defined) |len| if (red_value) |n| self.nameSystemNumber(red[0..len], n),
+                .yellow => if (eql(text, "exit")) {
+                    return;
+                } else if (eql(text, "fh") and count > 0) {
+                    numbers[1] += block;
+                    continue;
+                } else if (eql(text, "load") and count > 0) {
+                    self.scanSystemBlock(blocks, numbers[1], depth + 1, seen);
+                } else if ((eql(text, "loads") or eql(text, "thru")) and count == 2) {
+                    const n = if (eql(text, "loads")) numbers[1] else @divTrunc(numbers[1] - numbers[0], 2) + 1;
+                    var i: i64 = 0;
+                    while (i < @min(n, @as(i64, @intCast(whole)))) : (i += 1) self.scanSystemBlock(blocks, numbers[0] + 2 * i, depth + 1, seen);
+                },
+                else => {},
+            }
+            count = 0;
+        }
+    }
+
+    fn nameSystemNumber(self: *Interpreter, text: []const u8, value: i32) void {
+        for (self.system_names[0..self.system_name_count]) |*named| if (eql(named.name, text)) {
+            named.value = value;
+            return;
+        };
+        if (self.system_name_count == self.system_names.len) return;
+        const kept = self.keepName(text) catch return;
+        self.system_names[self.system_name_count] = .{ .name = kept, .value = value };
+        self.system_name_count += 1;
+    }
+
+    fn systemName(self: *const Interpreter, text: []const u8) ?i32 {
+        for (self.system_names[0..self.system_name_count]) |named| if (eql(named.name, text)) return named.value;
+        return null;
     }
 
     fn colorFrame(blocks: []const u8, at: usize) ColorFrame {
@@ -1665,9 +1763,12 @@ const Interpreter = struct {
             if (named_calls.get(text)) |value| return self.push(value);
         }
         // as host words assemble the words of the F18 compiler that are not
-        // the host's
+        // the host's, which bury the numbers arrayForth 2's system names
         const word = std.meta.stringToEnum(ColorWord, text) orelse {
-            if (node_begun) return self.greenWord(text);
+            if (node_begun) {
+                if (self.greenWord(text)) |_| return else |err| if (err != error.UnknownWord or self.systemName(text) == null) return err;
+            }
+            if (self.systemName(text)) |value| return self.push(value);
             return error.UnknownWord;
         };
         if (in_code) switch (word) {
@@ -4337,10 +4438,15 @@ fn colorBlocks(comptime blocks: []const []const u8) ![blocks.len * colorforth.bl
 /// expects colorForth and arrayForth 3 to assemble the same programs
 fn expectSameAsColorForth(comptime blocks: []const []const u8, source: []const u8) !void {
     const bytes = try colorBlocks(blocks);
+    try expectSameAsColorBlocks(&bytes, 0, source);
+}
+
+/// that loading `block` of `bytes` assembles what arrayForth 3 `source` does
+fn expectSameAsColorBlocks(bytes: []const u8, block: u32, source: []const u8) !void {
     var color_programs: [4]Program = undefined;
     var programs: [4]Program = undefined;
     var diagnostic: Diagnostic = .{};
-    const from_color = (assembleColorForth(&bytes, &.{0}, &color_programs, &.{}, &diagnostic) catch |err| {
+    const from_color = (assembleColorForth(bytes, &.{block}, &color_programs, &.{}, &diagnostic) catch |err| {
         std.debug.print("{t} at '{s}', token {d}\n", .{ err, diagnostic.token, colorforth.place(diagnostic.line).token });
         return err;
     }).programs;
@@ -4596,6 +4702,95 @@ test "colorForth's red words without code fall through into the next" {
     try expectEqual(6, assembled[0].ram[1]);
 }
 
+/// `blocks` as an arrayForth 2 image, whose block 18 starts with the
+/// variable ns
+fn colorImage(comptime blocks: []const []const u8) ![blocks.len * colorforth.block_size]u8 {
+    var bytes = try colorBlocks(blocks);
+    const header = bytes[colorforth.header_block * colorforth.block_size ..][0..colorforth.block_size];
+    var decoded: [colorforth.cells_per_block]colorforth.Token = undefined;
+    var tokens: [colorforth.cells_per_block + 1]colorforth.Token = undefined;
+    tokens[0] = .{ .tag = .variable };
+    @memcpy(tokens[0].chars[0..2], "ns");
+    tokens[0].len = 2;
+    const source = try colorforth.decode(header, &decoded);
+    @memcpy(tokens[1..][0..source.len], source);
+    try colorforth.encode(tokens[0 .. source.len + 1], header);
+    return bytes;
+}
+
+test "colorForth finds the numbers that arrayForth 2's system names as it starts" {
+    // block 18 loads 20 and 22, which name blocks as block 202 does, but
+    // not 24, and 26, which exit ends before it names one
+    const empty = "";
+    const kernel: [18][]const u8 = @splat(empty);
+    const blocks = kernel ++ [_][]const u8{
+        // 18
+        \\[ 20 1 loads 22 22 thru 8 fh load
+        \\: tag [ 3 ] ;
+        ,
+        empty,
+        // 20
+        \\: sram [ 30 ] ;
+        \\: host [ 206 ] ;
+        \\: notone ] 1 ;
+        ,
+        empty,
+        // 22
+        \\: pf [ 4 ] ;
+        ,
+        empty,
+        // 24
+        \\: unloaded [ 7 ] ;
+        ,
+        empty,
+        // 26
+        \\[ exit
+        \\: late [ 1 ] ;
+        ,
+        empty,
+        empty,
+        empty,
+        // 30, which sram names, and 32, which loads it
+        \\[ 1 node 0 org host
+        \\: x ] 5 lit ; [ target
+        \\: pf ] [ tag ] lit x [ pf ] ;
+        ,
+        empty,
+        \\[ sram load
+    };
+    // host and target stay arrayForth 2's directives, and a label buries a
+    // name
+    const image = try colorImage(&blocks);
+    try expectSameAsColorBlocks(&image, 32,
+        \\ ASM[ # 1 NODE ERS  # 0 org
+        \\ : pf  3. 5. pf ;
+        \\ >BIN ]ASM
+    );
+    var programs: [4]Program = undefined;
+    var diagnostic: Diagnostic = .{};
+
+    const cases = .{
+        .{ "[ late", "late" },
+        .{ "[ notone", "notone" },
+        .{ "[ unloaded", "unloaded" },
+    };
+    inline for (cases) |case| {
+        const errors = try colorImage(&(blocks ++ [_][]const u8{ empty, case[0] }));
+        try expectError(error.UnknownWord, assembleColorForth(&errors, &.{34}, &programs, &.{}, &diagnostic));
+        try expectEqualStrings(case[1], diagnostic.token);
+    }
+    // block 18 loading a block that the image ends part of the way
+    // through, which the names are not looked for in, before block 18's
+    // ns stops the load
+    const short = try colorImage(&(kernel ++ [_][]const u8{ "[ 19 load", "[ 1 node" }));
+    try expectError(error.HostCode, assembleColorForth(short[0 .. 19 * colorforth.block_size + 100], &.{18}, &programs, &.{}, &diagnostic));
+
+    // and a file of blocks that is not an image has none
+    const plain = try colorBlocks(&blocks);
+    try expectError(error.UnknownWord, assembleColorForth(&plain, &.{32}, &programs, &.{}, &diagnostic));
+    try expectEqualStrings("sram", diagnostic.token);
+}
+
 test "colorForth errors say where they are" {
     var programs: [4]Program = undefined;
     var diagnostic: Diagnostic = .{};
@@ -4762,7 +4957,18 @@ fn fuzzColorForth(_: void, smith: *std.testing.Smith) !void {
     var programs: [16]Program = undefined;
     var descriptors: [16]boot.Descriptor = undefined;
     var diagnostic: Diagnostic = .{};
-    _ = assembleColorForth(blocks[0..len], &.{0}, &programs, &descriptors, &diagnostic) catch return;
+    _ = assembleColorForth(blocks[0..len], &.{0}, &programs, &descriptors, &diagnostic) catch {};
+
+    // and as what follows an arrayForth 2 image's ns, whose system's
+    // names a load learns first, ending where they do
+    var image: [(colorforth.header_block + 5) * block_size]u8 = @splat(0);
+    var ns: colorforth.Token = .{ .tag = .variable };
+    @memcpy(ns.chars[0..2], "ns");
+    ns.len = 2;
+    colorforth.encode(&.{ns}, image[colorforth.header_block * block_size ..][0..block_size]) catch unreachable;
+    const start = colorforth.header_block * block_size + 8;
+    @memcpy(image[start..][0..len], blocks[0..len]);
+    _ = assembleColorForth(image[0 .. start + len], &.{colorforth.header_block}, &programs, &descriptors, &diagnostic) catch return;
 }
 
 test "fuzz colorForth" {
