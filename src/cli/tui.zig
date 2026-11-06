@@ -1135,21 +1135,27 @@ const Tui = struct {
         self.chip.step_limit = std.math.maxInt(u64);
         self.chip.restore(&start);
         const assembled = forth.session.assembled();
-        var nodes: usize = 0;
-        for (assembled.programs) |program| if (program.bin == null) {
-            self.chip.setUp(.ofProgram(program), assembled.programs) catch continue;
-            nodes += 1;
-        };
+        const started = gasim.arrayforth.startCompiled(self.chip, assembled);
         self.settled = false;
-        const then_block = if (assembled.unresolved_then) |line| gasim.colorforth.place(line).block else null;
-        if (assembled.first_difference) |first| {
-            self.fail(if (then_block) |block|
-                self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}, and a then in block {d} has nothing to resolve", .{ nodes, assembled.feedback_differs, first.noted, first.found, block })
-            else
-                self.printLasting("started again with {d} nodes' code, but {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ nodes, assembled.feedback_differs, first.noted, first.found }));
-        } else if (then_block) |block| {
-            self.fail(self.printLasting("started again with {d} nodes' code, but a then in block {d} has nothing to resolve", .{ nodes, block }));
-        } else self.say(self.printLasting("compiled, and started the chip again with {d} nodes' code", .{nodes}));
+        const warned = assembled.first_difference != null or assembled.unresolved_then != null or started.unsaved != null;
+        var long: [2 * message_capacity]u8 = undefined;
+        var w: Io.Writer = .fixed(&long);
+        message: {
+            w.print("{s} with {d} nodes' code", .{ if (warned) "started again" else "compiled, and started the chip again", started.nodes }) catch break :message;
+            // what changes what runs first
+            var but = true;
+            if (started.unsaved) |unsaved| {
+                w.print(", but node {d:0>3} loads bin {d}, which was not saved", .{ unsaved.node, unsaved.bin }) catch break :message;
+                but = false;
+            }
+            if (assembled.first_difference) |first| {
+                w.print("{s} {d} gray numbers differ, the first {x:0>3} where gasim is at {x:0>3}", .{ if (but) ", but" else ", and", assembled.feedback_differs, first.noted, first.found }) catch break :message;
+                but = false;
+            }
+            if (assembled.unresolved_then) |line| w.print("{s} a then in block {d} has nothing to resolve", .{ if (but) ", but" else ", and", gasim.colorforth.place(line).block }) catch break :message;
+        }
+        const text = self.printLasting("{s}", .{w.buffered()});
+        if (warned) self.fail(text) else self.say(text);
     }
 
     /// Writes the editor's blocks to a file, which becomes theirs, returning
@@ -4733,6 +4739,27 @@ test "compiling colorForth in the editor starts the chip again with its code" {
     try expect(try t.shows(29, "started again with 1 nodes' code, but a then in block 0 has nothing to resolve"));
     try expectEqual(.failure, t.tui.message_kind);
     try expectEqualStrings(t.tui.message.?, t.tui.logged(t.tui.logLen() - 1));
+
+    // and boot descriptors set the node up as they say
+    try t.press('$');
+    try t.press('a');
+    try t.pressWith('y', .{ .ctrl = true });
+    for ("0 +node 0 /ram 5 1 /stack 0 /p") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    try t.press('L');
+    try expect(try t.shows(29, "started again with 1 nodes' code"));
+    try expectEqual(5, t.chip.nodes[0].data_stack.t);
+
+    // one that loads a bin never saved is left out, and said, and the
+    // compiled code still starts
+    try t.press('$');
+    try t.press('a');
+    try t.pressWith('y', .{ .ctrl = true });
+    for ("5 +node 9 /ram") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    try t.press('L');
+    try expect(try t.shows(29, "node 005 loads bin 9, which was not saved"));
+    try expectEqualSlices(gasim.Word, echo.ram[0..echo.len], t.chip.nodes[0].mem[0..echo.len]);
 }
 
 test "the editor's commands save, open and start files" {
