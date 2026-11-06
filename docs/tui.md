@@ -34,6 +34,7 @@ executing.
 | `b` | set or clear a breakpoint on the word in memory under the cursor |
 | `w` | watch the selected node's reads from a port, with `r` `d` `l` `u`, or its writes to one, with `R` `D` `L` `U`, or stop watching it |
 | `g` | follow the word the node is executing again |
+| `:` | type a command, except while typing |
 | `?`, `F1` | list the keys, from those of the panel or mode you are in, with `F1` where `?` would be typed; there, `/` lists only those with what is typed, `enter` keeps it, and `esc` lists them all again |
 | `q`, `ctrl+c` | quit |
 
@@ -47,10 +48,26 @@ Borders between panels can be dragged, or on touch screens, which turn drags
 into scrolling, tapped and then tapped again where they should go.
 
 A message stays in the status bar until the next key. Errors and what
-stopped a run are red, and the last 32 are kept for the editor's
-`:messages`, which lists as many of the latest as fit. While a key is
+stopped a run are red, and the last 32 are kept for `:messages`, which
+lists as many of the latest as fit. While a key is
 waiting for another, such as `w` for a port, the bar shows only what it
 takes.
+
+Commands take the names and arguments of those of the [CLI](cli.md), for what
+has no key, or a number that keys would have to repeat. `tab` completes a
+command's name, or the .cf file it takes, and otherwise shows what it takes,
+on the row above the status bar. `esc` lets a command go.
+
+| Command | |
+| --- | --- |
+| `:node 105` | select a node |
+| `:break 105:003` | set or clear a breakpoint |
+| `:watch 105:right` | watch a port's reads and writes, or stop; `:read` or `:write` after it for one of them |
+| `:step` | a step, or with `--count 4` that many, `--node 105` of that node, or `--rounds 4` that many rounds, up to a stop and at most a million steps, going back from all of them at once |
+| `:run` | run, or with `--max-steps 1000` stop after about that many steps |
+| `:help text` | list only the keys with the text |
+| `:messages` | the latest errors and stops |
+| `:w` `:e` `:new` `:q` | save, open and start files of blocks, and quit, as [the editor](colorForth.md) describes |
 
 The console and the aforth panel have two modes, like the colorForth
 editor. Until you start typing, they take the same keys as the other
