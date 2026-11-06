@@ -1410,6 +1410,8 @@ const Interpreter = struct {
         defer self.color_line = null;
         self.color_address = false;
         self.color_node = false;
+        // a definition that a load before left open, as one ends without ;
+        self.defining = null;
         self.defining_yellow = false;
         self.learnSystemNames();
         try self.pushColorBlock(block);
@@ -4736,6 +4738,28 @@ test "colorForth runs yellow words as a host word is defined" {
         \\ >BIN ]ASM
     );
 
+    // a load that ends in a definition does not leave it to the next, as
+    // a session compiles the block again
+    var programs: [4]Program = undefined;
+    var descriptors: [1]boot.Descriptor = undefined;
+    var buffer: [256]u8 = undefined;
+    var out: Io.Writer = .fixed(&buffer);
+    var diagnostic: Diagnostic = .{};
+    var session: Session = .init(&programs, &descriptors, &diagnostic, .{ .out = &out });
+    const open = try colorBlocks(&.{
+        \\[ host
+        \\: b ] 2 ;
+        \\: c ] 3
+    });
+    try session.loadColorForth(&open, 0);
+    const edited = try colorBlocks(&.{
+        \\[ host
+        \\: b ] 2 ;
+        \\: c ] 9 ; [ target 0 node 0 org
+        \\: main ] c lit ;
+    });
+    try session.loadColorForth(&edited, 0);
+    try expectEqual(9, session.assembled().programs[0].ram[1]);
 }
 
 test "colorForth's red words without code fall through into the next" {
