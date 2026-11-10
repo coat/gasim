@@ -687,7 +687,8 @@ fn code(a: Allocator, word: Word, address: u9) error{OutOfMemory}![]const u8 {
 
 fn literalCode(a: Allocator, word: Word) error{OutOfMemory}![]const u8 {
     var w: Writer.Allocating = .init(a);
-    disassembler.writeLiteral(&w.writer, word) catch return error.OutOfMemory;
+    // the panels mark a literal by its color
+    disassembler.writeValue(&w.writer, word) catch return error.OutOfMemory;
     return w.written();
 }
 

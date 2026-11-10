@@ -67,8 +67,10 @@ const history_capacity = 64;
 
 /// width of a node in the map
 const cell_width = 4;
-/// rows of the node panel above its memory listing
-const node_header_rows = 14;
+/// columns before the entries of a stack in the node panel
+const stack_indent = 2;
+/// columns of a stack entry in the node panel: 5 hex digits and a space
+const stack_entry_width = 6;
 /// rows of the memory listing: a heading and 64 words each for RAM and ROM
 const memory_rows = 2 * 65;
 
@@ -2706,14 +2708,20 @@ const Tui = struct {
         self.fields(win, 4, &.{ .{ "A", self.hex(n.a) }, .{ "B", self.print("{x:0>3}", .{n.b}) }, .{ "io", self.hex(n.io) } });
         self.fields(win, 5, &.{.{ "time", self.print("{d:.1} ns", .{@as(f64, @floatFromInt(n.time)) / 1000}) }});
 
-        self.fields(win, 7, &.{ .{ "T", self.hex(n.data_stack.t) }, .{ "S", self.hex(n.data_stack.s) } });
-        _ = win.printSegment(.{ .text = self.stack(&n.data_stack.stack, n.data_stack.index), .style = colors.dim }, .{ .row_offset = 8, .col_offset = 2, .wrap = .none });
-        self.fields(win, 9, &.{.{ "R", self.hex(n.return_stack.t) }});
-        _ = win.printSegment(.{ .text = self.stack(&n.return_stack.stack, n.return_stack.index), .style = colors.dim }, .{ .row_offset = 10, .col_offset = 2, .wrap = .none });
-        self.fields(win, 11, &.{.{ "watch", self.watches() }});
+        // a stack's entries on one row, or on two of 4 when the panel is too
+        // narrow for 8, which need no space after the last
+        const stack_rows: u16 = if (win.width < stack_indent + 8 * stack_entry_width - 1) 2 else 1;
+        var row: u16 = 7;
+        self.fields(win, row, &.{ .{ "T", self.hex(n.data_stack.t) }, .{ "S", self.hex(n.data_stack.s) } });
+        row = self.drawStack(win, row + 1, stack_rows, &n.data_stack.stack, n.data_stack.index);
+        self.fields(win, row, &.{.{ "R", self.hex(n.return_stack.t) }});
+        row = self.drawStack(win, row + 1, stack_rows, &n.return_stack.stack, n.return_stack.index);
+        self.fields(win, row, &.{.{ "watch", self.watches() }});
 
-        if (win.height <= node_header_rows) return;
-        const listing = win.child(.{ .y_off = node_header_rows - 1 });
+        // a blank row, then the listing below its own heading row
+        const header_rows = row + 3;
+        if (win.height <= header_rows) return;
+        const listing = win.child(.{ .y_off = header_rows - 1 });
         self.memory_window = listing;
         self.drawMemory(listing, n);
     }
@@ -2978,18 +2986,24 @@ const Tui = struct {
     fn literal(self: *Tui, word: Word) []const u8 {
         const buffer = self.frame.allocator().alloc(u8, 32) catch return "";
         var writer: Io.Writer = .fixed(buffer);
-        disassembler.writeLiteral(&writer, word) catch {};
+        // the color marks it as a literal
+        disassembler.writeValue(&writer, word) catch {};
         return writer.buffered();
     }
 
-    /// the 8 entries of a circular stack below its top, most recent first
-    fn stack(self: *Tui, entries: *const [8]Word, index: u3) []const u8 {
-        var text: []const u8 = "";
-        for (1..9) |i| {
-            const entry = entries[index -% @as(u3, @intCast(i % 8))];
-            text = self.print("{s}{x:0>5} ", .{ text, @as(u18, @bitCast(entry)) });
+    /// Draws the 8 entries of a circular stack below its top, most recent
+    /// first, on `rows` rows from `row`, and returns the row after them
+    fn drawStack(self: *Tui, win: vaxis.Window, row: u16, rows: u16, entries: *const [8]Word, index: u3) u16 {
+        const per_row = 8 / rows;
+        for (0..rows) |r| {
+            var text: []const u8 = "";
+            for (r * per_row + 1..(r + 1) * per_row + 1) |i| {
+                const entry = entries[index -% @as(u3, @intCast(i % 8))];
+                text = self.print("{s}{x:0>5} ", .{ text, @as(u18, @bitCast(entry)) });
+            }
+            _ = win.printSegment(.{ .text = text, .style = colors.dim }, .{ .row_offset = row + @as(u16, @intCast(r)), .col_offset = stack_indent, .wrap = .none });
         }
-        return text;
+        return row + rows;
     }
 };
 
@@ -3238,8 +3252,8 @@ test "draws the chip, console and selected node" {
     try expect(try t.shows(1, "700 701"));
     try expect(try t.shows(8, "000 001"));
     try expect(try t.shows(10, "2 console 000:up"));
-    try expect(try t.shows(14, "RAM"));
-    try expect(try t.shows(15, ">000"));
+    try expect(try t.shows(16, "RAM"));
+    try expect(try t.shows(17, ">000"));
 
     // stepping follows the node that runs, and the console shows its output
     try t.press('s');
@@ -4017,6 +4031,32 @@ test "wraps the console, ends its input, and keeps sizes on screen" {
     try expect(!try t.shows(t.tui.stacked[1].top, "000:up"));
 }
 
+test "the node panel shows literals by value, and wraps stacks when narrow" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("5 dup");
+    defer t.deinit();
+    t.draw();
+
+    // the color marks a literal, so it is shown without the word literal
+    try expect(try t.shows(18, "001 00005  5"));
+    try expect(!try t.shows(18, "literal"));
+
+    // each stack on two rows of 4 entries when the panel is too narrow for 8
+    const four = "00000 00000 00000 00000";
+    try expect(try t.shows(9, four));
+    try expect(!try t.shows(9, four ++ " 00000"));
+    try expect(try t.shows(10, four));
+    try expect(try t.shows(11, "R "));
+    try expect(try t.shows(16, "RAM"));
+
+    // and on one row when it has room, which moves the listing up
+    t.tui.left_width = 120 - 60;
+    t.draw();
+    try expect(try t.shows(9, four ++ " " ++ four));
+    try expect(try t.shows(10, "R "));
+    try expect(try t.shows(14, "RAM"));
+}
+
 test "stops at breakpoints set in the memory listing" {
     var t: TestTui = .{ .chip = undefined };
     try t.init("begin dup drop again");
@@ -4027,16 +4067,16 @@ test "stops at breakpoints set in the memory listing" {
     // on the current word, and then the next one
     try t.press('b');
     try expect(t.tui.chip.breakpoints.contains(.init(0, 0)));
-    try expect(try t.shows(15, "#>000"));
+    try expect(try t.shows(17, "#>000"));
     try t.press(vaxis.Key.down);
     try t.press('b');
     try expect(t.tui.chip.breakpoints.contains(.init(0, 1)));
     // and cleared by clicking the left edge
     const left: u16 = @intCast(t.tui.memory_window.?.x_off);
-    try t.click(left, 16, .press);
+    try t.click(left, 18, .press);
     try expect(!t.tui.chip.breakpoints.contains(.init(0, 1)));
     // clicking a word moves the cursor to it
-    try t.click(left + 4, 17, .press);
+    try t.click(left + 4, 19, .press);
     try expectEqual(3, t.tui.memory_cursor);
 
     // running stops when the node loops back
@@ -4069,14 +4109,14 @@ test "stops at watched transfers" {
     defer t.deinit();
     t.tui.focus = .node;
     t.draw();
-    try expect(try t.shows(12, "watch none"));
+    try expect(try t.shows(14, "watch none"));
 
     // writes to up, and reads from left
     try t.press('w');
     try t.press('U');
     try t.press('w');
     try t.press('l');
-    try expect(try t.shows(12, "watch writes up, reads left"));
+    try expect(try t.shows(14, "watch writes up, reads left"));
     // another key leaves the watches as they were
     try t.press('w');
     try t.press('x');
