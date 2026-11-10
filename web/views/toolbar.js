@@ -44,6 +44,7 @@ const item = (does, children) => m('li', m('a[href=#]', {
 }, children));
 
 function examplesMenu() {
+  if (examples.length === 0) return null;
   return m('details.dropdown.examples', [
     m('summary', { role: 'button', class: 'secondary outline', title: 'Examples to open', 'aria-label': 'Examples' }, labelled('book-open', 'Examples')),
     m('ul', examples.map((example) => item(() => openExample(example.name), [m('strong', example.name), m('small', example.about)]))),

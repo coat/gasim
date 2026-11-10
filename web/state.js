@@ -7,21 +7,12 @@ import * as store from './store.js';
 
 const { m } = window;
 
-/** The examples in zig-out/web/examples, with what each shows. */
-export const examples = [
-  { name: 'hello.ga', about: 'Print a greeting' },
-  { name: 'hello.af', about: 'Print a greeting, in arrayForth 3' },
-  { name: 'hello.cf', about: 'Print a greeting, in colorForth' },
-  { name: 'echo.ga', about: 'Copy console input to the console' },
-  { name: 'echo.af', about: 'Copy console input, in arrayForth 3' },
-  { name: 'echo.cf', about: 'Copy console input, in colorForth' },
-  { name: 'upcase.ga', about: 'Upper-case console input' },
-  { name: 'upcase.af', about: 'Upper-case console input, in arrayForth 3' },
-  { name: 'upcase.cf', about: 'Upper-case console input, in colorForth' },
-  { name: 'alphabet.cf', about: 'Print the alphabet' },
-  { name: 'variables.cf', about: 'Count with a variable' },
-  { name: 'multiply.cf', about: 'Multiply with +*' },
-];
+/**
+ * The examples in zig-out/web/examples, with their descriptions, from the
+ * index.json that the build writes. If the list is empty, the toolbar has
+ * no Examples menu.
+ */
+export const examples = [];
 
 /** console output kept, in characters */
 const consoleCapacity = 64 * 1024;
@@ -97,10 +88,10 @@ let rounds = 20000;
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
-/** Loads the engine and the ROM, and comes back to where the last visit was. */
+/** Loads the engine, the ROM and the examples, then returns to where the last visit left off. */
 export async function start() {
   state.gasim = await loadEngine();
-  await findRom();
+  await Promise.all([findRom(), findExamples()]);
   state.history = (await store.get('history')) ?? [];
   state.recent = (await store.get('recent')) ?? [];
   refresh();
@@ -239,6 +230,18 @@ function keepRecent(file) {
 export function forgetRecent() {
   state.recent = [];
   store.remove('recent');
+}
+
+/** Reads the list of examples from examples/index.json, next to the page. */
+async function findExamples() {
+  try {
+    const response = await fetch('examples/index.json');
+    if (!response.ok) return;
+    const listed = await response.json();
+    if (Array.isArray(listed)) examples.splice(0, examples.length, ...listed.filter((e) => typeof e?.name === 'string'));
+  } catch {
+    // The page was served without examples, so the list stays empty.
+  }
 }
 
 export async function openExample(name) {
