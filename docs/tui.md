@@ -43,6 +43,11 @@ Click a node to select it.
 The node panel shows the selected node's registers, stacks, and the RAM and
 ROM around the word it is running.
 
+When a node is part way through a word, the panel shows its opcodes in the
+`I` row and in the word's row of memory. Opcodes the node has run are dim,
+and the one it runs next is in reverse. A node is part way through a word
+after `N` steps one opcode, or while it waits on a port.
+
 - Click a word to move the cursor to it.
 - Click to the left of a word to set or clear a breakpoint. A breakpoint
   shows as a red dot.
@@ -55,6 +60,7 @@ ROM around the word it is running.
 | `s` | step the next node to run, and select it |
 | `S` | take a round of steps, the node furthest behind first |
 | `n` | step the selected node |
+| `N` | step one opcode of the selected node. If the node is between words, this only fetches the next one. |
 | `z` | undo the last step or run, up to 64 times |
 | `hjkl`, arrows | select a node on the map, or move through memory in the node panel |
 | `tab`, `shift+tab` | move to the next or previous panel, except while typing |
@@ -135,6 +141,8 @@ would take a key many times. They take the same names and arguments as the
 - `--count 4`: take that many steps
 - `--node 105`: step that node
 - `--rounds 4`: take that many rounds of steps
+- `--slot`: step one opcode of a node, the selected one unless `--node`
+  says another
 
 It stops at a breakpoint or watch, and takes at most a million steps. One
 `z` undoes all of them.

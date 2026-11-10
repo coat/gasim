@@ -75,7 +75,7 @@ SIGINT and SIGTERM stop a run as a breakpoint does. The run still writes
 | TUI | Command |
 | --- | --- |
 | pausing, running on | `run --from ... --to ...` |
-| `s` `S` `n` | `step`, `step --rounds`, `step --node` |
+| `s` `S` `n` `N` | `step`, `step --rounds`, `step --node`, `step --node --slot` |
 | `z`, the history | an earlier snapshot |
 | breakpoints and watches | options to the next command |
 | typing in the console | `--input` |

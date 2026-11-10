@@ -8,6 +8,7 @@ const chip_keys = [_][2][]const u8{
     .{ "s", "Step the next node to run" },
     .{ "shift+s", "Take a step for each node that can run, the furthest behind first" },
     .{ "n", "Step the selected node" },
+    .{ "shift+n", "Step one opcode of the selected node, or fetch its next word" },
     .{ "z", "Go back before the last step or run" },
     .{ "arrows or h j k l", "Select a node" },
     .{ "e", "The colorForth editor, and q in it to come back" },

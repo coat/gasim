@@ -1436,6 +1436,17 @@ dialog .actions {
   color: var(--literal);
 }
 
+/* the opcodes of the word a node is part way through: those it ran, and
+   the one it runs next */
+.slots .ran {
+  opacity: 0.55;
+}
+
+.slots .next {
+  outline: 1px solid currentColor;
+  border-radius: 2px;
+}
+
 .memory .gutter {
   width: 1.75rem;
   padding: 0;

@@ -403,6 +403,16 @@ export function stepNode() {
   refresh();
 }
 
+/** Steps one opcode of the selected node, or fetches its next word. */
+export function stepSlot() {
+  if (state.running) return;
+  const ran = state.gasim.stepSlot(state.selected);
+  const node = state.gasim.node(state.selected);
+  const done = node.i === null ? 'finished its word' : `is at slot ${node.slot}`;
+  state.message = `Node ${pad(nodeNumber(state.selected))} ${ran ? done : 'is still waiting'}`;
+  refresh();
+}
+
 export function back() {
   if (state.running) return;
   state.message = state.gasim.back() ? `Back to ${state.gasim.chip().steps.toLocaleString()} steps` : 'Nothing to go back to';
