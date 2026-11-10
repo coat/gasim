@@ -454,6 +454,8 @@ pub const Palette = struct {
     /// the word being run, in the listing
     here: dvui.Color,
     literal: dvui.Color,
+    /// labels, and the names of ROM words
+    label: dvui.Color,
 
     const light: Palette = blk: {
         @setEvalBranchQuota(10_000);
@@ -466,6 +468,7 @@ pub const Palette = struct {
             .tile_text = .fromHex("#1c2128"),
             .here = .fromHex("#fff3c4"),
             .literal = .fromHex("#8a5a00"),
+            .label = .fromHex("#1f6f5c"),
         };
     };
     const dark: Palette = blk: {
@@ -479,6 +482,7 @@ pub const Palette = struct {
             .tile_text = .fromHex("#e6e9ee"),
             .here = .fromHex("#4a4120"),
             .literal = .fromHex("#e3b65c"),
+            .label = .fromHex("#6fd3b8"),
         };
     };
 
@@ -493,6 +497,7 @@ pub const Palette = struct {
             .tile_text = b.base05,
             .here = b.base00.lerp(b.base0A, 0.3),
             .literal = b.base09,
+            .label = b.base0C,
         };
         return if (dvui.themeGet().dark) dark else light;
     }
@@ -837,8 +842,19 @@ fn nodePanel() void {
     var body = dvui.box(@src(), .{}, .{ .expand = .both, .padding = .{ .x = 8, .w = 4 } });
     defer body.deinit();
     registerFields(n);
+    sourceLine(n);
     stacks(n);
     listing(n);
+}
+
+/// where the word being run was assembled from, and its line
+fn sourceLine(n: Sim.NodeView) void {
+    const from = n.source orelse return;
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer row.deinit();
+    dvui.labelNoFmt(@src(), "from", .{}, .{ .color_text = .{ .color = mutedText() }, .min_size_content = .{ .w = 44 }, .padding = .all(1) });
+    dvui.labelNoFmt(@src(), from.where, .{}, .{ .padding = .all(1) });
+    if (from.text.len > 0) dvui.labelNoFmt(@src(), from.text, .{}, .{ .font = .theme(.mono), .padding = .all(1), .margin = .{ .x = 8 } });
 }
 
 /// what the node is doing, on its status's colour
@@ -964,6 +980,11 @@ fn listing(n: Sim.NodeView) void {
 
     const mono: dvui.Font = .theme(.mono);
     const line_height = mono.lineHeight();
+    // labels line up, in a column as wide as the widest, up to a limit
+    var label_width: f32 = 0;
+    for (n.memory) |line| if (line.label) |label| {
+        label_width = @max(label_width, mono.textSize(gasim.assembler.cut(label, 12)).w);
+    };
     for (n.memory, 0..) |line, k| {
         if (k == 0 or k == 64) dvui.labelNoFmt(@src(), if (k == 0) "RAM" else "ROM", .{}, .{ .id_extra = k, .color_text = .{ .color = mutedText() }, .padding = .{ .x = 4, .y = 6, .h = 2 } });
         // RAM and ROM repeat at x040 and x0c0
@@ -992,6 +1013,10 @@ fn listing(n: Sim.NodeView) void {
         const pad: dvui.Rect = .{ .x = 4, .w = 8 };
         dvui.label(@src(), "{x:0>3}", .{line.address}, .{ .font = mono, .color_text = .{ .color = theme.color(.highlight, .fill) }, .padding = pad });
         dvui.label(@src(), "{x:0>5}", .{line.value}, .{ .font = mono, .color_text = .{ .color = mutedText() }, .padding = pad });
+        if (label_width > 0) {
+            const label = line.label orelse "";
+            dvui.labelNoFmt(@src(), gasim.assembler.cut(label, 12), .{}, .{ .font = mono, .color_text = .{ .color = palette.label }, .padding = pad, .min_size_content = .{ .w = label_width } });
+        }
         if (here and n.i_slots != null and !line.literal) {
             slots(n, .{ .font = mono, .padding = .{ .x = 2, .w = 2 }, .margin = .{ .x = 2 } });
         } else dvui.labelNoFmt(@src(), line.code, .{}, .{ .font = mono, .padding = pad, .color_text = if (line.literal) .{ .color = palette.literal } else if (zero) .{ .color = mutedText() } else null });
@@ -1003,6 +1028,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;
 
 const dvui = @import("dvui");
 const gasim = @import("gasim");
@@ -1190,4 +1216,19 @@ test "shift+n steps a slot, marking the opcode run next" {
     try saveImage(&t, "slot.png");
     try expectEqual(.execution, sim.chip.nodes[0].state);
     try expectEqual(1, sim.chip.nodes[0].slot);
+}
+
+test "the node panel shows labels, and where the word being run is from" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1400, .h = 900 } });
+    defer t.deinit();
+    try startWith(upcase);
+    defer stop();
+    selected = 1;
+    for (0..6) |_| _ = try sim.stepNode(1);
+    try dvui.testing.settle(frame);
+    try saveImage(&t, "labels.png");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const node_view = try sim.node(arena.allocator(), 1);
+    try expectEqualStrings("main", node_view.memory[0].label.?);
 }

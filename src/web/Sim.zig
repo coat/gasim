@@ -22,6 +22,8 @@ forth_out: Writer.Allocating,
 /// the sources and lines the session's labels refer to, for as long as it
 /// lasts
 sources: std.heap.ArenaAllocator,
+/// where the programs loaded came from, in `sources`
+source_map: ?SourceMap = null,
 /// the chip as it was set up, which `reset` goes back to
 start: Chip.Snapshot,
 /// the chip before each step or run, the oldest first, with one more saved
@@ -119,6 +121,7 @@ pub fn init(self: *Sim, gpa: Allocator) Allocator.Error!void {
 
 pub fn deinit(self: *Sim) void {
     const gpa = self.gpa;
+    if (self.source_map) |*map| map.deinit(gpa);
     self.chip.deinit(gpa);
     self.start.deinit(gpa);
     for (&self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(gpa);
@@ -182,6 +185,8 @@ pub fn load(self: *Sim, kind: Kind, file: []const u8, loads: []const u32) error{
     // a file that fails to load leaves the chip empty to go back to, rather
     // than as the last file set it up
     self.chip.save(&self.start);
+    if (self.source_map) |*map| map.deinit(self.gpa);
+    self.source_map = null;
     _ = self.sources.reset(.retain_capacity);
     self.forth_out.clearRetainingCapacity();
     self.console_out.clearRetainingCapacity();
@@ -192,6 +197,18 @@ pub fn load(self: *Sim, kind: Kind, file: []const u8, loads: []const u32) error{
     self.newSession(if (kind == .blk) source else null);
     const assembled = self.assemble(kind, source, loads) catch |err| return self.failAt(kind, err);
     try self.setUp(kind, assembled);
+    try self.mapSource(kind, assembled, source);
+}
+
+/// Keeps where the programs came from, replacing what was kept before
+fn mapSource(self: *Sim, kind: Kind, assembled: arrayforth.Assembled, source: []const u8) error{OutOfMemory}!void {
+    if (self.source_map) |*map| map.deinit(self.gpa);
+    self.source_map = null;
+    self.source_map = try .init(self.gpa, self.chip.layout, assembled.programs, assembled.descriptors, source, "", switch (kind) {
+        .ga, .af => .text,
+        .blk => .blocks,
+        .cf => .colorforth,
+    });
 }
 
 fn assemble(self: *Sim, kind: Kind, source: []const u8, loads: []const u32) !arrayforth.Assembled {
@@ -589,6 +606,9 @@ pub fn tilesView(self: *Sim) error{OutOfMemory}![]const u8 {
 pub const Line = struct {
     address: u9,
     value: u18,
+    /// the label assembled at the word, or the name of the ROM word there.
+    /// It is in the source map, so it lasts until the next load or compile.
+    label: ?[]const u8,
     code: []const u8,
     literal: bool,
     breakpoint: bool,
@@ -621,7 +641,16 @@ pub const NodeView = struct {
     return_stack: [9]u18,
     /// the address of the word being run, if in RAM or ROM
     here: ?u9,
+    /// where the word being run was assembled from
+    source: ?Source,
     memory: [128]Line,
+};
+
+pub const Source = struct {
+    /// such as `line 9`, `block 2 line 5`, or `block 12 word 3`
+    where: []const u8,
+    /// the line, or empty for colorForth
+    text: []const u8,
 };
 
 /// Writes node `i` into `out` as JSON
@@ -638,6 +667,9 @@ pub fn node(self: *Sim, a: Allocator, i: u16) error{OutOfMemory}!NodeView {
     const n = &self.chip.nodes[i];
     const status = n.status();
     const word = n.current();
+    const map: ?*const SourceMap = if (self.source_map) |*m| m else null;
+    const namer: SourceMap.Namer = .{ .map = map, .chip = &self.chip, .i = i };
+    const names = namer.names();
 
     var view: NodeView = .{
         .number = layout.nodeNumber(i),
@@ -651,8 +683,8 @@ pub fn node(self: *Sim, a: Allocator, i: u16) error{OutOfMemory}!NodeView {
         .carry = n.carry,
         .extended = n.p.extended_arithmetic,
         .i = if (n.state == .fetch) null else @bitCast(n.i),
-        .i_code = if (n.state == .fetch) null else try code(a, n.i, @bitCast(word)),
-        .i_slots = if (n.state == .fetch) null else try slotCodes(a, n.i, @bitCast(word)),
+        .i_code = if (n.state == .fetch) null else try code(a, n.i, @bitCast(word), names),
+        .i_slots = if (n.state == .fetch) null else try slotCodes(a, n.i, @bitCast(word), names),
         .fetch_from = if (n.state != .fetch) null else if (word.io) disassembler.ioName(@bitCast(word)) else "P",
         .a = @bitCast(n.a),
         .b = n.b,
@@ -661,7 +693,13 @@ pub fn node(self: *Sim, a: Allocator, i: u16) error{OutOfMemory}!NodeView {
         .data_stack = undefined,
         .return_stack = undefined,
         .here = if (word.io) null else @bitCast(word),
+        .source = null,
         .memory = undefined,
+    };
+    if (map) |m| if (view.here) |here| if (m.at(&self.chip, i, here & 0x1bf)) |entry| if (entry.line != 0) {
+        var place: Writer.Allocating = .init(a);
+        m.writeWhere(&place.writer, entry.line) catch return error.OutOfMemory;
+        view.source = .{ .where = place.written(), .text = m.text(entry.line) };
     };
     var data = n.data_stack;
     view.data_stack[0] = @bitCast(data.t);
@@ -685,7 +723,8 @@ pub fn node(self: *Sim, a: Allocator, i: u16) error{OutOfMemory}!NodeView {
         line.* = .{
             .address = address,
             .value = @bitCast(value),
-            .code = if (literal) try literalCode(a, value) else try code(a, value, address),
+            .label = SourceMap.label(map, &self.chip, i, address),
+            .code = if (literal) try literalCode(a, value) else try code(a, value, address, names),
             .literal = literal,
             .breakpoint = self.chip.breakpoints.contains(.init(i, address)),
         };
@@ -693,17 +732,17 @@ pub fn node(self: *Sim, a: Allocator, i: u16) error{OutOfMemory}!NodeView {
     return view;
 }
 
-fn code(a: Allocator, word: Word, address: u9) error{OutOfMemory}![]const u8 {
+fn code(a: Allocator, word: Word, address: u9, names: disassembler.Names) error{OutOfMemory}![]const u8 {
     var w: Writer.Allocating = .init(a);
-    disassembler.write(&w.writer, word, address) catch return error.OutOfMemory;
+    disassembler.writeNamed(&w.writer, word, address, names) catch return error.OutOfMemory;
     return w.written();
 }
 
-fn slotCodes(a: Allocator, word: Word, address: u9) error{OutOfMemory}![]const []const u8 {
+fn slotCodes(a: Allocator, word: Word, address: u9, names: disassembler.Names) error{OutOfMemory}![]const []const u8 {
     const slots = try a.alloc([]const u8, disassembler.slotCount(word));
     for (slots, 0..) |*slot, i| {
         var w: Writer.Allocating = .init(a);
-        disassembler.writeSlot(&w.writer, word, address, @intCast(i)) catch return error.OutOfMemory;
+        disassembler.writeSlot(&w.writer, word, address, @intCast(i), names) catch return error.OutOfMemory;
         slot.* = w.written();
     }
     return slots;
@@ -894,6 +933,7 @@ pub fn compile(self: *Sim) error{ CompileFailed, OutOfMemory }!void {
     self.chip.restore(&self.start);
     const assembled = self.session.assembled();
     const started = arrayforth.startCompiled(&self.chip, assembled);
+    try self.mapSource(.cf, assembled, "");
     const w = &self.out.writer;
     w.print("compiled, and started the chip again with {d} nodes' code", .{started.nodes}) catch return error.OutOfMemory;
     // what changes what runs first: a node left out, and, as setting up
@@ -1051,6 +1091,7 @@ const Word = gasim.Word;
 const Diagnostic = arrayforth.Diagnostic;
 const Program = arrayforth.Program;
 const Session = arrayforth.Session;
+const SourceMap = gasim.SourceMap;
 
 fn testSim() !*Sim {
     const sim = try std.testing.allocator.create(Sim);
@@ -1189,6 +1230,26 @@ test "views as JSON" {
     defer chip.deinit();
     try expectEqual(18, chip.value.object.get("columns").?.integer);
     try expectEqual(false, chip.value.object.get("rom").?.bool);
+}
+
+test "the node view names labels and ROM words, and says where the word is from" {
+    const sim = try testSim();
+    defer freeSim(sim);
+    try sim.load(.ga, hello, &.{});
+
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const view = try sim.node(arena.allocator(), 0);
+    try expectEqualStrings("main", view.memory[0].label.?);
+    try expectEqualStrings("line 2", view.source.?.where);
+    try expectEqualStrings("up b!", view.source.?.text);
+    try expectEqual(null, view.memory[1].label);
+    // ROM words have their names once the ROM is loaded, and calls to them
+    // before that
+    try expectEqual(null, view.memory[64 + 0x29].label);
+    sim.chip.nodes[0].mem[64 + 0x29] = 1;
+    const loaded = try sim.node(arena.allocator(), 0);
+    try expectEqualStrings("warm", loaded.memory[64 + 0x29].label.?);
 }
 
 test "the prompt" {

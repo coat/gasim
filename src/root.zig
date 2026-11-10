@@ -16,6 +16,7 @@ pub const Console = @import("Console.zig");
 pub const Editor = @import("Editor.zig");
 pub const Tail = @import("Tail.zig");
 pub const Serdes = @import("Serdes.zig");
+pub const SourceMap = @import("SourceMap.zig");
 pub const Spec = @import("Spec.zig");
 pub const Uart = @import("Uart.zig");
 pub const Flash = @import("Flash.zig");
@@ -51,6 +52,7 @@ test {
     _ = @import("rom.zig");
     _ = @import("Serdes.zig");
     _ = @import("snapshot.zig");
+    _ = @import("SourceMap.zig");
     _ = @import("Spec.zig");
     _ = @import("streamer.zig");
     _ = @import("stack.zig");

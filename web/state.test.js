@@ -111,3 +111,19 @@ Deno.test('stepping a slot fetches the word, then runs its opcodes one at a time
   assert(node.i !== null);
   assertEquals(state.gasim.history().at(-1).cause, 'slot');
 });
+
+Deno.test('the node view names labels and says where the word is from', async () => {
+  await load('hello.ga');
+  const node = state.gasim.node(app.nodeIndex(0));
+  assertEquals(node.memory[0].label, 'main');
+  assert(node.source.where.startsWith('line '));
+});
+
+Deno.test('arrayForth 3 labels name their words too', async () => {
+  await load('hello.af');
+  const named = [];
+  for (let i = 0; i < 144; i++) {
+    for (const line of state.gasim.node(i).memory.slice(0, 64)) if (line.label) named.push(line.label);
+  }
+  assertEquals(named, ['message', 'main']);
+});

@@ -750,10 +750,13 @@ test "arrayForth 3's applications boot through the EVB002's USB port A as their 
         ,
     };
     for (applications) |source| {
-        var programs: [Chip.Layout.chip_numbers]Program = undefined;
+        // on the heap, as a program for each node number is too much for
+        // some stacks
+        const programs = try gpa.alloc(Program, Chip.Layout.chip_numbers);
+        defer gpa.free(programs);
         var descriptor_buffer: [Chip.Layout.chip_numbers]Descriptor = undefined;
         var diagnostic: assembler.Diagnostic = .{};
-        const assembled = arrayforth.assembleScript(source, disk, &programs, &descriptor_buffer, &diagnostic) catch |err| {
+        const assembled = arrayforth.assembleScript(source, disk, programs, &descriptor_buffer, &diagnostic) catch |err| {
             std.debug.print("{s}: {t} at block {d} line {d} '{s}'\n", .{ source, err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
             return err;
         };
