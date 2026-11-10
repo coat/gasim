@@ -148,7 +148,7 @@ examples/echo.cf`:
 
 ```
 block 0
-(echo - copy console input to the console until it ends, as echo.ga does ~cr
+(echo - copy console input to the console ~cr
 [0 node 0 org
 :main ]up b! begin ]@b !b end
 ```
