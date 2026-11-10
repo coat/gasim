@@ -26,7 +26,7 @@ With gasim you can:
   for the GUI.
 
 See [Installing](docs/install.md) for where the examples are, and how to set
-the GUI's fonts and colors.
+the GUI's settings.
 
 ## Usage
 
@@ -178,6 +178,11 @@ zig build -Doptimize=ReleaseFast
 This puts `gasim` in `./zig-out/bin/`. See [Building](docs/building.md) for
 the GUI, the web version, tests and fuzzing, and
 [Benchmarks](docs/benchmarks.md) for measuring speed.
+
+## Contributing
+
+See [Contributing](CONTRIBUTING.md) for how to write docs, code comments,
+commits and pull requests. gasim uses plain language (ISO 24495-1).
 
 ## Prior art
 

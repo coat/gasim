@@ -1,15 +1,12 @@
-//! The fonts and colors chosen in gui.json, in gasim under XDG_CONFIG_HOME,
-//! as the Home Manager module writes it, from Stylix or by hand:
+//! Applies the fonts and colors from gui.json, which config.zig reads:
 //!
-//!     {
-//!       "fonts": {
-//!         "sans": { "regular": "/path/to/Sans.ttf", "bold": "...",
-//!                   "italic": "...", "bold_italic": "..." },
-//!         "mono": { "regular": "/path/to/Mono.ttf", "bold": "..." },
-//!         "size": 11
-//!       },
-//!       "colors": { "base00": "#1d2021", ..., "base0F": "#d65d0e" }
-//!     }
+//!     "fonts": {
+//!       "sans": { "regular": "/path/to/Sans.ttf", "bold": "...",
+//!                 "italic": "...", "bold_italic": "..." },
+//!       "mono": { "regular": "/path/to/Mono.ttf", "bold": "..." },
+//!       "size": 11
+//!     },
+//!     "colors": { "base00": "#1d2021", ..., "base0F": "#d65d0e" }
 //!
 //! dvui draws only the TrueType and OpenType files it is given, not fonts
 //! by name, so each face is a file; those left out are Vera's, or a bold
@@ -17,14 +14,11 @@
 //! give it. The colors are a base16 scheme, which the Auto theme uses in
 //! place of Adwaita's; Light and Dark keep Adwaita's, with the fonts chosen.
 
-/// as gui.json has it
-const Config = struct {
-    fonts: struct {
-        sans: Faces = .{},
-        mono: Faces = .{},
-        size: ?f32 = null,
-    } = .{},
-    colors: ?Scheme = null,
+/// The fonts in gui.json.
+pub const Fonts = struct {
+    sans: Faces = .{},
+    mono: Faces = .{},
+    size: ?f32 = null,
 };
 
 /// the files of a family's faces
@@ -37,7 +31,7 @@ const Faces = struct {
 
 /// a base16 scheme, each color as hex, with or without a #; `dark` when the
 /// scheme says, else from base00
-const Scheme = struct {
+pub const Scheme = struct {
     dark: ?bool = null,
     base00: []const u8,
     base01: []const u8,
@@ -120,19 +114,14 @@ var has_sans = false;
 var has_mono = false;
 var scheme: ?Base16 = null;
 
-/// Reads gui.json, adding its fonts to the window; a file missing is none
-/// chosen, and one wrong is said, keeping what else it gives
-pub fn load(win: *dvui.Window, path: []const u8) void {
-    const a = win.arena();
-    const bytes = Io.Dir.cwd().readFileAlloc(dvui.io, path, a, .limited(64 * 1024)) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => return ui.say("{s}: {t}", .{ path, err }),
-    };
-    const c = std.json.parseFromSliceLeaky(Config, a, bytes, .{ .ignore_unknown_fields = true }) catch |err| return ui.say("{s}: {t}", .{ path, err });
-    size = c.fonts.size;
-    has_sans = add(win, sans, c.fonts.sans);
-    has_mono = add(win, mono, c.fonts.mono);
-    scheme = if (c.colors) |s| Base16.parse(s) catch return ui.say("{s}: a color isn't hex, such as #1d2021", .{path}) else null;
+/// Applies the fonts and colors from gui.json, and adds the fonts to the
+/// window. If a font or color has an error, the GUI shows it and keeps the
+/// rest.
+pub fn set(win: *dvui.Window, path: []const u8, fonts: Fonts, colors_given: ?Scheme) void {
+    size = fonts.size;
+    has_sans = add(win, sans, fonts.sans);
+    has_mono = add(win, mono, fonts.mono);
+    scheme = if (colors_given) |s| Base16.parse(s) catch return ui.say("{s}: a color isn't hex, such as #1d2021", .{path}) else null;
 }
 
 /// Adds a family's faces, whether it has the regular
@@ -220,7 +209,7 @@ test "gui.json's colors are Auto's theme, and its fonts every theme's" {
     try tmp.dir.writeFile(dvui.io, .{ .sub_path = "gui.json", .data = json });
     // a font of dvui's own, as a file
     try tmp.dir.writeFile(dvui.io, .{ .sub_path = "mono.ttf", .data = dvui.Font.Source.fallback.bytes });
-    load(win, try std.fs.path.join(win.arena(), &.{ dir, "gui.json" }));
+    config.load(win, try std.fs.path.join(win.arena(), &.{ dir, "gui.json" }));
 
     help.theme = .auto;
     help.apply();
@@ -261,7 +250,7 @@ test "a font that isn't one is said, and Vera kept" {
     // FreeType's warning, which is what's tested
     const level = std.testing.log_level;
     std.testing.log_level = .err;
-    load(win, json_path);
+    config.load(win, json_path);
     std.testing.log_level = level;
     try expect(!has_sans);
     try expect(std.mem.endsWith(u8, ui.message, "not a font dvui can draw"));
@@ -278,5 +267,6 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const dvui = @import("dvui");
 const Color = dvui.Color;
 const testing = dvui.testing;
+const config = @import("config.zig");
 const help = @import("help.zig");
 const ui = @import("ui.zig");

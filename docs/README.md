@@ -2,8 +2,7 @@
 
 ## Getting started
 
-- [Installing](install.md): downloads, Nix, examples, and the GUI's fonts
-  and colors
+- [Installing](install.md): downloads, Nix, examples, and the GUI's settings
 - [Building](building.md): building from source, tests and fuzzing
 
 ## Using gasim
@@ -26,3 +25,5 @@
 
 - [Benchmarks](benchmarks.md): measuring gasim's speed
 - [Roadmap](ROADMAP.md): what is done and what comes next
+- [Contributing](../CONTRIBUTING.md): how to write docs, comments, commits
+  and pull requests

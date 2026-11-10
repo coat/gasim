@@ -37,7 +37,7 @@ fn init(win: *dvui.Window) !void {
         null else null;
     try ui.start(win.gpa, dirs);
     files.examples_dir = examplesDir(arena, environ, if (dirs) |d| d.data else null);
-    if (configDir(arena, environ)) |config| style.load(win, try std.fs.path.join(arena, &.{ config, "gui.json" }));
+    if (configDir(arena, environ)) |dir| config.load(win, try std.fs.path.join(arena, &.{ dir, "gui.json" }));
 
     const args = try process.minimal.args.toSlice(arena);
     var path: ?[]const u8 = null;
@@ -84,9 +84,11 @@ fn dataDir(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u
         std.fs.path.join(arena, &.{ environ.get("HOME") orelse return null, ".local", "share", "gasim" }) catch null;
 }
 
-/// where the examples are: beside gasim-gui, as in a release; in
-/// share/gasim beside its bin, as installed; or in gasim under XDG_DATA_HOME,
-/// beside the ROM, or under one of XDG_DATA_DIRS
+/// Returns the first of these folders that has examples in it:
+/// - examples, next to gasim-gui, as in a release
+/// - share/gasim/examples, next to its bin folder, as installed
+/// - gasim/examples under XDG_DATA_HOME, where the ROM is saved
+/// - gasim/examples under each folder in XDG_DATA_DIRS
 fn examplesDir(arena: Allocator, environ: *const std.process.Environ.Map, data: ?[]const u8) ?[]const u8 {
     var candidates: std.ArrayList([]const u8) = .empty;
     if (std.process.executableDirPathAlloc(dvui.io, arena)) |bin| {
@@ -98,10 +100,10 @@ fn examplesDir(arena: Allocator, environ: *const std.process.Environ.Map, data: 
         var shared = std.mem.tokenizeScalar(u8, environ.get("XDG_DATA_DIRS") orelse "/usr/local/share:/usr/share", ':');
         while (shared.next()) |dir| candidates.append(arena, std.fs.path.join(arena, &.{ dir, "gasim", "examples" }) catch return null) catch return null;
     }
+    // Use the first folder that has examples in it.
     for (candidates.items) |dir| {
-        var opened = Io.Dir.cwd().openDir(dvui.io, dir, .{}) catch continue;
-        opened.close(dvui.io);
-        return dir;
+        files.examples_dir = dir;
+        if (files.exampleList().len > 0) return dir;
     }
     return null;
 }
@@ -120,8 +122,8 @@ fn stateDir(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const 
 /// where gasim's settings are, the GUI's fonts and colors: in gasim under
 /// XDG_CONFIG_HOME, or ~/.config
 fn configDir(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u8 {
-    return if (environ.get("XDG_CONFIG_HOME")) |config|
-        std.fs.path.join(arena, &.{ config, "gasim" }) catch null
+    return if (environ.get("XDG_CONFIG_HOME")) |home|
+        std.fs.path.join(arena, &.{ home, "gasim" }) catch null
     else if (builtin.os.tag == .windows)
         std.fs.path.join(arena, &.{ environ.get("APPDATA") orelse return null, "gasim" }) catch null
     else
@@ -137,5 +139,5 @@ const build_options = @import("build_options");
 const dvui = @import("dvui");
 const files = @import("files.zig");
 const help = @import("help.zig");
-const style = @import("style.zig");
+const config = @import("config.zig");
 const ui = @import("ui.zig");

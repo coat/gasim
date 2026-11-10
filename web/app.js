@@ -3,7 +3,7 @@
 // above tabs, with the border between them dragged.
 
 import {
-  state, start, toggleRun, stepNext, stepRound, stepNode, back, move, openFile, openExample, examples, flushWorkspace, workspaceKept,
+  state, start, toggleRun, stepNext, stepRound, stepNode, back, move, openFile, openExample, flushWorkspace, workspaceKept,
 } from './state.js';
 import { Toolbar, StatusBar, RomDialog, HelpDialog, dialogs, applyTheme } from './views/toolbar.js';
 import { ChipMap } from './views/map.js';
@@ -227,9 +227,10 @@ applyTheme();
 m.route.prefix = '#';
 m.route(document.getElementById('app'), '/chip', routes);
 start().then(async () => {
-  // ?example=hello.ga opens an example, so a link can show one
+  // A link with ?example=hello.ga opens that example. It also opens
+  // versions that the menu hides.
   const example = new URLSearchParams(location.search).get('example');
-  if (example && examples.some((e) => e.name === example)) await openExample(example);
+  if (example && /^[\w.-]+\.(ga|af|cf)$/.test(example)) await openExample(example);
   m.redraw();
 }, (error) => {
   document.getElementById('app').textContent = `gasim could not start: ${error.message}`;

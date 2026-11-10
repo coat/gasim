@@ -50,6 +50,8 @@ self: {
     json = builtins.toJSON (lib.filterAttrs (_: v: v != null) {
       fonts = lib.filterAttrs (_: v: v != null) {inherit (cfg.fonts) size;};
       colors = lib.mapNullable (c: c // lib.optionalAttrs (cfg.dark != null) {inherit (cfg) dark;}) cfg.colors;
+      # Write it only when it isn't the default.
+      examples = if cfg.examples.menu then null else {menu = false;};
     });
   in
     pkgs.runCommand "gasim-gui.json" {
@@ -114,6 +116,12 @@ in {
       default = null;
       description = "Whether the colors are a dark scheme; null to tell from base00.";
     };
+
+    examples.menu = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Whether gasim-gui's toolbar has an Examples menu, when it finds the examples.";
+    };
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
@@ -132,7 +140,7 @@ in {
     })
     {
       home.packages = [cfg.package];
-      xdg.configFile."gasim/gui.json" = lib.mkIf (cfg.fonts.sans != null || cfg.fonts.mono != null || cfg.fonts.size != null || cfg.colors != null) {
+      xdg.configFile."gasim/gui.json" = lib.mkIf (cfg.fonts.sans != null || cfg.fonts.mono != null || cfg.fonts.size != null || cfg.colors != null || !cfg.examples.menu) {
         source = guiJson;
       };
     }

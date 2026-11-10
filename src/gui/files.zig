@@ -26,6 +26,11 @@ var gpa: Allocator = undefined;
 var dirs: ?Dirs = null;
 /// where the examples are, as `main` finds them; in tests, the repository's
 pub var examples_dir: ?[]const u8 = if (builtin.is_test) "examples" else null;
+/// Whether to show the Examples menu. gui.json can turn it off.
+pub var examples_menu = true;
+/// The examples that `exampleList` found, and the folder it looked in.
+var listed: ?struct { dir: []const u8, all: []const Example } = null;
+var listed_arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
 /// what `file` and `recent` point into, owned
 var arena: std.heap.ArenaAllocator = undefined;
 pub var file: ?File = null;
@@ -114,17 +119,29 @@ pub fn openDropped() void {
     open(path);
 }
 
-pub fn openExample(e: examples.Example) void {
-    const bytes = readExample(e.name) catch |err| return ui.say("{s}: {t}", .{ e.name, err });
-    load(.{ .path = e.name, .example = true }, bytes);
+/// Returns the examples in `examples_dir`. It reads the folder the first
+/// time, then keeps the list. If there is no folder, the list is empty.
+pub fn exampleList() []const Example {
+    const dir = examples_dir orelse return &.{};
+    if (listed) |l| if (std.mem.eql(u8, l.dir, dir)) return l.all;
+    var opened = Io.Dir.cwd().openDir(dvui.io, dir, .{ .iterate = true }) catch return &.{};
+    defer opened.close(dvui.io);
+    const all = gasim.examples.list(listed_arena.allocator(), dvui.io, opened) catch &.{};
+    listed = .{ .dir = dir, .all = all };
+    return all;
 }
 
-/// an example's file, from where the examples are, if `name` is one of them
+pub fn openExample(name: []const u8) void {
+    const bytes = readExample(name) catch |err| return ui.say("{s}: {t}", .{ name, err });
+    load(.{ .path = name, .example = true }, bytes);
+}
+
+/// Reads an example from `examples_dir`. It also reads versions that the
+/// menu hides, such as hello.ga, so a saved workspace can open them again.
+/// It refuses names with a path in them.
 fn readExample(name: []const u8) ![]u8 {
     const dir = examples_dir orelse return error.FileNotFound;
-    for (examples.all) |e| {
-        if (std.mem.eql(u8, e.name, name)) break;
-    } else return error.FileNotFound;
+    if (!gasim.examples.isExample(name) or std.mem.indexOfAny(u8, name, "/\\:") != null) return error.FileNotFound;
     return read(try std.fs.path.join(dvui.currentWindow().arena(), &.{ dir, name }));
 }
 
@@ -209,12 +226,13 @@ pub fn toolbar() void {
                 recent.clearRetainingCapacity();
             }
         };
-        // only when they are installed
-        if (examples_dir != null) if (toolbarMenu(@src(), .{ .label = "Examples", .icon = icons.book_open, .tip = "Examples to open" }, .{ .tag = "examples" })) |r| {
+        // Show the menu only if there are examples and gui.json allows it.
+        if (examples_menu and exampleList().len > 0) if (toolbarMenu(@src(), .{ .label = "Examples", .icon = icons.book_open, .tip = "Examples to open" }, .{ .tag = "examples" })) |r| {
             var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
             defer fw.deinit();
-            for (examples.all, 0..) |e, k| {
-                var item = dvui.menuItem(@src(), .{}, .{ .id_extra = k, .expand = .horizontal, .tag = if (k == 0) "example-0" else null });
+            for (exampleList(), 0..) |e, k| {
+                // The tests click this tag.
+                var item = dvui.menuItem(@src(), .{}, .{ .id_extra = k, .expand = .horizontal, .tag = if (std.mem.startsWith(u8, e.name, "hello.")) "example-hello" else null });
                 defer item.deinit();
                 {
                     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{});
@@ -224,7 +242,7 @@ pub fn toolbar() void {
                 }
                 if (item.activated) {
                     m.close();
-                    openExample(e);
+                    openExample(e.name);
                 }
             }
         };
@@ -472,8 +490,8 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 const dvui = @import("dvui");
-const examples = @import("examples");
 const gasim = @import("gasim");
+const Example = gasim.examples.Example;
 const debug = @import("debug.zig");
 const dock = @import("dock.zig");
 const editor = @import("editor.zig");
@@ -499,8 +517,8 @@ test "the examples menu opens an example" {
     try testing.settle(ui.frame);
     try click("examples");
     try ui.saveImage(&w, "examples.png");
-    try click("example-0");
-    try expectEqualStrings("hello.ga", file.?.path);
+    try click("example-hello");
+    try expectEqualStrings("hello.cf", file.?.path);
     try expect(file.?.example);
     _ = try ui.sim.run(100_000);
     try testing.settle(ui.frame);
@@ -523,7 +541,7 @@ test "the blocks to load are numbers" {
     defer w.deinit();
     try ui.startWith(ui.upcase);
     defer ui.stop();
-    openExample(examples.all[2]);
+    openExample("hello.cf");
     try testing.settle(ui.frame);
     try expectEqual(.editor, ui.view);
     try expectEqualStrings("0", loads_text.items);
@@ -543,7 +561,7 @@ test "the workspace lasts between runs" {
     var w = try testing.init(.{ .window_size = .{ .w = 1400, .h = 900 } });
     defer w.deinit();
     try ui.start(std.testing.allocator, d);
-    openExample(examples.all[0]);
+    openExample("hello.ga");
     ui.selected = 5;
     _ = try ui.sim.toggleBreakpoint(5, 3);
     _ = try ui.sim.toggleWatch(1, .right, true);
