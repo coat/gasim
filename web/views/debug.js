@@ -122,6 +122,7 @@ const causes = {
   step: 'a step',
   round: 'a round of steps',
   node: 'a step of one node',
+  slot: 'a step of one opcode',
   run: 'a run',
   line: 'a line at the prompt',
   reset: 'starting again',

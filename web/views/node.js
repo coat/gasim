@@ -17,6 +17,10 @@ function doing(node) {
   }
 }
 
+/** The opcodes of the word a node is part way through, with those it ran dim and the one it runs next marked. */
+const slots = (node) =>
+  node.i_slots.flatMap((code, k) => [k > 0 ? ' ' : null, m('span', { class: k < node.slot ? 'ran' : k === node.slot ? 'next' : '' }, code)]);
+
 const field = (name, value, title, wide = false) => [m('dt', { title, class: wide ? 'wide' : '' }, name), m('dd', { class: wide ? 'wide' : '' }, value)];
 
 function registers(node) {
@@ -28,7 +32,7 @@ function registers(node) {
     field('B', hex(node.b, 3)),
     field('io', word(node.io), 'The I/O register'),
     field('time', `${node.time.toFixed(1)} ns`, 'Time spent executing'),
-    field('I', node.i === null ? `next word from ${node.fetch_from}` : m('span', m('code', word(node.i)), ' ', node.i_code), 'The instruction word', true),
+    field('I', node.i === null ? `next word from ${node.fetch_from}` : m('span', m('code', word(node.i)), ' ', m('span.slots', slots(node))), 'The instruction word', true),
   ]);
 }
 
@@ -58,7 +62,7 @@ function memory(node) {
         ),
         m('td.address', hex(line.address, 3)),
         m('td.value', word(line.value)),
-        m('td.code', { class: line.literal ? 'literal' : '' }, line.code),
+        m('td.code', { class: line.literal ? 'literal' : '' }, here && node.i_slots !== null && !line.literal ? m('span.slots', slots(node)) : line.code),
       ]),
     );
   });

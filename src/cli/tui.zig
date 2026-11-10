@@ -95,6 +95,7 @@ const Cause = enum {
     step,
     round,
     node,
+    slot,
     run,
     /// a line typed into the aforth panel
     line,
@@ -105,6 +106,7 @@ const Cause = enum {
             .step => "a step",
             .round => "a round of steps",
             .node => "a step of one node",
+            .slot => "a step of one opcode",
             .run => "a run",
             .line => "a line at the prompt",
             .compile => "compiling a block",
@@ -128,6 +130,9 @@ const colors = struct {
     const heading: vaxis.Style = .{ .bold = true };
     const focused: vaxis.Style = .{ .fg = .{ .index = 4 } };
     const dim: vaxis.Style = .{ .dim = true };
+    /// the opcode a node runs next, in the instruction word it is part way
+    /// through
+    const slot: vaxis.Style = .{ .reverse = true };
     const breakpoint: vaxis.Style = .{ .fg = .{ .index = 1 }, .bold = true };
     const failure: vaxis.Style = .{ .fg = .{ .index = 1 }, .bold = true };
 };
@@ -150,6 +155,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "s", "step the next node to run, and select it" },
         .{ "S", "a round of steps, the furthest behind first" },
         .{ "n", "step the selected node" },
+        .{ "N", "step one opcode of the selected node, or fetch its next word" },
         .{ "z", "go back to before the last step or run, up to 64 times" },
         .{ "tab, shift+tab", "the next or previous panel" },
         .{ "1 2 3 4 5", "show or hide the map, console, node, aforth and debug panels" },
@@ -225,7 +231,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ ":node 105", "select a node" },
         .{ ":break 105:003", "set or clear a breakpoint" },
         .{ ":watch 105:right", "watch a port, or stop: :read or :write after it for one" },
-        .{ ":step", "a step, or --count 4 of them, --node 105 of a node, --rounds 4" },
+        .{ ":step", "a step, or --count 4 of them, --node 105 of a node, --rounds 4, --slot of one opcode" },
         .{ ":run", "run, or stop after --max-steps 1000" },
         .{ ":help text", "list only the keys with the text" },
         .{ ":messages", "the last errors and stops, until the next key" },
@@ -705,7 +711,7 @@ const Tui = struct {
             // a breakpoint reached while stepping is left behind
             self.chip.hit = null;
         }
-        const stepping = k.matches('s', .{}) or k.matches('S', .{}) or k.matches('n', .{});
+        const stepping = k.matches('s', .{}) or k.matches('S', .{}) or k.matches('n', .{}) or k.matches('N', .{});
         if (stepping and self.running) self.say("pause with space to step");
         if (k.matches('z', .{})) {
             if (self.running) self.say("pause with space to go back") else self.back();
@@ -733,6 +739,12 @@ const Tui = struct {
                 self.memory_scroll = null;
                 const waiting = self.chip.nodes[self.selected].suspended;
                 self.say(self.printLasting("node {d:0>3} {s}", .{ layout.nodeNumber(self.selected), if (waiting) "is still waiting" else "stepped" }));
+            }
+            if (k.matches('N', .{})) {
+                self.remember(.slot);
+                self.trimOutput();
+                _ = try self.chip.service();
+                self.stepSlot(self.selected);
             }
         }
 
@@ -1308,7 +1320,7 @@ const Tui = struct {
         .{ .names = &.{"node"}, .usage = "node <node>", .run = commandNode },
         .{ .names = &.{"break"}, .usage = "break <node>:<address>", .run = commandBreak },
         .{ .names = &.{"watch"}, .usage = "watch <node>:<port>[:read|:write]", .run = commandWatch },
-        .{ .names = &.{"step"}, .usage = "step [--node <node>] [--count <n> | --rounds <n>]", .run = commandStep },
+        .{ .names = &.{"step"}, .usage = "step [--node <node>] [--slot] [--count <n> | --rounds <n>]", .run = commandStep },
         .{ .names = &.{"run"}, .usage = "run [--max-steps <n>]", .run = commandRun },
     };
 
@@ -1470,9 +1482,14 @@ const Tui = struct {
         var node: ?u16 = null;
         var count: ?usize = null;
         var rounds: ?usize = null;
+        var slot = false;
         var words = std.mem.tokenizeScalar(u8, typed.argument, ' ');
         while (words.next()) |word| {
             const is = std.mem.eql;
+            if (is(u8, word, "--slot")) {
+                slot = true;
+                continue;
+            }
             const value = words.next() orelse return self.commandUsage(typed);
             if (is(u8, word, "--node")) {
                 const number = Chip.parseNode(value) catch return self.commandUsage(typed);
@@ -1485,7 +1502,23 @@ const Tui = struct {
         }
         if (count != null and rounds != null) return self.commandUsage(typed);
         if (rounds != null and node != null) return self.commandUsage(typed);
+        if (slot and rounds != null) return self.commandUsage(typed);
         const times = rounds orelse count orelse 1;
+
+        if (slot) {
+            // of the selected node, unless another is given
+            const i = node orelse self.selected;
+            self.remember(.slot);
+            self.chip.hit = null;
+            for (0..@min(times, max_command_steps)) |_| {
+                self.trimOutput();
+                _ = try self.chip.service();
+                self.stepSlot(i);
+                if (self.chip.hit != null or self.chip.nodes[i].suspended) break;
+            }
+            if (self.chip.hit != null) self.stop();
+            return true;
+        }
 
         self.remember(if (rounds != null) .round else if (node != null) .node else .step);
         self.chip.hit = null;
@@ -2704,7 +2737,10 @@ const Tui = struct {
         });
         if (n.state == .fetch) {
             self.fields(win, 3, &.{.{ "I", self.print("next word from {s}", .{if (word.io) disassembler.ioName(@bitCast(word)) else "P"}) }});
-        } else self.fields(win, 3, &.{.{ "I", self.print("{s}  {s}", .{ self.hex(n.i), self.disassemble(n.i, @bitCast(word)) }) }});
+        } else {
+            const before = [_]vaxis.Segment{ .{ .text = "I", .style = colors.label }, .{ .text = self.print(" {s}  ", .{self.hex(n.i)}) } };
+            _ = win.print(self.slotSegments(&before, n.i, @bitCast(word), n.slot, .{}), .{ .row_offset = 3, .wrap = .none });
+        }
         self.fields(win, 4, &.{ .{ "A", self.hex(n.a) }, .{ "B", self.print("{x:0>3}", .{n.b}) }, .{ "io", self.hex(n.io) } });
         self.fields(win, 5, &.{.{ "time", self.print("{d:.1} ns", .{@as(f64, @floatFromInt(n.time)) / 1000}) }});
 
@@ -2766,7 +2802,13 @@ const Tui = struct {
             if (is_here) for (segments[1..]) |*segment| {
                 segment.style.bold = true;
             };
-            _ = win.print(&segments, .{ .row_offset = row, .wrap = .none });
+            // the slots of the word the node is part way through, from I, as
+            // the word in memory may have changed since it was fetched
+            const shown = if (is_here and n.state != .fetch and !is_literal)
+                self.slotSegments(segments[0 .. segments.len - 1], n.i, address, n.slot, .{ .bold = true })
+            else
+                &segments;
+            _ = win.print(shown, .{ .row_offset = row, .wrap = .none });
         }
     }
 
@@ -2939,7 +2981,7 @@ const Tui = struct {
                 &.{ .{ "enter", "interpret" }, .{ "tab", "complete" }, .{ "esc", "done" }, .{ "up/down", "recall" }, .{ "pgup/pgdn", "scroll" }, .{ "alt+1-6", "panels" } }
             else
                 &.{ .{ "i", "type" }, .{ "j/k", "scroll" }, .{ "g/G", "first last" }, .{ "space", "run" }, .{ "s", "step" }, .{ "tab", "next" }, .{ "f", "zoom" }, .{ "1-5", "panels" }, .{ ":", "command" }, .{ "q", "quit" } },
-            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "z", "back" }, .{ "up/down", "move" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "g", "follow" }, .{ "tab", "next" }, .{ ":", "command" }, .{ "f", "zoom" } },
+            .node => &.{ .{ "space", "run" }, .{ "s", "step" }, .{ "n", "step node" }, .{ "N", "step slot" }, .{ "z", "back" }, .{ "up/down", "move" }, .{ "b", "breakpoint" }, .{ "w", "watch" }, .{ "g", "follow" }, .{ "tab", "next" }, .{ ":", "command" }, .{ "f", "zoom" } },
             .debug => switch (self.debug) {
                 .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "w", "save trace.txt" }, .{ "c", "clear" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" } },
                 .breakpoints => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "x", "remove" }, .{ "X", "remove all" }, .{ "space", "run" }, .{ "tab", "next" } },
@@ -2974,6 +3016,44 @@ const Tui = struct {
             text = self.print("{s}{s}{s} {t}", .{ text, separator, if (w.write) "writes" else "reads", w.direction });
         };
         return if (text.len == 0) "none, w to add" else text;
+    }
+
+    /// Steps one slot of node `i`, selects it, and says what it did
+    fn stepSlot(self: *Tui, i: u16) void {
+        self.chip.stepSlot(i);
+        self.select(i);
+        self.memory_scroll = null;
+        const n = &self.chip.nodes[i];
+        const number = self.chip.layout.nodeNumber(i);
+        if (n.suspended) {
+            self.say(self.printLasting("node {d:0>3} is still waiting", .{number}));
+        } else if (n.state == .fetch) {
+            self.say(self.printLasting("node {d:0>3} finished its word", .{number}));
+        } else self.say(self.printLasting("node {d:0>3} is at slot {d}", .{ number, n.slot }));
+    }
+
+    /// The opcodes of the word a node is part way through, with those it ran
+    /// dim and the one it runs next marked, after `before`
+    fn slotSegments(self: *Tui, before: []const vaxis.Segment, word: Word, address: u9, current: u2, base: vaxis.Style) []const vaxis.Segment {
+        const count = disassembler.slotCount(word);
+        const segments = self.frame.allocator().alloc(vaxis.Segment, before.len + 2 * @as(usize, count)) catch return before;
+        @memcpy(segments[0..before.len], before);
+        var n = before.len;
+        for (0..count) |slot| {
+            if (slot > 0) {
+                segments[n] = .{ .text = " ", .style = base };
+                n += 1;
+            }
+            const buffer = self.frame.allocator().alloc(u8, 16) catch return before;
+            var writer: Io.Writer = .fixed(buffer);
+            disassembler.writeSlot(&writer, word, address, @intCast(slot)) catch {};
+            var style = base;
+            if (slot < current) style.dim = true;
+            if (slot == current) style.reverse = colors.slot.reverse;
+            segments[n] = .{ .text = writer.buffered(), .style = style };
+            n += 1;
+        }
+        return segments[0..n];
     }
 
     fn disassemble(self: *Tui, word: Word, address: u9) []const u8 {
@@ -3238,6 +3318,23 @@ const TestTui = struct {
             line[col] = if (cell.char.grapheme.len == 1) cell.char.grapheme[0] else '#';
         }
         return std.mem.indexOf(u8, &line, text) != null;
+    }
+
+    /// whether the screen shows `text` in reverse on a row, as the opcode
+    /// a node runs next, with the cells either side of it not reversed
+    fn marked(self: *TestTui, row: u16, text: []const u8) !bool {
+        var col: u16 = 0;
+        while (col + text.len <= 120) : (col += 1) {
+            const before = if (col == 0) null else self.screen.readCell(col - 1, row);
+            if (before) |cell| if (cell.style.reverse) continue;
+            const after = self.screen.readCell(@intCast(col + text.len), row);
+            if (after) |cell| if (cell.style.reverse) continue;
+            for (text, 0..) |c, i| {
+                const cell = self.screen.readCell(@intCast(col + i), row) orelse break;
+                if (cell.char.grapheme.len != 1 or cell.char.grapheme[0] != c or !cell.style.reverse) break;
+            } else return true;
+        }
+        return false;
     }
 };
 
@@ -4055,6 +4152,33 @@ test "the node panel shows literals by value, and wraps stacks when narrow" {
     try expect(try t.shows(9, four ++ " " ++ four));
     try expect(try t.shows(10, "R "));
     try expect(try t.shows(14, "RAM"));
+}
+
+test "steps a slot at a time, marking the opcode run next" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("dup 2* + dup");
+    defer t.deinit();
+    t.tui.focus = .node;
+    t.draw();
+
+    // the first step fetches the word, which runs nothing yet
+    try t.press('N');
+    try expectEqualStrings("node 000 is at slot 0", t.tui.message.?);
+    try expect(try t.marked(4, "dup"));
+    try t.press('N');
+    try expectEqualStrings("node 000 is at slot 1", t.tui.message.?);
+    try expect(try t.marked(4, "2*"));
+    // and on the word's row of the listing too
+    try expect(try t.marked(17, "2*"));
+
+    // :step --slot takes as many as it is told, here to the end of the word
+    try t.command("step --slot --count 3");
+    try expectEqualStrings("node 000 finished its word", t.tui.message.?);
+    try expect(try t.shows(4, "next word from P"));
+
+    // back goes to before the steps
+    try t.press('z');
+    try expectEqual(1, t.tui.chip.nodes[0].slot);
 }
 
 test "stops at breakpoints set in the memory listing" {

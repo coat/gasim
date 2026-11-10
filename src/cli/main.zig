@@ -224,7 +224,7 @@ fn stepChip(chip: *Chip, o: *const Options, layout: Chip.Layout) !Stepped {
             stepped.settled = !try chip.advance();
         } else if (node) |i| {
             _ = try chip.service();
-            chip.stepNode(i);
+            if (o.slot) chip.stepSlot(i) else chip.stepNode(i);
             stepped.last = i;
         } else {
             stepped.last = try chip.stepNext() orelse {

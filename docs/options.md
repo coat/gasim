@@ -80,6 +80,7 @@ For `step`:
 | `--node <node>` | steps this node |
 | `--count <n>` | takes this many steps. The default is 1. |
 | `--rounds <n>` | takes this many rounds of steps instead. Each round steps the node furthest behind in time first. |
+| `--slot` | with `--node`, makes each step run one opcode of the node instead of the rest of its instruction word. One pass of a `unext` loop is one step. If the node is between words, the step only fetches the next one. |
 
 ## Debugging
 
@@ -138,7 +139,8 @@ info: 142 nodes waiting on several ports, as after reset
 ### Stats
 
 A step runs one instruction word, including its `unext` loops, or tries to
-run one while the node waits on a port. Steps per second includes any time
+run one while the node waits on a port. With `--slot`, a step runs one
+opcode. Steps per second includes any time
 spent waiting for input. The chip's time is the furthest any node's clock
 reached.
 
