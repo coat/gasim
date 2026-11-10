@@ -25,10 +25,17 @@ pub fn write(writer: *Io.Writer, word: Word, address: u9) Io.Writer.Error!void {
 /// Writes a literal, naming I/O addresses such as `literal right`, and
 /// writing other values as numbers such as `literal -1`
 pub fn writeLiteral(writer: *Io.Writer, word: Word) Io.Writer.Error!void {
+    try writer.writeAll("literal ");
+    try writeValue(writer, word);
+}
+
+/// Writes a literal's value without the word `literal`, such as `right` or
+/// `-1`, for listings that mark literals another way, such as by color
+pub fn writeValue(writer: *Io.Writer, word: Word) Io.Writer.Error!void {
     const value: u18 = @bitCast(word);
     if (value >= 0x100 and value < 0x200) {
-        try writer.print("literal {s}", .{ioName(@intCast(value))});
-    } else try writer.print("literal {d}", .{word});
+        try writer.writeAll(ioName(@intCast(value)));
+    } else try writer.print("{d}", .{word});
 }
 
 /// Writes each word of a program with its address, the raw word, its

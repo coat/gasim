@@ -960,7 +960,7 @@ fn listing(n: Sim.NodeView) void {
         const pad: dvui.Rect = .{ .x = 4, .w = 8 };
         dvui.label(@src(), "{x:0>3}", .{line.address}, .{ .font = mono, .color_text = .{ .color = theme.color(.highlight, .fill) }, .padding = pad });
         dvui.label(@src(), "{x:0>5}", .{line.value}, .{ .font = mono, .color_text = .{ .color = mutedText() }, .padding = pad });
-        dvui.labelNoFmt(@src(), line.code, .{}, .{ .font = mono, .padding = pad, .color_text = if (zero) .{ .color = mutedText() } else if (line.literal) .{ .color = palette.literal } else null });
+        dvui.labelNoFmt(@src(), line.code, .{}, .{ .font = mono, .padding = pad, .color_text = if (line.literal) .{ .color = palette.literal } else if (zero) .{ .color = mutedText() } else null });
     }
 }
 

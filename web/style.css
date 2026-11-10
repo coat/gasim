@@ -1430,7 +1430,9 @@ dialog .actions {
   color: var(--muted);
 }
 
-.memory .literal {
+/* a literal of 0 is still a literal, not an empty word */
+.memory .literal,
+.memory tr.zero td.code.literal {
   color: var(--literal);
 }
 
