@@ -787,6 +787,8 @@ const entire_course = -1;
 const Label = struct {
     name: []const u8,
     value: u16,
+    /// the address of code, rather than a constant such as `equ` defines
+    code: bool = false,
 };
 
 /// Labels are told apart by their length and up to 7 characters
@@ -1567,10 +1569,10 @@ const Interpreter = struct {
         return error.NoNode;
     }
 
-    fn defineLabel(self: *Interpreter, label_name: []const u8, value: u16) Error!void {
+    fn defineLabel(self: *Interpreter, label_name: []const u8, value: u16, code: bool) Error!void {
         const bin = try self.currentBin();
         if (bin.label_count == max_labels) return error.TooManyLabels;
-        bin.labels[bin.label_count] = .{ .name = label_name, .value = value };
+        bin.labels[bin.label_count] = .{ .name = label_name, .value = value, .code = code };
         bin.label_count += 1;
         bin.changed = true;
     }
@@ -1839,7 +1841,7 @@ const Interpreter = struct {
                 if (!self.color_node) return self.hostToken(token);
                 const b = try self.builder();
                 b.alignWord();
-                try self.defineLabel(try self.keepName(token.text()), b.location());
+                try self.defineLabel(try self.keepName(token.text()), b.location(), true);
             },
             // outside F18 code, as after +node, there is no node to assemble
             // into
@@ -2385,12 +2387,12 @@ const Interpreter = struct {
                 const label_name = try self.name();
                 const b = try self.builder();
                 b.alignWord();
-                try self.defineLabel(label_name, b.location());
+                try self.defineLabel(label_name, b.location(), true);
             },
             .equ => {
                 const value = try self.pop();
                 if (value < 0 or value > 0xffff) return error.NumberOutOfRange;
-                try self.defineLabel(try self.name(), @intCast(value));
+                try self.defineLabel(try self.name(), @intCast(value), false);
             },
             .its => {
                 const number_of_bin = try self.pop();
@@ -2557,7 +2559,7 @@ const Interpreter = struct {
         if (bin.find("main")) |value| if (value < 0x40) {
             main = @intCast(value);
         };
-        const program: Program = .{
+        var program: Program = .{
             .node = bin.node,
             .bin = if (bin.number == bin.node) null else bin.number,
             .ram = bin.builder.mem[0..64].*,
@@ -2571,6 +2573,20 @@ const Interpreter = struct {
             .entry = .{ .io = false, .rom = false, .local = main },
             .rom_word = bin.rom_word,
         };
+        // its own labels of code in RAM or in ROM assembled, not constants,
+        // nor the ROM's labels arrayForth gives the node. A label of code
+        // assembled extended has P9.
+        var word_labels: [max_labels]struct { index: ?u7, name: []const u8 } = undefined;
+        const named = bin.labels[bin.rom_labels.len..bin.label_count];
+        for (named, word_labels[0..named.len]) |label, *l| l.* = .{
+            .index = if (!label.code) null else switch (label.value & 0x1ff) {
+                0x00...0x3f => |v| @intCast(v),
+                0x80...0xbf => |v| @intCast(v - 0x80 + 64),
+                else => null,
+            },
+            .name = label.name,
+        };
+        Program.nameWords(&program.names, if (program.rom) |*rom| &rom.names else null, word_labels[0..named.len]);
 
         // a bin saved again no longer needs the labels it was saved with
         const again = for (self.saved[0..self.saved_count], 0..) |*saved, i| {
@@ -6008,3 +6024,13 @@ test "fuzz colorForth" {
 }
 
 const fuzz = @import("fuzz.zig");
+
+test "programs name the words their labels of code are at" {
+    var diagnostic: Diagnostic = .{};
+    // equ defines a constant, not a label of code, and a label of code
+    // assembled extended has P9
+    const program = try assemble("ASM[ # 0 NODE ERS # 0 org # 1 equ one : main dup ; # 514 org : ext drop ; >BIN ]ASM", &diagnostic);
+    try expectEqualStrings("main", program.names[0].slice());
+    try expectEqual(0, program.names[1].len);
+    try expectEqualStrings("ext", program.names[2].slice());
+}
