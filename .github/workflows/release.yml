@@ -84,7 +84,7 @@ jobs:
           mkdir "$dir"
           rm -f out/bin/*.pdb
           cp out/bin/* README.md LICENSE "$dir"
-          cp -R out/share/gasim/examples "$dir"
+          cp -R out/share/gasim/examples docs "$dir"
           if [ "${{ runner.os }}" = Windows ]; then
             7z a "$dir.zip" "$dir"
           else
