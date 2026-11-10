@@ -1,9 +1,98 @@
-# colorForth Support
+# colorForth
+
+gasim can edit, compile and run colorForth blocks (`.cf` files), including
+arrayForth 2 images such as `OkadWork.cf`.
+
+## The editor
+
+`gasim source.cf` opens the blocks in an editor. Press `alt+1` to go to the
+chip's panels, and `alt+6` to come back to the editor. Without a `.cf` file,
+the editor starts a new file of blocks.
+
+The editor is inspired by AshleyF's [Color](https://github.com/AshleyF/Color)
+editor, and works like vim. The cursor is always on a word. Keys move
+between words and blocks. Press `i`, `a` or `o` to start typing.
+
+While you type:
+
+- A space starts the next word. After a red name, the next word is green.
+  Otherwise it keeps the same color.
+- A color key changes the color of the word you are typing.
+- A word typed in yellow, green or white that reads as a number, such as
+  `-5` or `$1f`, becomes a number.
+
+When you are not typing, a color key changes the color of the word under the cursor.
+
+You cannot edit blocks that are not colorForth source, such as the kernel of
+an arrayForth 2 image.
+
+### Keys
+
+| Key | What it does |
+| --- | --- |
+| `h` `l`, `b` `w` | move to the word before or after |
+| `j` `k` | move to the next or previous red name |
+| `0` `$` | move to the first or last word |
+| `[` `]` | move to the block before or after |
+| `256g` | move to block 256 |
+| `i` `a` | type a word before or after the cursor |
+| `o` `O` | type a new red name on a line below or above |
+| `x` `X` | delete the word, or the one before it |
+| `y` | copy the word |
+| `p` `P` | put the last deleted or copied word after or before |
+| `u` `U` | undo, redo |
+| `ctrl+r` `y` `g` `w` `t` `v` `b` | red, yellow, green, white, cyan, magenta or blue, while typing or not |
+| `R` `Y` `G` `W` `C` `M` `B` | the same colors, while not typing |
+| `space`, `enter`, `esc` | while typing: the next word, a new line, done |
+| `f` | show or hide blue words, which lay out the block |
+| `L` | compile the block and restart the chip with its code |
+| `s`, `ctrl+s` | save |
+| `:` | type a command |
+
+### Compiling with `L`
+
+`L` compiles the block, and the blocks it loads. Then it restarts the chip
+with all the code compiled so far. The block's code replaces what it
+compiled before. If compiling fails, the cursor moves to the word that
+failed.
+
+### Saving
+
+`s` saves the file. If the file does not exist, saving creates it. A new
+file is named first. A compressed arrayForth 2 image is saved uncompressed.
+
+### Commands
+
+Commands open and save files, as in vim:
+
+| Command | What it does |
+| --- | --- |
+| `:w` | saves |
+| `:w file` | saves as the file, and saves to it from then on, as vim's `:saveas` does |
+| `:w! file` | saves over a file that is already there |
+| `:e file` | opens a file of blocks, or starts a new one there, which saving creates |
+| `:new` | starts a new file, which `:w` names |
+| `:q` | quits |
+| `:q!` | quits without saving |
+| `:wq` | saves and quits |
+| `:x` | saves if the blocks changed, and quits |
+| `:messages` | lists the latest errors, and what stopped a run |
+
+`:e` and `:new` ask for `!`, as `:e! file`, if the blocks have changes you
+have not saved. They also forget the code compiled from the file before.
+
+- `tab` completes a command's name, or the name of a `.cf` file or a
+  directory.
+- `esc` cancels the command.
+- A file name that is not absolute is relative to the directory gasim
+  started in.
+
+The [TUI](tui.md#commands) lists the commands that act on the chip.
 
 ## As text
 
-`gasim cf text`, or `gasim blocks`, writes the colorForth source in a file of
-blocks as text, and `gasim cf pack` writes text as blocks:
+`gasim cf text` (or `gasim blocks`) prints the colorForth source in a file of
+blocks as text. `gasim cf pack` turns text back into blocks.
 
 ```
 $ gasim cf text app.cf > app.txt
@@ -12,83 +101,67 @@ $ gasim cf pack block5.txt --into OkadWork.cf -o mine.cf
 $ gasim cf expand OkadWork.cf -o expanded.cf
 ```
 
-`--into` keeps the file's other blocks, replacing the ones the text names; a
-compressed arrayForth 2 image comes out uncompressed, as `cf expand` writes it.
-Each block follows a line `block <n>`, or is block 0 without one. Each word is
-marked with its color where the color changes: `:` red, `[` yellow, `]` green,
-`\` cyan, `(` white, `@` magenta, `^` gray and `~` blue, with hex numbers after
-a `$`. Red and magenta are marked each time, and a word after one is green
-unless it is marked. A variable's value follows its name.
+- `--into` keeps the file's other blocks, and replaces only the blocks the
+  text names.
+- A compressed arrayForth 2 image comes out uncompressed, as `cf expand`
+  writes it.
 
-So that text reads back as the same bytes, a word that would read as a mark,
-such as a green `@+`, keeps its own mark, `]@+`, though its color has not
-changed, as does a word `block`. A word that reads as a number has `'` before
-it, `('1`, and a number in a cell of its own that would fit in one has `#`.
+### The text format
 
-## The editor
+Each block starts with a line `block <n>`. Text before the first such line
+is block 0.
 
-`gasim source.cf` opens the blocks in an editor. Hit alt+1 to get back to the
-chip view and alt+6 to get back to the colorForth editor, which without a .cf
-file starts a new file of blocks. It's inspired by
-AshleyF's [Color](https://github.com/AshleyF/Color) editor. The cursor is on a
-word, and as in vim. Keys move between words and blocks - hit `i`, `a` or `o`
-to start typing. Typing a space starts the next word in green after a red name
-and otherwise in the same color, and a color key changes the color of the word
-being typed or the one under the cursor. Words typed in yellow, green or white
-that read as numbers, such as `-5` or `$1f`, become numbers. `s` saves the
-file, which a compressed arrayForth 2 image is saved as uncompressed, and a
-file that does not exist is created; a new file is named first. Blocks that are not colorForth source,
-such as the kernel of an arrayForth 2 image, cannot be edited. `L` compiles the
-block, and the blocks it loads, and starts the chip again with the code
-compiled so far - the block's code replacing what it compiled before, or moves
-the cursor to the word that failed. Phew.
+A mark before a word gives its color, where the color changes:
 
-| keys | |
+| Mark | Color |
 | --- | --- |
-| `h` `l`, `b` `w` | the word before or after |
-| `j` `k` | the next or previous red name |
-| `0` `$` | the first or last word |
-| `[` `]`, `256g` | the block before or after, or block 256 |
-| `i` `a` | type a word before or after the cursor |
-| `o` `O` | type a new red name on a line below or above |
-| `x` `X`, `y`, `p` `P` | delete the word or the one before it, copy it, put the last back after or before |
-| `u` `U` | undo, redo |
-| ctrl+r y g w t v b | red, yellow, green, white, cyan, magenta or blue, as typed or after |
-| `R` `Y` `G` `W` `C` `M` `B` | the same, while not typing |
-| space, enter, esc | while typing: the next word, a new line, done |
-| `f` | show or hide blue words, which lay out the block |
-| `L` | compile the block and start the chip again with its code |
-| `s`, ctrl+s | save |
-| `:` | type a command, as in vim |
+| `:` | red |
+| `[` | yellow |
+| `]` | green |
+| `\` | cyan |
+| `(` | white |
+| `@` | magenta |
+| `^` | gray |
+| `~` | blue |
 
-Commands open and save files, after vim's. `:w` saves, and `:w file` saves
-as the file, which the blocks are then saved to, as vim's `:saveas` does;
-`:w! file` saves over a file that is there. `:e file` opens a file of
-blocks, or starts one there that saving creates, and `:new` starts a new
-file, which `:w` names. Either asks for `!`, as `:e! file`, to let blocks go
-that are not saved, and forgets the code compiled from the file before.
-`:q` quits, `:q!` though the blocks are not saved, `:wq` after saving them,
-and `:x` after saving them if they changed. `:messages` lists the latest
-errors and what stopped a run, and the [TUI](tui.md) lists the commands
-that act on the chip. Tab completes a command's name, or the name of a .cf
-file or a directory, and esc lets the command go. A name that is not absolute
-is relative to the directory gasim was started in.
+- Red and magenta words are marked every time.
+- A word after a red or magenta word is green, unless it is marked.
+- Hex numbers start with `$`.
+- A variable's value follows its name.
 
-F18 code in colorForth is compiled like arrayForth 2 - into the
-same object code as arrayForth 3 source. Each example has a colorForth
-version, such as `examples/echo.cf`, which `gasim blocks` shows:
+So that the text reads back as the same bytes:
+
+- A word that would read as a mark, such as a green `@+`, keeps its own mark
+  (`]@+`), even when the color has not changed. So does a word `block`.
+- A word that would read as a number has `'` before it, such as `('1`.
+- A number stored in a cell of its own, though it is small enough not to
+  need one, has `#` before it.
+
+## Compiling F18 code
+
+gasim compiles F18 code in colorForth as arrayForth 2 does, into the same
+object code as arrayForth 3 source. `gasim run` compiles from block 0, or
+from the blocks `--load` names.
+
+Each example has a colorForth version. This is `gasim cf text
+examples/echo.cf`:
 
 ```
+block 0
+(echo - copy console input to the console until it ends, as echo.ga does ~cr
 [0 node 0 org
-:main ]up b! begin @b !b end
+:main ]up b! begin ]@b !b end
 ```
 
-Three more examples follow AshleyF's posts on the F18, from his
-[Chuck Moore's Creations](https://github.com/AshleyF/Color/blob/master/Docs/chuck_moores_creations.md)
-series: `alphabet.cf` prints the alphabet with a `for` loop,
-`variables.cf` counts with a variable whose store word, just before it,
-stores into its literal in place, and `multiply.cf` multiplies with the
-multiply-step instruction `+*` and prints the product in hex:
+Three more examples follow AshleyF's [Chuck Moore's
+Creations](https://github.com/AshleyF/Color/blob/master/Docs/chuck_moores_creations.md)
+posts on the F18:
+
+- `alphabet.cf` prints the alphabet with a `for` loop.
+- `variables.cf` counts with a variable. Its store word, just before it,
+  stores into the variable's literal in place.
+- `multiply.cf` multiplies with the multiply-step instruction `+*`, and
+  prints the product in hex:
 
 ```
 [0 node 0 org
@@ -98,79 +171,174 @@ multiply-step instruction `+*` and prints the product in hex:
 :main ]up b! $3d $31 * .hex 10 !b $ff $ff * .hex 10 !b left b! @b
 ```
 
-Yellow words run as the block is loaded: `n node` starts the code of a
-node, saving the code of the one before, `a org` sets where code goes,
-`here` leaves where that is, `n ,` lays down a number, `n load`,
-`n m loads` and `n m thru` load a block, or m blocks of code from n, or
-the blocks of code from n to m, skipping the blocks of comments between
-them, `n fh` leaves the block n after the one being loaded, `exit` ends a
-block, and `n bin` saves the code as a bin of another number. In an
-arrayForth 2 image, a yellow word that is nothing else leaves the number
-that the image's system names as it starts, in block 18 and the blocks it
-loads, such as `sram`, which block 202's `:sram [264 ];` names, the block
-of the SRAM cluster: `[sram load`. Boot descriptors say what to load into
-nodes and how to start them, as arrayForth 3's do but with single
-numbers: `n +node` picks node n, and leaves F18 code, `bin /ram` loads all
-of its RAM, `a n bin /part` n words at a, in place of the loads before,
-`x /a`, `x /b`, `x /io` and `a /p` set its registers, `v1 … vn n
-/stack` its stack and `v1 … vn n /rstack` its return stack, as block 266
-describes the SRAM cluster's nodes:
-`[107 +node 1614 /ram down /b`. A program with them is set up as they
-say, by `gasim run` and by `L`, which sets the code compiled up first and
-leaves out a node whose bin was not saved. `spispeed`, `spicmd` and `spiadr`
-assemble the literals arrayForth 2's F18 compiler gives the SPI boot. gasim's directives, labels and the F18
-compiler's words come first, as block 202's `host` and `target` name
-blocks too, so `[host load`, in the IDE's blocks, still begins host
-words. Arithmetic
-is colorForth's, with `-` inverting and `or` exclusive, before a node's
-code and in host words. Once a node has begun in a load, other yellow
-words assemble code as green ones do, as arrayForth 2 compiles them, such as
-the instruction words a node sends a neighbour to run, laid down after
-`@p`: `]@p !b ; [.. dup or a! ..`. `swap`, `nip`, `negate`, `*`, `/`,
-`mod`, `/mod` and `*/` still work out numbers, and a yellow `:` before a
-label or a port leaves its address, for green `lit`, as in
-`[: message ]lit`. A red word labels the next instruction word, and the
-code of the nodes compiled after it can call it, as nodes call the words
-they send each other, until `reclaim` or `empty` forgets it. Green words
-assemble: opcodes,
-by arrayForth 2's names `-` `or` `push` `pop` or arrayForth 3's, `begin`
-`if` `then` `next` and the other control words, calls to labels and the
-ROM, and port names such as `right`. Green numbers are literals. Gray
-numbers, which arrayForth 2 wrote as it compiled, are checked against where
-gasim has got to, with a warning if they differ. A `then` with nothing to
-resolve, as block 792's, whose `if` is in a comment, only aligns, as
-arrayForth 2 went past it, with a warning, which falls on the last `then`
-of a structure that has one too many. Between `host` and
-`target`, and outside F18 code, before a node in a load or after
-`+node`, a red word defines a word for the host, which runs its green
-words as yellow ones and pushes its numbers, such as `:r-l- ]$1f5 lit ;`,
-a macro for a literal, and one with no words before the next falls
-through into it, as `:head :pipe [1112 ]load ;`, until `empty` forgets
-the words defined since `mark`. One defined outside `host`, as a loader's
-block defines its words in x86 code, such as block 228's `+wire`, is
-there for the blocks loaded after it, until `reclaim` or `empty`, but F18
-code's words and colorForth's own, such as `dup`, come before it. Each
-load given to the compiler starts outside F18 code,
-though a block loaded from F18 code goes on in its node. Host words branch
-and loop as x86 colorForth compiles them, as block 230's `?rl` and `+dx`
-do: `for`, `next` and `i`; `push` and `pop`; `if` and `-if`, and `begin`
-with `end`, `until`, `-until`, `while` and `-while`, which test the flags
-of the last `+`, `and`, `or`, `negate`, `2*` or `2/`; and a `;` that
-returns, with the green words after it, such as `then`, going on in the
-word. One defined outside `host` whose control words don't match, as F18
-code's can, such as a ROM source's `begin … unext`, fails only when it
-runs. Yellow words in a definition run as it is
-defined, and the next green word compiles the number they leave, as
-colorForth does: `:seven [3 4 + ]lit ;`. There, and in host words, `@` and
-`!` fetch and store, such as an image's system variables, which leave
-their address in yellow, as block 444's `:resume [@res2 ]@ …` reads the
-value block 202 keeps for `@res2`. `--listing` shows the line of colorForth
-each word came from, as `gasim blocks` writes it. Compiled this way, the F18 code of `OkadWork.cf` agrees with the gray
-numbers arrayForth 2 wrote, but for a few lines that were changed after it
-was compiled. This opens the PWM demo running in node 600, and lists the
-SHA-256 scheduler in node 101:
+### Yellow words
+
+Yellow words run while the block loads:
+
+| Word | What it does |
+| --- | --- |
+| `n node` | starts the code of node n, and saves the code of the node before |
+| `a org` | sets where code goes |
+| `here` | leaves where code goes |
+| `n ,` | lays down a number |
+| `n load` | loads block n |
+| `n m loads` | loads m blocks of code from block n |
+| `n m thru` | loads the blocks of code from n to m |
+| `n fh` | leaves the number of the block n after the one being loaded |
+| `exit` | ends the block |
+| `n bin` | saves the code as a bin with another number |
+| `spispeed`, `spicmd`, `spiadr` | assemble the literals that arrayForth 2's F18 compiler gives the SPI boot |
+
+`loads` and `thru` skip the blocks of comments between blocks of code.
+
+gasim's directives, labels, and the F18 compiler's words take priority over
+names from the image. For example, block 202 also names blocks `host` and
+`target`, but `[host load`, in the IDE's blocks, still begins host words.
+
+In an arrayForth 2 image, a yellow word that is none of these leaves the
+number that the image's system gives it as it starts. The system names them
+in block 18 and the blocks it loads. For example, block 202's `:sram [264 ];`
+names block 264, the SRAM cluster's, so `[sram load` loads it.
+
+Arithmetic is colorForth's, both before a node's code and in host words.
+`-` inverts, and `or` is exclusive.
+
+#### Yellow words in a node's code
+
+Once a node's code has begun, other yellow words assemble code as green
+words do, as arrayForth 2 compiles them. For example, this lays down the
+instruction words a node sends a neighbour to run, after `@p`:
+
+```
+]@p !b ; [.. dup or a! ..
+```
+
+These yellow words still work out numbers: `swap`, `nip`, `negate`, `*`,
+`/`, `mod`, `/mod` and `*/`.
+
+A yellow `:` before a label or a port leaves its address, for a green
+`lit`, as in `[: message ]lit`.
+
+### Boot descriptors
+
+Boot descriptors say what to load into nodes and how to start them. They
+work like arrayForth 3's, but with single numbers:
+
+| Words | What they do |
+| --- | --- |
+| `n +node` | picks node n, and leaves F18 code |
+| `bin /ram` | loads all of the node's RAM from the bin |
+| `a n bin /part` | loads n words at address a, instead of the loads before |
+| `x /a`, `x /b`, `x /io` | set the A, B and io registers |
+| `a /p` | sets P |
+| `v1 … vn n /stack` | sets the data stack |
+| `v1 … vn n /rstack` | sets the return stack |
+
+For example, block 266 describes the SRAM cluster's nodes with
+`[107 +node 1614 /ram down /b`.
+
+`gasim run` and `L` set up a program with descriptors as they say. `L` sets
+up the code compiled so far first. It leaves out a node whose bin was not
+saved.
+
+### Red words
+
+A red word labels the next instruction word. The code of nodes compiled
+after it can call the label, as nodes call the words they send each other.
+`reclaim` or `empty` forgets it.
+
+### Green words
+
+Green words assemble:
+
+- opcodes, by arrayForth 2's names (`-`, `or`, `push`, `pop`) or arrayForth
+  3's
+- `begin`, `if`, `then`, `next` and the other control words
+- calls to labels and to the ROM
+- port names, such as `right`
+
+Green numbers are literals.
+
+### Gray numbers
+
+arrayForth 2 wrote gray numbers as it compiled. gasim checks each one
+against where it has got to, and warns if they differ.
+
+A `then` with nothing to resolve only aligns, as arrayForth 2 did, with a
+warning. For example, block 792 has an `if` in a comment. If a structure has
+one `then` too many, the warning falls on its last `then`.
+
+### Host words
+
+A red word defines a word for the host:
+
+- between `host` and `target`
+- outside F18 code, such as before a node's code in a load, or after
+  `+node`
+
+A host word runs its green words as yellow ones, and pushes its numbers. For
+example, `:r-l- ]$1f5 lit ;` is a macro for a literal.
+
+A red word with no words before the next red word falls through into it, as
+in `:head :pipe [1112 ]load ;`. `empty` forgets the words defined since
+`mark`.
+
+A word defined outside `host` is there for the blocks loaded after it, until
+`reclaim` or `empty`. A loader's block defines its words like this in x86
+code, such as block 228's `+wire`. F18 code's words, and colorForth's own
+words such as `dup`, take priority over it.
+
+Each load you give the compiler starts outside F18 code. A block loaded from
+F18 code goes on in its node.
+
+#### Control flow in host words
+
+Host words branch and loop as x86 colorForth compiles them, as block 230's
+`?rl` and `+dx` do:
+
+- `for`, `next` and `i`
+- `push` and `pop`
+- `if` and `-if`
+- `begin` with `end`, `until`, `-until`, `while` and `-while`. These test
+  the flags of the last `+`, `and`, `or`, `negate`, `2*` or `2/`.
+- `;` returns. The green words after it, such as `then`, go on in the word.
+
+A word defined outside `host` may have control words that don't match, as
+F18 code can, such as a ROM source's `begin … unext`. It fails only when it
+runs.
+
+#### Yellow words in a definition
+
+Yellow words in a definition run while it is defined. The next green word
+compiles the number they leave, as in colorForth:
+
+```
+:seven [3 4 + ]lit ;
+```
+
+There, and in host words, `@` and `!` fetch and store. For example, an
+image's system variables leave their address in yellow. Block 444's
+`:resume [@res2 ]@ …` reads the value that block 202 keeps for `@res2`.
+
+### Listings
+
+`--listing` shows the line of colorForth that each word came from, as
+`gasim cf text` writes it.
+
+### OkadWork.cf
+
+Compiled this way, the F18 code of `OkadWork.cf` matches the gray numbers
+arrayForth 2 wrote. The exceptions are a few lines that were changed after
+arrayForth 2 compiled them.
+
+This opens the PWM demo running in node 600:
 
 ```
 $ gasim --load 842 OkadWork.cf
+```
+
+This lists the SHA-256 scheduler in node 101:
+
+```
 $ gasim --listing --load 900 OkadWork.cf
 ```
