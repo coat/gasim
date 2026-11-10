@@ -4,21 +4,33 @@
 /// `@p dup . +`, with the destination of a jump in hex such as `call 0a9`.
 /// Slots after a return or a jump are not written, since they never run.
 pub fn write(writer: *Io.Writer, word: Word, address: u9) Io.Writer.Error!void {
-    const instruction: Instruction = .decode(word);
-    for (0..4) |i| {
-        const slot: Slot = @intCast(i);
-        const opcode = instruction.getSlot(slot);
+    for (0..slotCount(word)) |i| {
         if (i > 0) try writer.writeByte(' ');
-        try writer.writeAll(@tagName(opcode));
-        switch (opcode) {
-            .@";", .ex => return,
-            .jump, .call, .next, .@"if", .@"-if" => {
-                if (slot == 3) return;
-                try writer.print(" {x:0>3}", .{destination(word, address, slot)});
-                return;
-            },
-            else => {},
-        }
+        try writeSlot(writer, word, address, @intCast(i));
+    }
+}
+
+/// The number of slots of `word` that can run: up to a return or a jump,
+/// which ends the word, or all 4
+pub fn slotCount(word: Word) u3 {
+    const instruction: Instruction = .decode(word);
+    for (0..3) |i| switch (instruction.getSlot(@intCast(i))) {
+        .@";", .ex, .jump, .call, .next, .@"if", .@"-if" => return @intCast(i + 1),
+        else => {},
+    };
+    return 4;
+}
+
+/// Writes the opcode in one slot of the word at `address`, such as `dup`,
+/// with the destination of a jump, such as `call 0a9`
+pub fn writeSlot(writer: *Io.Writer, word: Word, address: u9, slot: Slot) Io.Writer.Error!void {
+    const opcode = Instruction.decode(word).getSlot(slot);
+    try writer.writeAll(@tagName(opcode));
+    switch (opcode) {
+        .jump, .call, .next, .@"if", .@"-if" => if (slot < 3) {
+            try writer.print(" {x:0>3}", .{destination(word, address, slot)});
+        },
+        else => {},
     }
 }
 

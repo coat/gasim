@@ -85,6 +85,8 @@ pub const Cause = enum(u8) {
     line,
     reset,
     compile,
+    /// a step of one opcode of a node
+    slot,
 };
 
 pub fn init(self: *Sim, gpa: Allocator) Allocator.Error!void {
@@ -346,6 +348,15 @@ pub fn stepNode(self: *Sim, i: u16) error{OutOfMemory}!bool {
     return !self.chip.nodes[i].suspended;
 }
 
+/// Steps one opcode of node `i`, or fetches its next word if it is between
+/// words. Returns false if it is still waiting.
+pub fn stepSlot(self: *Sim, i: u16) error{OutOfMemory}!bool {
+    self.remember(.slot);
+    _ = self.chip.service() catch return error.OutOfMemory;
+    self.chip.stepSlot(i);
+    return !self.chip.nodes[i].suspended;
+}
+
 /// Goes back to the chip as it was set up, with the console's input not
 /// yet read forgotten, and not ended
 pub fn reset(self: *Sim) void {
@@ -595,6 +606,8 @@ pub const NodeView = struct {
     /// the instruction word, unless it is fetching the next
     i: ?u18,
     i_code: ?[]const u8,
+    /// the opcodes of I that can run, by slot, to mark the one in `slot`
+    i_slots: ?[]const []const u8,
     /// where the next word comes from, while fetching it
     fetch_from: ?[]const u8,
     a: u18,
@@ -639,6 +652,7 @@ pub fn node(self: *Sim, a: Allocator, i: u16) error{OutOfMemory}!NodeView {
         .extended = n.p.extended_arithmetic,
         .i = if (n.state == .fetch) null else @bitCast(n.i),
         .i_code = if (n.state == .fetch) null else try code(a, n.i, @bitCast(word)),
+        .i_slots = if (n.state == .fetch) null else try slotCodes(a, n.i, @bitCast(word)),
         .fetch_from = if (n.state != .fetch) null else if (word.io) disassembler.ioName(@bitCast(word)) else "P",
         .a = @bitCast(n.a),
         .b = n.b,
@@ -683,6 +697,16 @@ fn code(a: Allocator, word: Word, address: u9) error{OutOfMemory}![]const u8 {
     var w: Writer.Allocating = .init(a);
     disassembler.write(&w.writer, word, address) catch return error.OutOfMemory;
     return w.written();
+}
+
+fn slotCodes(a: Allocator, word: Word, address: u9) error{OutOfMemory}![]const []const u8 {
+    const slots = try a.alloc([]const u8, disassembler.slotCount(word));
+    for (slots, 0..) |*slot, i| {
+        var w: Writer.Allocating = .init(a);
+        disassembler.writeSlot(&w.writer, word, address, @intCast(i)) catch return error.OutOfMemory;
+        slot.* = w.written();
+    }
+    return slots;
 }
 
 fn literalCode(a: Allocator, word: Word) error{OutOfMemory}![]const u8 {

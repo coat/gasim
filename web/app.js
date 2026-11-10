@@ -3,7 +3,7 @@
 // above tabs, with the border between them dragged.
 
 import {
-  state, start, toggleRun, stepNext, stepRound, stepNode, back, move, openFile, openExample, flushWorkspace, workspaceKept,
+  state, start, toggleRun, stepNext, stepRound, stepNode, stepSlot, back, move, openFile, openExample, flushWorkspace, workspaceKept,
 } from './state.js';
 import { Toolbar, StatusBar, RomDialog, HelpDialog, dialogs, applyTheme } from './views/toolbar.js';
 import { ChipMap } from './views/map.js';
@@ -161,6 +161,7 @@ const keys = {
   s: stepNext,
   S: stepRound,
   n: stepNode,
+  N: stepSlot,
   z: back,
   ArrowLeft: () => move(-1, 0),
   ArrowRight: () => move(1, 0),

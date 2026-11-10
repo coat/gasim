@@ -1056,7 +1056,7 @@ pub fn step(self: *Chip) bool {
         // on something outside the nodes wakes when the earliest gets to it
         if (self.hit != null) break;
         if (self.next_event) |time| if (self.nodes[self.queue[0]].time >= time) self.fireEvents();
-        self.stepQueued(self.dequeue().?);
+        self.stepQueued(self.dequeue().?, .word);
     }
     return true;
 }
@@ -1065,7 +1065,7 @@ pub fn step(self: *Chip) bool {
 noinline fn roundAfterStop(self: *Chip) bool {
     for (0..self.queue_len) |_| {
         if (self.next_event) |time| if (self.nodes[self.queue[0]].time >= time) self.fireEvents();
-        self.stepQueued(self.dequeue().?);
+        self.stepQueued(self.dequeue().?, .word);
     }
     return true;
 }
@@ -1219,15 +1219,30 @@ fn dequeue(self: *Chip) ?u16 {
 /// Steps a node and wakes the neighbours on any port it changed, since a
 /// suspended node can only continue once one of its ports changes.
 pub fn stepNode(self: *Chip, i: u16) void {
+    self.stepByHand(i, .word);
+}
+
+/// Steps a node as `stepNode` does, but only through the opcode in its
+/// current slot, or only fetching its next word if it is between words
+/// (see `Computer.stepSlot`)
+pub fn stepSlot(self: *Chip, i: u16) void {
+    self.stepByHand(i, .slot);
+}
+
+/// how much of a node a step runs: the rest of its instruction word, or
+/// one slot of it
+const Extent = enum { word, slot };
+
+fn stepByHand(self: *Chip, i: u16, comptime extent: Extent) void {
     if (self.hasEvents()) self.fireEvents();
     const queued = self.queued[i];
-    self.stepQueued(i);
+    self.stepQueued(i, extent);
     // stepped while queued, as by hand, so later in time than its place
     if (queued) self.later(i, self.nodes[i].time);
 }
 
 /// `stepNode` for a node that is not in the queue
-fn stepQueued(self: *Chip, i: u16) void {
+fn stepQueued(self: *Chip, i: u16, comptime extent: Extent) void {
     const n = &self.nodes[i];
     var before: [4]Port.State = undefined;
     for (n.ports, &before) |link, *state| state.* = if (link.port) |p| p.state else .idle;
@@ -1238,7 +1253,10 @@ fn stepQueued(self: *Chip, i: u16) void {
     // writes io during the step (`pin_device`), and at its end, as time has
     // passed for them
     const wired = n.pin_device != null;
-    n.step();
+    switch (extent) {
+        .word => n.step(),
+        .slot => n.stepSlot(),
+    }
     self.steps += 1;
     self.started = true;
     if (wired) {

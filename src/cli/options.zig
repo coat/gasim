@@ -274,6 +274,8 @@ const options_step =
     \\  --count <n>                take this many steps (default 1)
     \\  --rounds <n>               take this many rounds of steps instead, the
     \\                             furthest behind first
+    \\  --slot                     step one opcode of the node, or fetch its next
+    \\                             word, instead of the rest of its word
     \\
 ;
 
@@ -397,6 +399,7 @@ const flags = [_]Flag{
     .{ .name = "--to", .commands = .initMany(&.{ .run, .aforth, .step }) },
     .{ .name = "--node", .commands = .initOne(.step) },
     .{ .name = "--rounds", .commands = .initOne(.step) },
+    .{ .name = "--slot", .value = false, .commands = .initOne(.step) },
     .{ .name = "--count", .commands = .initMany(&.{ .step, .show }) },
     .{ .name = "--mem", .value = false, .commands = .initOne(.show) },
     .{ .name = "--rom-words", .value = false, .commands = .initOne(.show) },
@@ -445,6 +448,8 @@ pub const Options = struct {
     step_node: ?u16 = null,
     count: ?u32 = null,
     rounds: ?u32 = null,
+    /// step one slot at a time
+    slot: bool = false,
     /// what `show` shows: nodes, their memory, and ports
     nodes: []const u16 = &.{},
     /// the specs `test` runs
@@ -641,6 +646,7 @@ pub fn parse(arena: Allocator, args: []const []const u8, terminal: bool) Options
     if (o.command == .step and (o.from == null or o.to == null)) report.usage("step needs --from and --to", .{});
     if (o.command == .step and o.count != null and o.rounds != null) report.usage("step takes --count or --rounds", .{});
     if (o.command == .step and o.step_node != null and o.rounds != null) report.usage("--rounds step every node, so --node cannot", .{});
+    if (o.command == .step and o.slot and o.step_node == null) report.usage("--slot steps one node, so it needs --node", .{});
     if (o.command == .show and o.from == null) report.usage("show needs a snapshot", .{});
     if (o.rom_words and o.at != null and o.at.? & 0x80 == 0) report.usage("--at {x:0>3} is in RAM, so --rom-words cannot", .{o.at.?});
     if ((o.command == .show) and (o.rom_words or o.at != null or o.count != null) and !o.mem) o.mem = true;
@@ -665,6 +671,8 @@ fn setSwitch(o: *Options, arg: []const u8) void {
         o.trace = true;
     } else if (is(u8, arg, "--why")) {
         o.why = true;
+    } else if (is(u8, arg, "--slot")) {
+        o.slot = true;
     } else if (is(u8, arg, "--stats")) {
         o.stats = true;
     } else if (is(u8, arg, "--json")) {

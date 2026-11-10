@@ -252,6 +252,7 @@ fn cause(c: Sim.Cause) []const u8 {
         .line => "a line at the prompt",
         .reset => "starting again",
         .compile => "compiling a block",
+        .slot => "a step of one opcode",
     };
 }
 

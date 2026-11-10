@@ -11,7 +11,7 @@ export const Stop = ['budget', 'settled', 'input', 'hit'];
 export const Status = ['running', 'code', 'reading', 'writing'];
 
 /** What the chip was saved before, as Sim.Cause numbers them. */
-export const Cause = ['step', 'round', 'node', 'run', 'line', 'reset', 'compile'];
+export const Cause = ['step', 'round', 'node', 'run', 'line', 'reset', 'compile', 'slot'];
 
 /** Port directions, as gasim's Direction numbers them. */
 export const Direction = { right: 0, down: 1, left: 2, up: 3 };
@@ -98,6 +98,8 @@ export async function loadEngine(url = 'gasim.wasm') {
     stepRound: () => !!x.stepRound(),
     /** Steps one node; false if it is still waiting. */
     stepNode: (i) => !!x.stepNode(i),
+    /** Steps one opcode of a node, or fetches its next word; false if it is still waiting. */
+    stepSlot: (i) => !!x.stepSlot(i),
     reset: () => x.reset(),
     /** Saves the chip to go back to, before running it. */
     remember: () => x.remember(Cause.indexOf('run')),

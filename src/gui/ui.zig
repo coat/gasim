@@ -195,6 +195,17 @@ fn stepNode() void {
     say("Node {d:0>3} {s}", .{ sim.chip.layout.nodeNumber(selected), if (ran) "stepped" else "is still waiting" });
 }
 
+fn stepSlot() void {
+    const ran = sim.stepSlot(selected) catch return say("Out of memory", .{});
+    const n = &sim.chip.nodes[selected];
+    const number = sim.chip.layout.nodeNumber(selected);
+    if (!ran) {
+        say("Node {d:0>3} is still waiting", .{number});
+    } else if (n.state == .fetch) {
+        say("Node {d:0>3} finished its word", .{number});
+    } else say("Node {d:0>3} is at slot {d}", .{ number, n.slot });
+}
+
 fn back() void {
     if (sim.back()) say("Back to {d} steps", .{sim.chip.steps}) else say("Nothing to go back to", .{});
 }
@@ -261,7 +272,7 @@ fn keys() void {
             .l => move(1, 0),
             .space => toggleRun(),
             .s => if (running) continue else if (shift) stepRound() else stepNext(),
-            .n => if (running) continue else stepNode(),
+            .n => if (running) continue else if (shift) stepSlot() else stepNode(),
             .z => if (running) continue else back(),
             .up => move(0, 1),
             .down => move(0, -1),
@@ -879,13 +890,34 @@ fn registerFields(n: Sim.NodeView) void {
         defer row.deinit();
         for (fields[k..@min(k + 2, fields.len)], k..) |f, id| field(f[0], f[1], id);
     }
-    const i = if (n.i) |i|
-        std.fmt.allocPrint(arena, "{x:0>5} {s}", .{ i, n.i_code.? }) catch return
-    else
-        std.fmt.allocPrint(arena, "next word from {s}", .{n.fetch_from.?}) catch return;
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
-    field("I", i, fields.len);
+    const i = n.i orelse {
+        field("I", std.fmt.allocPrint(arena, "next word from {s}", .{n.fetch_from.?}) catch return, fields.len);
+        return;
+    };
+    // as `field` lays it out, with the opcodes after the word
+    dvui.labelNoFmt(@src(), "I", .{}, .{ .color_text = .{ .color = mutedText() }, .min_size_content = .{ .w = 44 }, .padding = .all(1) });
+    dvui.labelNoFmt(@src(), std.fmt.allocPrint(arena, "{x:0>5}", .{i}) catch return, .{}, .{ .font = .theme(.mono), .padding = .all(1) });
+    slots(n, .{ .font = .theme(.mono), .padding = .all(1), .margin = .{ .x = 6 } });
+}
+
+/// The opcodes of the word a node is part way through, with those it ran
+/// muted and the one it runs next marked
+fn slots(n: Sim.NodeView, options: dvui.Options) void {
+    const theme = dvui.themeGet();
+    var box = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+    defer box.deinit();
+    for (n.i_slots.?, 0..) |code, k| {
+        var o = options.override(.{ .id_extra = k });
+        if (k < n.slot) o.color_text = .{ .color = mutedText() };
+        if (k == n.slot) {
+            o.border = .all(1);
+            o.color_border = .{ .color = theme.color(.content, .text) };
+        }
+        if (k > 0) o.margin = .{ .x = 6 };
+        dvui.labelNoFmt(@src(), code, .{}, o);
+    }
 }
 
 fn field(name: []const u8, value: []const u8, id: usize) void {
@@ -960,7 +992,9 @@ fn listing(n: Sim.NodeView) void {
         const pad: dvui.Rect = .{ .x = 4, .w = 8 };
         dvui.label(@src(), "{x:0>3}", .{line.address}, .{ .font = mono, .color_text = .{ .color = theme.color(.highlight, .fill) }, .padding = pad });
         dvui.label(@src(), "{x:0>5}", .{line.value}, .{ .font = mono, .color_text = .{ .color = mutedText() }, .padding = pad });
-        dvui.labelNoFmt(@src(), line.code, .{}, .{ .font = mono, .padding = pad, .color_text = if (line.literal) .{ .color = palette.literal } else if (zero) .{ .color = mutedText() } else null });
+        if (here and n.i_slots != null and !line.literal) {
+            slots(n, .{ .font = mono, .padding = .{ .x = 2, .w = 2 }, .margin = .{ .x = 2 } });
+        } else dvui.labelNoFmt(@src(), line.code, .{}, .{ .font = mono, .padding = pad, .color_text = if (line.literal) .{ .color = palette.literal } else if (zero) .{ .color = mutedText() } else null });
     }
 }
 
@@ -1143,3 +1177,17 @@ test {
 }
 
 const build_options = @import("build_options");
+
+test "shift+n steps a slot, marking the opcode run next" {
+    var t = try dvui.testing.init(.{ .window_size = .{ .w = 1400, .h = 900 } });
+    defer t.deinit();
+    try startWith(upcase);
+    defer stop();
+    try dvui.testing.settle(frame);
+    try dvui.testing.pressKey(.n, .lshift);
+    try dvui.testing.pressKey(.n, .lshift);
+    try dvui.testing.settle(frame);
+    try saveImage(&t, "slot.png");
+    try expectEqual(.execution, sim.chip.nodes[0].state);
+    try expectEqual(1, sim.chip.nodes[0].slot);
+}

@@ -90,6 +90,10 @@ export fn stepNode(i: u16) bool {
     return sim.stepNode(i) catch false;
 }
 
+export fn stepSlot(i: u16) bool {
+    return sim.stepSlot(i) catch false;
+}
+
 export fn reset() void {
     sim.reset();
 }

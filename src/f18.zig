@@ -311,18 +311,36 @@ pub const Computer = struct {
     pub fn step(self: *Computer) void {
         self.suspended = false;
         self.transfers = .{};
-        if (self.state == .fetch) {
-            // instructions may be fetched from a port
-            self.i = self.read(self.p.address) orelse return;
-            self.word_address = self.p.address;
-            self.p.increment();
-            self.slot = 0;
-            self.state = .execution;
-        }
+        // inlined, as stepSlot calls them too, and this is the run loop's
+        if (self.state == .fetch and !@call(.always_inline, fetchWord, .{self})) return;
         while (self.state != .fetch) {
-            self.execute(Instruction.decode(self.i).getSlot(self.slot));
+            @call(.always_inline, execute, .{ self, Instruction.decode(self.i).getSlot(self.slot) });
             if (self.suspended) return;
         }
+    }
+
+    /// Fetches the next instruction word, if the node is between words, or
+    /// otherwise executes the opcode in the current slot, which for `unext`
+    /// is one pass of its loop. Running the rest of the word with `step`
+    /// afterwards does the same as `step` would have done alone.
+    pub fn stepSlot(self: *Computer) void {
+        self.suspended = false;
+        self.transfers = .{};
+        if (self.state == .fetch) {
+            _ = self.fetchWord();
+        } else self.execute(Instruction.decode(self.i).getSlot(self.slot));
+    }
+
+    /// Reads the instruction word at P into I, to run from slot 0. Returns
+    /// false, suspended, when it must wait on a comm port.
+    fn fetchWord(self: *Computer) bool {
+        // instructions may be fetched from a port
+        self.i = self.read(self.p.address) orelse return false;
+        self.word_address = self.p.address;
+        self.p.increment();
+        self.slot = 0;
+        self.state = .execution;
+        return true;
     }
 
     /// The address of the instruction word being executed, or between words,
@@ -984,6 +1002,75 @@ test "unext loops R+1 times then continues with the next slot" {
     try expectEqual(8, computer.data_stack.s);
     try expectEqual(0, computer.return_stack.t);
     try expectEqual(1, computer.p.address.local);
+}
+
+test "stepSlot fetches, then runs one opcode, or one pass of unext" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.return_stack.push(1);
+    computer.data_stack.push(1);
+    computer.mem[0] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@"2*", .slot_2 = .unext, .slot_3 = 6 });
+
+    // fetching runs nothing
+    computer.stepSlot();
+    try expectEqual(.execution, computer.state);
+    try expectEqual(0, computer.slot);
+    try expectEqual(1, computer.data_stack.t);
+
+    computer.stepSlot();
+    try expectEqual(1, computer.slot);
+    computer.stepSlot();
+    try expectEqual(2, computer.data_stack.t);
+    try expectEqual(2, computer.slot);
+    // unext goes back to slot 0 while R is nonzero
+    computer.stepSlot();
+    try expectEqual(0, computer.slot);
+    try expectEqual(0, computer.return_stack.t);
+    for (0..3) |_| computer.stepSlot();
+    try expectEqual(3, computer.slot);
+    // and the last slot ends the word
+    computer.stepSlot();
+    try expectEqual(.fetch, computer.state);
+    try expectEqual(4, computer.data_stack.t);
+    try expectEqual(1, computer.p.address.local);
+}
+
+test "stepping slot by slot ends as a step of the word does" {
+    var whole: Computer = .reset;
+    whole.p.address = .{ .io = false, .rom = false, .local = 0 };
+    whole.return_stack.push(2);
+    whole.data_stack.push(1);
+    whole.mem[0] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@"2*", .slot_2 = .unext, .slot_3 = 6 });
+    var slots = whole;
+
+    whole.step();
+    while (true) {
+        slots.stepSlot();
+        if (slots.state == .fetch) break;
+    }
+    try expectEqual(whole.data_stack, slots.data_stack);
+    try expectEqual(whole.return_stack, slots.return_stack);
+    try expectEqual(whole.p, slots.p);
+    try expectEqual(whole.time, slots.time);
+}
+
+test "a word step after slot steps runs the rest of the word" {
+    var whole: Computer = .reset;
+    whole.p.address = .{ .io = false, .rom = false, .local = 0 };
+    whole.return_stack.push(2);
+    whole.data_stack.push(1);
+    whole.mem[0] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@"2*", .slot_2 = .unext, .slot_3 = 6 });
+    var mixed = whole;
+
+    whole.step();
+    // a fetch, dup, and then the rest
+    for (0..2) |_| mixed.stepSlot();
+    mixed.step();
+    try expectEqual(.fetch, mixed.state);
+    try expectEqual(whole.data_stack, mixed.data_stack);
+    try expectEqual(whole.return_stack, mixed.return_stack);
+    try expectEqual(whole.p, mixed.p);
+    try expectEqual(whole.time, mixed.time);
 }
 
 test "execution time depends on the opcode class" {

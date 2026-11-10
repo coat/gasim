@@ -95,3 +95,19 @@ Deno.test('steps say what they stepped', async () => {
   app.stepNode();
   assertEquals(state.message, 'Node 717 is still waiting');
 });
+
+Deno.test('stepping a slot fetches the word, then runs its opcodes one at a time', async () => {
+  await load('hello.ga');
+  app.select(app.nodeIndex(0));
+  app.stepSlot();
+  assertEquals(state.message, 'Node 000 is at slot 0');
+  let node = state.gasim.node(state.selected);
+  assert(node.i_slots.length > 0);
+  app.stepSlot();
+  node = state.gasim.node(state.selected);
+  // @p, the first opcode of up b!, ran
+  assertEquals(state.message, 'Node 000 is at slot 1');
+  assertEquals(node.slot, 1);
+  assert(node.i !== null);
+  assertEquals(state.gasim.history().at(-1).cause, 'slot');
+});
