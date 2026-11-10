@@ -25,3 +25,5 @@
 
 - [Benchmarks](benchmarks.md): measuring gasim's speed
 - [Roadmap](ROADMAP.md): what is done and what comes next
+- [Contributing](../CONTRIBUTING.md): how to write docs, comments, commits
+  and pull requests

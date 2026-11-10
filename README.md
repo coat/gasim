@@ -179,6 +179,11 @@ This puts `gasim` in `./zig-out/bin/`. See [Building](docs/building.md) for
 the GUI, the web version, tests and fuzzing, and
 [Benchmarks](docs/benchmarks.md) for measuring speed.
 
+## Contributing
+
+See [Contributing](CONTRIBUTING.md) for how to write docs, code comments,
+commits and pull requests. gasim uses plain language (ISO 24495-1).
+
 ## Prior art
 
 - GreenArrays' own SOFTSIM, in their free [arrayForth
