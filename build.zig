@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
         .source_dir = b.path("examples"),
         .install_dir = .prefix,
         .install_subdir = "share/gasim/examples",
-        .include_extensions = example_extensions,
+        .exclude_extensions = examples_excluded,
     });
 
     const run_cmd = b.addRunArtifact(exe);
@@ -106,8 +106,23 @@ pub fn build(b: *std.Build) void {
         .source_dir = b.path("examples"),
         .install_dir = .prefix,
         .install_subdir = "web/examples",
-        .include_extensions = example_extensions,
+        .exclude_extensions = examples_excluded,
     }).step);
+    // The page can't list a folder, so the build writes the list of
+    // examples, with their descriptions, to index.json.
+    const examples_index = b.addExecutable(.{
+        .name = "examples-index",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/examples/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "examples", .module = b.createModule(.{ .root_source_file = b.path("src/examples.zig") }) }},
+        }),
+    });
+    const index_cmd = b.addRunArtifact(examples_index);
+    index_cmd.addDirectoryArg(b.path("examples"));
+    // Run it every time, because Zig doesn't hash the folder's files.
+    index_cmd.has_side_effects = true;
+    web_step.dependOn(&b.addInstallFileWithDir(index_cmd.addOutputFileArg("index.json"), .{ .custom = "web/examples" }, "index.json").step);
     // the ROM is GreenArrays', and not in the repository: the page looks for
     // ga144.txt beside it, and otherwise asks for one
     if (b.option([]const u8, "rom", "A ROM dump to serve with the web version as ga144.txt")) |rom|
@@ -162,9 +177,6 @@ pub fn build(b: *std.Build) void {
             }) },
             .{ .name = "dvui", .module = dvui.module("dvui_sdl3") },
             .{ .name = "build_options", .module = gui_options.createModule() },
-            // the examples' names, for its Examples menu, which reads
-            // them from where they are installed
-            .{ .name = "examples", .module = b.createModule(.{ .root_source_file = b.path("examples/examples.zig") }) },
             .{ .name = "icons", .module = b.createModule(.{ .root_source_file = icons.add("icons.zig", icons_zig) }) },
         };
         const gui_mod = b.createModule(.{
@@ -362,8 +374,10 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-/// the examples' files, as they are installed: not examples.zig or test.zig
-const example_extensions: []const []const u8 = &.{ ".ga", ".af", ".cf" };
+/// The files in examples/ that aren't installed: the tests of the examples.
+/// Zig matches each entry against the end of the path, so "test.zon" also
+/// leaves out latest.zon or chips/test.zon.
+const examples_excluded: []const []const u8 = &.{ ".zig", "test.zon" };
 
 /// the icons in web/icons the GUI draws too
 const gui_icons = [_][]const u8{

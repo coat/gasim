@@ -22,6 +22,7 @@ pub const Flash = @import("Flash.zig");
 pub const Sram = @import("Sram.zig");
 pub const Sync = @import("Sync.zig");
 pub const disassembler = @import("disassembler.zig");
+pub const examples = @import("examples.zig");
 pub const ga144 = @import("ga144.zig");
 pub const rom = @import("rom.zig");
 pub const snapshot = @import("snapshot.zig");
@@ -42,6 +43,7 @@ test {
     _ = @import("Console.zig");
     _ = @import("Editor.zig");
     _ = @import("disassembler.zig");
+    _ = @import("examples.zig");
     _ = @import("ga144.zig");
     _ = @import("opcodes.zig");
     _ = @import("pins.zig");

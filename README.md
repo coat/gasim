@@ -26,7 +26,7 @@ With gasim you can:
   for the GUI.
 
 See [Installing](docs/install.md) for where the examples are, and how to set
-the GUI's fonts and colors.
+the GUI's settings.
 
 ## Usage
 

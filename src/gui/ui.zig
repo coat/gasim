@@ -1138,6 +1138,7 @@ test {
     _ = files;
     _ = help;
     _ = style;
+    _ = @import("config.zig");
     _ = @import("debug.zig");
 }
 
