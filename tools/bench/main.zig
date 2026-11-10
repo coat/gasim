@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
         const run = try runScript(io, arena, script, true);
         if (!run.term.success()) {
             if (w.rom and std.mem.indexOf(u8, run.stderr, "needs a ROM") != null) {
-                try out.print("  left out, as gasim has no ROM (see --rom in the README)\n", .{});
+                try out.print("  left out, as gasim has no ROM (see docs/rom.md)\n", .{});
                 continue;
             }
             fatal("{s} failed: {s}", .{ script, run.stderr });
