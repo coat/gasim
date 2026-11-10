@@ -54,6 +54,8 @@ pub const Program = struct {
     /// the source line each word was assembled from, or 0 for an unused
     /// word. Lines past the largest number that fits get that number.
     lines: [64]u32 = @splat(0),
+    /// the label defined at each word, if any, the first if there are more
+    names: [64]Name = @splat(.{}),
     entry: Address,
     /// where the program first calls a ROM word, which needs the node's ROM
     rom_word: ?Diagnostic = null,
@@ -64,14 +66,52 @@ pub const Program = struct {
         /// x080 to x0bf
         words: [64]Word,
         lines: [64]u32,
+        names: [64]Name = @splat(.{}),
         /// number of words used, from x080
         len: u7,
     };
 
+    /// Names each word of RAM, and of `rom` if given, with the first of
+    /// `labels` at its address, an index of a 128 word builder's memory
+    pub fn nameWords(ram: *[64]Name, rom: ?*[64]Name, labels: anytype) void {
+        for (labels) |label| {
+            const index: usize = label.index orelse continue;
+            const names = if (index < 64) ram else rom orelse continue;
+            const name = &names[index % 64];
+            if (name.len == 0) name.* = .init(label.name);
+        }
+    }
     /// Copies the program into the RAM of `node` and starts it at the entry
     pub fn load(self: Program, node: *Computer) void {
         @memcpy(node.mem[0..64], &self.ram);
         node.p.address = self.entry;
+    }
+};
+
+/// `text` cut to at most `max` bytes, without splitting a UTF-8 character
+pub fn cut(text: []const u8, max: usize) []const u8 {
+    if (text.len <= max) return text;
+    var end = max;
+    // back to the first byte of a character
+    while (end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+    return text[0..end];
+}
+
+/// A label's name, kept with a program after the source it came from is
+/// gone, cut to the first 15 bytes
+pub const Name = struct {
+    bytes: [15]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn init(name: []const u8) Name {
+        const kept = cut(name, 15);
+        var self: Name = .{ .len = @intCast(kept.len) };
+        @memcpy(self.bytes[0..self.len], kept);
+        return self;
+    }
+
+    pub fn slice(self: *const Name) []const u8 {
+        return self.bytes[0..self.len];
     }
 };
 
@@ -215,7 +255,7 @@ const Assembler = struct {
     }
 
     fn program(self: Assembler, node: u16) Program {
-        return .{
+        var program_: Program = .{
             .node = node,
             .ram = self.builder.mem[0..64].*,
             .len = self.builder.len,
@@ -223,6 +263,13 @@ const Assembler = struct {
             .entry = .{ .io = false, .rom = false, .local = self.builder.labelAddress("main") orelse 0 },
             .rom_word = self.rom_word,
         };
+        var labels: [64]struct { index: ?u7, name: []const u8 } = undefined;
+        for (self.builder.labels[0..self.builder.label_count], labels[0..self.builder.label_count]) |label, *l| {
+            // a label at the end of a full RAM names no word
+            l.* = .{ .index = if (label.address) |a| if (a < 64) a else null else null, .name = label.name };
+        }
+        Program.nameWords(&program_.names, null, labels[0..self.builder.label_count]);
+        return program_;
     }
 
     /// resolves references once all of a node's words are assembled
@@ -496,6 +543,14 @@ test "data, strings and org" {
         0,
         1,
     });
+}
+
+test cut {
+    try expectEqualStrings("abc", cut("abc", 5));
+    try expectEqualStrings("ab", cut("abc", 2));
+    // ö is 2 bytes, and is not split
+    try expectEqualStrings("gr", cut("größe", 3));
+    try expectEqualStrings("grö", cut("größe", 4));
 }
 
 test "source lines" {

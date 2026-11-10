@@ -4,11 +4,23 @@
 /// `@p dup . +`, with the destination of a jump in hex such as `call 0a9`.
 /// Slots after a return or a jump are not written, since they never run.
 pub fn write(writer: *Io.Writer, word: Word, address: u9) Io.Writer.Error!void {
+    return writeNamed(writer, word, address, null);
+}
+
+/// Writes a word as `write` does, but with the destination of a jump by
+/// name where `names` has one, such as `call emit`
+pub fn writeNamed(writer: *Io.Writer, word: Word, address: u9, names: ?Names) Io.Writer.Error!void {
     for (0..slotCount(word)) |i| {
         if (i > 0) try writer.writeByte(' ');
-        try writeSlot(writer, word, address, @intCast(i));
+        try writeSlot(writer, word, address, @intCast(i), names);
     }
 }
+
+/// names for the destinations of jumps, such as labels and ROM words
+pub const Names = struct {
+    context: *const anyopaque,
+    get: *const fn (context: *const anyopaque, address: u10) ?[]const u8,
+};
 
 /// The number of slots of `word` that can run: up to a return or a jump,
 /// which ends the word, or all 4
@@ -22,13 +34,16 @@ pub fn slotCount(word: Word) u3 {
 }
 
 /// Writes the opcode in one slot of the word at `address`, such as `dup`,
-/// with the destination of a jump, such as `call 0a9`
-pub fn writeSlot(writer: *Io.Writer, word: Word, address: u9, slot: Slot) Io.Writer.Error!void {
+/// with the destination of a jump, such as `call 0a9`, or by name from
+/// `names`, such as `call warm`
+pub fn writeSlot(writer: *Io.Writer, word: Word, address: u9, slot: Slot, names: ?Names) Io.Writer.Error!void {
     const opcode = Instruction.decode(word).getSlot(slot);
     try writer.writeAll(@tagName(opcode));
     switch (opcode) {
         .jump, .call, .next, .@"if", .@"-if" => if (slot < 3) {
-            try writer.print(" {x:0>3}", .{destination(word, address, slot)});
+            const to = destination(word, address, slot);
+            if (names) |n| if (n.get(n.context, to)) |name| return writer.print(" {s}", .{name});
+            try writer.print(" {x:0>3}", .{to});
         },
         else => {},
     }

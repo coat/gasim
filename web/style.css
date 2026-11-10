@@ -66,6 +66,8 @@
   --breakpoint: light-dark(#d6334a, #ff6b7f);
   --here: light-dark(#fff3c4, #4a4120);
   --literal: light-dark(#8a5a00, #e3b65c);
+  /* labels, and the names of ROM words */
+  --label: light-dark(#1f6f5c, #6fd3b8);
   --gutter-size: 6px;
   --tile-text: light-dark(#1c2128, #e6e9ee);
   /* colorForth's colors, darker to read on white */
@@ -1434,6 +1436,18 @@ dialog .actions {
 .memory .literal,
 .memory tr.zero td.code.literal {
   color: var(--literal);
+}
+
+.memory .label {
+  color: var(--label);
+  max-width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* where the word being run was assembled from, and its line */
+.source code {
+  margin-left: 0.5rem;
 }
 
 /* the opcodes of the word a node is part way through: those it ran, and

@@ -33,6 +33,9 @@ function registers(node) {
     field('io', word(node.io), 'The I/O register'),
     field('time', `${node.time.toFixed(1)} ns`, 'Time spent executing'),
     field('I', node.i === null ? `next word from ${node.fetch_from}` : m('span', m('code', word(node.i)), ' ', m('span.slots', slots(node))), 'The instruction word', true),
+    node.source === null
+      ? null
+      : field('from', m('span.source', node.source.where, node.source.text ? m('code', node.source.text) : null), 'Where the word being run was assembled from', true),
   ]);
 }
 
@@ -46,7 +49,7 @@ function stack(name, values, named) {
 function memory(node) {
   const rows = [];
   node.memory.forEach((line, k) => {
-    if (k === 0 || k === 64) rows.push(m('tr.heading', { key: `h${k}` }, m('th[colspan=4]', k === 0 ? 'RAM' : 'ROM')));
+    if (k === 0 || k === 64) rows.push(m('tr.heading', { key: `h${k}` }, m('th[colspan=5]', k === 0 ? 'RAM' : 'ROM')));
     // RAM and ROM repeat at x040 and x0c0
     const here = node.here !== null && (node.here & 0x1bf) === line.address;
     rows.push(
@@ -62,6 +65,7 @@ function memory(node) {
         ),
         m('td.address', hex(line.address, 3)),
         m('td.value', word(line.value)),
+        m('td.label', line.label ?? ''),
         m('td.code', { class: line.literal ? 'literal' : '' }, here && node.i_slots !== null && !line.literal ? m('span.slots', slots(node)) : line.code),
       ]),
     );

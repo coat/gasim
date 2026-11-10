@@ -897,7 +897,18 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     }
 
     if (command == .tui) {
+        // a snapshot alone has no source
+        const source_map: ?gasim.SourceMap = if (path != null) try .init(
+            arena,
+            layout,
+            programs,
+            descriptors,
+            file,
+            source_path,
+            if (colorforth) .colorforth else if (blocks) .blocks else .text,
+        ) else null;
         try tui.run(io, init.gpa, init.environ_map, &chip, .{
+            .source_map = if (source_map) |*map| map else null,
             .source_path = source_path,
             .console = &console,
             .console_node = console_node,

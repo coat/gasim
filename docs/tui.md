@@ -43,6 +43,18 @@ Click a node to select it.
 The node panel shows the selected node's registers, stacks, and the RAM and
 ROM around the word it is running.
 
+For a program gasim assembled, the panel also shows:
+
+- the label at each word, and the names of ROM words, such as `warm`, once
+  the ROM is loaded
+- jumps and calls by name, such as `call emit` instead of `call 0a9`
+- where the word at the cursor came from, under the node's status, such as
+  `hello.ga:9  @+ for @+ !b unext`. For colorForth blocks it shows the
+  block and word, without the text.
+
+A word is described only while memory still holds what was assembled there.
+Code a node loads or changes as it runs is shown without labels.
+
 When a node is part way through a word, the panel shows its opcodes in the
 `I` row and in the word's row of memory. Opcodes the node has run are dim,
 and the one it runs next is in reverse. A node is part way through a word

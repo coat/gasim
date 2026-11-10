@@ -21,6 +21,8 @@ pub const Options = struct {
     forth: ?Forth = null,
     /// colorForth blocks to edit, of the file opened or a new one
     colorforth: ?ColorForth = null,
+    /// where the programs loaded came from, to show their labels and lines
+    source_map: ?*const SourceMap = null,
 };
 
 pub const ColorForth = struct {
@@ -127,6 +129,8 @@ const colors = struct {
     const address: vaxis.Style = .{ .fg = .{ .index = 4 } };
     const raw: vaxis.Style = .{ .fg = .{ .index = 8 } };
     const literal: vaxis.Style = .{ .fg = .{ .index = 3 } };
+    /// a label, or the name of a ROM word, in the memory listing
+    const name: vaxis.Style = .{ .fg = .{ .index = 6 } };
     const heading: vaxis.Style = .{ .bold = true };
     const focused: vaxis.Style = .{ .fg = .{ .index = 4 } };
     const dim: vaxis.Style = .{ .dim = true };
@@ -362,6 +366,9 @@ const Tui = struct {
     io: Io,
     /// for snapshots of the chip, as they are needed
     gpa: Allocator,
+    /// where the code compiled in the colorForth editor came from, which
+    /// replaces `options.source_map` once there is some
+    compiled_map: ?SourceMap = null,
     chip: *Chip,
     options: Options,
     /// whether the user wants the chip to run
@@ -515,6 +522,7 @@ const Tui = struct {
     }
 
     fn deinit(self: *Tui) void {
+        if (self.compiled_map) |*map| map.deinit(self.gpa);
         if (self.start) |*s| s.deinit(self.gpa);
         for (self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(self.gpa);
         if (self.trace) |t| {
@@ -1150,6 +1158,7 @@ const Tui = struct {
         self.chip.restore(&start);
         const assembled = forth.session.assembled();
         const started = gasim.arrayforth.startCompiled(self.chip, assembled);
+        self.mapCompiled(assembled);
         self.settled = false;
         const warned = assembled.first_difference != null or assembled.unresolved_then != null or started.unsaved != null;
         var long: [2 * message_capacity]u8 = undefined;
@@ -2727,6 +2736,7 @@ const Tui = struct {
             .reading => |address| self.print("waiting to read {s}", .{disassembler.ioName(address)}),
             .writing => |address| self.print("waiting to write {s}", .{disassembler.ioName(address)}),
         }, .style = statusStyle(node_status) }, .{ .wrap = .none });
+        if (self.sourceLine()) |line| _ = win.printSegment(.{ .text = line, .style = colors.dim }, .{ .row_offset = 1, .wrap = .none });
 
         const word = n.current();
         self.fields(win, 2, &.{
@@ -2769,6 +2779,12 @@ const Tui = struct {
         const here = memoryRow(n.current());
         const ram_literals = disassembler.literals(n.mem[0..64]);
         const rom_literals = disassembler.literals(n.mem[64..128]);
+        // the labels line up, as wide as the widest shown, up to a limit,
+        // and take no room when none are shown
+        var name_width: usize = 0;
+        for (first..@min(memory_rows, first + page)) |r| if (rowAddress(@intCast(r))) |address| {
+            if (self.labelAt(address)) |label| name_width = @max(name_width, @min(label.len, max_name_width));
+        };
 
         for (first..@min(memory_rows, first + page)) |r| {
             const row: u16 = @intCast(r - first);
@@ -2797,6 +2813,7 @@ const Tui = struct {
                 .{ .text = self.print("{x:0>3}", .{address}), .style = address_style },
                 .{ .text = " " },
                 .{ .text = self.print("{x:0>5}  ", .{value}), .style = colors.raw },
+                .{ .text = if (name_width == 0) "" else self.print("{s:<[1]} ", .{ cut(self.labelAt(address) orelse "", max_name_width), name_width }), .style = colors.name },
                 code,
             };
             if (is_here) for (segments[1..]) |*segment| {
@@ -3044,9 +3061,10 @@ const Tui = struct {
                 segments[n] = .{ .text = " ", .style = base };
                 n += 1;
             }
-            const buffer = self.frame.allocator().alloc(u8, 16) catch return before;
+            const buffer = self.frame.allocator().alloc(u8, 32) catch return before;
             var writer: Io.Writer = .fixed(buffer);
-            disassembler.writeSlot(&writer, word, address, @intCast(slot)) catch {};
+            const names = self.namer();
+            disassembler.writeSlot(&writer, word, address, @intCast(slot), names.names()) catch {};
             var style = base;
             if (slot < current) style.dim = true;
             if (slot == current) style.reverse = colors.slot.reverse;
@@ -3057,9 +3075,51 @@ const Tui = struct {
     }
 
     fn disassemble(self: *Tui, word: Word, address: u9) []const u8 {
-        const buffer = self.frame.allocator().alloc(u8, 48) catch return "";
+        const buffer = self.frame.allocator().alloc(u8, 64) catch return "";
         var writer: Io.Writer = .fixed(buffer);
-        disassembler.write(&writer, word, address) catch {};
+        const names = self.namer();
+        disassembler.writeNamed(&writer, word, address, names.names()) catch {};
+        return writer.buffered();
+    }
+
+    /// where the programs loaded, or compiled since, came from
+    fn sourceMap(self: *const Tui) ?*const SourceMap {
+        if (self.compiled_map) |*map| return map;
+        return self.options.source_map;
+    }
+
+    /// Keeps where the code compiled in the colorForth editor came from.
+    /// Without memory for it, words are shown without labels.
+    fn mapCompiled(self: *Tui, assembled: gasim.arrayforth.Assembled) void {
+        if (self.compiled_map) |*map| map.deinit(self.gpa);
+        self.compiled_map = null;
+        const cf = self.options.colorforth orelse return;
+        self.compiled_map = SourceMap.init(self.gpa, self.chip.layout, assembled.programs, assembled.descriptors, "", cf.path orelse "new file", .colorforth) catch null;
+    }
+
+    /// names of the selected node's labels and ROM words, for jumps
+    fn namer(self: *const Tui) SourceMap.Namer {
+        return .{ .map = self.sourceMap(), .chip = self.chip, .i = self.selected };
+    }
+
+    /// the label at a listing's address of the selected node, or the name of
+    /// the ROM word there
+    fn labelAt(self: *const Tui, address: u9) ?[]const u8 {
+        return SourceMap.label(self.sourceMap(), self.chip, self.selected, address);
+    }
+
+    /// where the word at the cursor, or the word being run, was assembled
+    /// from, and its line, such as `hello.ga:9  @+ for @+ !b unext`
+    fn sourceLine(self: *Tui) ?[]const u8 {
+        const map = self.sourceMap() orelse return null;
+        const address = rowAddress(self.cursorRow() orelse return null) orelse return null;
+        const entry = map.at(self.chip, self.selected, address) orelse return null;
+        if (entry.line == 0) return null;
+        const buffer = self.frame.allocator().alloc(u8, 256) catch return null;
+        var writer: Io.Writer = .fixed(buffer);
+        map.writeWhere(&writer, entry.line) catch {};
+        const text = map.text(entry.line);
+        if (text.len > 0) writer.print("  {s}", .{text}) catch {};
         return writer.buffered();
     }
 
@@ -3086,6 +3146,12 @@ const Tui = struct {
         return row + rows;
     }
 };
+
+/// the most columns a label takes in the memory listing
+const max_name_width = 12;
+
+/// `text`, cut to `width` bytes, without splitting a character
+const cut = gasim.assembler.cut;
 
 /// the address of a row of the memory listing, unless it is a heading
 fn rowAddress(row: u16) ?u9 {
@@ -3248,6 +3314,7 @@ const TestTui = struct {
     screen: vaxis.Screen = undefined,
     /// keeping two
     history: [3]?Chip.Snapshot = @splat(null),
+    source_map: SourceMap = undefined,
     tui: Tui = undefined,
 
     fn init(self: *TestTui, source: []const u8) !void {
@@ -3260,19 +3327,23 @@ const TestTui = struct {
         errdefer self.chip.deinit(gpa);
         var programs: [4]gasim.assembler.Program = undefined;
         var diagnostic: gasim.assembler.Diagnostic = .{};
-        for (try gasim.assembler.assembleNodesFor(&spec, source, &programs, &diagnostic)) |program| try self.chip.load(program);
+        const assembled = try gasim.assembler.assembleNodesFor(&spec, source, &programs, &diagnostic);
+        for (assembled) |program| try self.chip.load(program);
+        self.source_map = try .init(gpa, self.chip.layout, assembled, &.{}, source, "test.ga", .text);
+        errdefer self.source_map.deinit(gpa);
 
         self.input = .init(&self.input_buffer);
         self.output = .fixed(&self.output_buffer);
         self.console = .{ .input = .{ .io = std.testing.io, .queue = &self.input }, .output = &self.output };
         try self.chip.attachConsole(&self.console, 0, .up);
         self.screen = try .init(gpa, .{ .rows = 30, .cols = 120, .x_pixel = 0, .y_pixel = 0 });
-        self.tui = .init(std.testing.io, gpa, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up });
+        self.tui = .init(std.testing.io, gpa, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up, .source_map = &self.source_map });
         self.tui.history = &self.history;
     }
 
     fn deinit(self: *TestTui) void {
         self.tui.deinit();
+        self.source_map.deinit(std.testing.allocator);
         self.screen.deinit(std.testing.allocator);
         self.chip.deinit(std.testing.allocator);
     }
@@ -4181,6 +4252,27 @@ test "steps a slot at a time, marking the opcode run next" {
     try expectEqual(1, t.tui.chip.nodes[0].slot);
 }
 
+test "the node panel shows labels, named jumps and the line of the word" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init(
+        \\: main
+        \\    dup emit ;
+        \\: emit
+        \\    drop warm
+    );
+    defer t.deinit();
+    t.tui.focus = .node;
+    t.draw();
+
+    // the line of the word being run, or at the cursor
+    try expect(try t.shows(2, "test.ga:2  dup emit ;"));
+    try expect(try t.shows(17, "000 "));
+    try expect(try t.shows(17, "main dup jump emit"));
+    try expect(try t.shows(18, "emit drop call warm"));
+    try t.press('j');
+    try expect(try t.shows(2, "test.ga:4  drop warm"));
+}
+
 test "stops at breakpoints set in the memory listing" {
     var t: TestTui = .{ .chip = undefined };
     try t.init("begin dup drop again");
@@ -4315,6 +4407,7 @@ const Color = gasim.colorforth.Color;
 const Diagnostic = gasim.assembler.Diagnostic;
 const Direction = gasim.Direction;
 const Editor = gasim.Editor;
+const SourceMap = gasim.SourceMap;
 const Tail = gasim.Tail;
 const Instruction = gasim.Instruction;
 const Word = gasim.Word;
@@ -4877,6 +4970,10 @@ test "compiling colorForth in the editor starts the chip again with its code" {
     try expect(try t.shows(29, "with 1 nodes' code"));
     const echo = try gasim.arrayforth.assemble("ASM[ # 0 NODE ERS # 0 org : main up b! begin @b !b again >BIN ]ASM", &diagnostic);
     try expectEqualSlices(gasim.Word, echo.ram[0..echo.len], t.chip.nodes[0].mem[0..echo.len]);
+    // with its red words as labels, and where its words are in the block
+    t.tui.select(0);
+    try expectEqualStrings("main", t.tui.labelAt(0).?);
+    try std.testing.expectStringStartsWith(t.tui.sourceLine().?, "test.cf: block 0 word ");
 
     // an error moves the cursor to the word
     try t.press('0');
