@@ -227,7 +227,8 @@ const options_output =
     \\                             of these nodes, such as 105,708, or all
     \\  --why                      say what each node is waiting on when it stops
     \\  --stats                    say how many steps the nodes took (each word
-    \\                             run, or tried while waiting on a port), how
+    \\                             run, 4096 passes of a longer unext loop, or
+    \\                             a word tried while waiting on a port), how
     \\                             fast, and how long that is on the chip
     \\  --trace                    write a line to stderr for each word a node
     \\                             executes, with --json, an object

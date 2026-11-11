@@ -1268,8 +1268,18 @@ fn stepByHand(self: *Chip, i: u16, comptime extent: Extent) void {
     if (self.hasEvents()) self.fireEvents();
     const queued = self.queued[i];
     self.stepQueued(i, extent);
-    // stepped while queued, as by hand, so later in time than its place
-    if (queued) self.later(i, self.nodes[i].time);
+    // A step by hand runs the word to its end, through a `unext` loop that
+    // a step leaves part of. This many more steps, rounded up, end the
+    // longest loop whose body leaves R alone, of every value R has. A loop
+    // that takes more, as one that never ends does, is left there. A stop
+    // in one of these steps ends them, but not a stop left from before.
+    const stopped = self.hit != null;
+    var more: usize = (1 << 18) / Computer.unext_passes;
+    while (extent == .word and self.nodes[i].paused() and (stopped or self.hit == null) and more > 0) : (more -= 1) self.stepQueued(i, extent);
+    // Stepped while queued, as by hand, so later in time than its place:
+    // queued before, or by the first of several steps, which the rest moved
+    // on from where it was queued.
+    if (queued or self.queued[i]) self.later(i, self.nodes[i].time);
 }
 
 /// `stepNode` for a node that is not in the queue
@@ -1310,7 +1320,8 @@ fn stepQueued(self: *Chip, i: u16, comptime extent: Extent) void {
     // unless the node is still waiting for a word to execute, or still
     // waiting on the same port
     const waited = n.suspended and !n.transfers.any() and (retrying or (fetching and n.state == .fetch));
-    if (self.trace) |writer| if (!waited and (self.trace_only == null or self.trace_only == i)) {
+    // a word is traced once, when a `unext` loop left to more steps ends
+    if (self.trace) |writer| if (!waited and !n.paused() and (self.trace_only == null or self.trace_only == i)) {
         self.writeTrace(writer, i) catch {
             self.trace = null;
         };
@@ -2829,6 +2840,74 @@ test "traces as JSON, and one node" {
         try expect(std.mem.startsWith(u8, writer.buffered(), start));
         if (start.len == 0) try expectEqualStrings("", writer.buffered());
     }
+}
+
+test "a unext loop that never ends does not stop a run from reaching its limit" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    // dup >r unext sets R again each pass
+    try chip.load(try assembler.assemble("5 .. begin dup >r unext", &diagnostic));
+    chip.step_limit = 1000;
+    try chip.run();
+    try expect(chip.limited);
+    try expect(chip.nodes[0].paused());
+
+    // nor a step by hand, which gives up after the longest loop there is
+    const steps = chip.steps;
+    chip.stepNode(0);
+    try expectEqual(steps + 1 + (1 << 18) / Computer.unext_passes, chip.steps);
+    try expect(chip.nodes[0].paused());
+}
+
+test "a step by hand through a long unext loop keeps the queue in order" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var programs: [3]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    // 002's loop takes several steps. The first queues it, earlier in time
+    // than 000 and 001 are after their delays, and the rest take it past
+    // them.
+    for (try assembler.assembleNodes(
+        \\ node 000 : main 50000 for unext left b! @b
+        \\ node 001 : main 50000 for unext down b! @b
+        \\ node 002 : main 200000 for . unext down b! @b
+    , &programs, &diagnostic)) |program| try chip.load(program);
+    for (0..400) |_| {
+        _ = try chip.stepNext() orelse break;
+        try expectHeap(&chip);
+    }
+    try expect(chip.nodes[2].time > 700_000_000);
+}
+
+test "a step by hand runs its word to the end though a stop is left from before" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble("20000 for . unext dup", &diagnostic));
+    chip.hit = .{ .breakpoint = .init(5, 0) };
+    chip.stepNode(0);
+    chip.stepNode(0);
+    try expectEqual(.fetch, chip.nodes[0].state);
+}
+
+test "a step by hand runs a long unext loop to the end of its word, traced once" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    // not an empty loop, whose passes are taken at once
+    try chip.load(try assembler.assemble("20000 for . unext dup", &diagnostic));
+    var buffer: [512]u8 = undefined;
+    var trace: Io.Writer = .fixed(&buffer);
+    chip.trace = &trace;
+    chip.trace_only = 0;
+    // the literal and for, then the loop and what is after it in its word
+    chip.stepNode(0);
+    chip.stepNode(0);
+    try expect(!chip.nodes[0].paused());
+    try expectEqual(.fetch, chip.nodes[0].state);
+    try expectEqual(2 + 20000 / Computer.unext_passes, chip.steps);
+    try expectEqual(2, std.mem.count(u8, trace.buffered(), "\n"));
 }
 
 test "running stops at a limit" {

@@ -182,7 +182,17 @@ other two hazards.
 
 A step runs one instruction word, including its `unext` loops, or tries to
 run one while the node waits on a port. With `--slot`, a step runs one
-opcode. Steps per second includes any time
+opcode.
+
+A `unext` loop can go on forever, so a step runs at most 4096 passes of
+one, and the node's next step goes on with it. This lets the other nodes
+run, and `--max-steps`, `--max-time` and ctrl+c stop the run. A loop of
+`unext` alone, such as the delay `for unext`, cannot go on forever, and is
+always one step. In the TUI and with `gasim step`, a step still runs a
+whole word, unless its loop does not end within 262144 passes, the most a
+loop takes if its body leaves R alone.
+
+Steps per second includes any time
 spent waiting for input. The chip's time is the furthest any node's clock
 reached.
 
