@@ -152,7 +152,18 @@ pub const Computer = struct {
         execution,
         /// unext is looping back to slot 0 of the current instruction word
         unext,
+        /// `step` left a `unext` loop between two passes, at slot 0, for the
+        /// next step to go on with (see `unext_passes`)
+        paused,
     };
+
+    /// How many passes of a `unext` loop a step runs before it leaves the
+    /// rest to the next step. A loop can go on forever, as `dup >r unext`
+    /// does with T not 0, and a step that never ended would stop everything
+    /// else: the other nodes, a run's limits and ctrl+c. A delay loop of
+    /// fewer passes, such as a bit of a UART at 115200 baud or faster, is
+    /// still one step.
+    pub const unext_passes = 4096;
 
     /// address of the io register
     pub const io_address: u9 = 0x15d;
@@ -234,6 +245,8 @@ pub const Computer = struct {
     /// whether the last opcode of the word executed before this one changed
     /// S, T or P9, so that an add in slot 0 is a hazard (see `addUnsettled`)
     unsettled: bool = false,
+    /// passes of a `unext` loop left to the step being taken
+    unext_left: u16 = unext_passes,
     /// the first hazard since this was last cleared, which `Chip` does
     /// after each step, and how many there were, as a step can have several,
     /// such as one in each pass of a `unext` loop
@@ -354,25 +367,36 @@ pub const Computer = struct {
 
     /// Executes the rest of the current instruction word, fetching a new one
     /// first if needed. Returns early with `suspended` set when an opcode
-    /// must wait on a comm port.
+    /// must wait on a comm port, or `paused` after `unext_passes` passes of
+    /// a `unext` loop, which the next step goes on with.
     pub fn step(self: *Computer) void {
         self.suspended = false;
         self.transfers = .{};
+        self.unext_left = unext_passes;
+        if (self.state == .paused) self.state = .execution;
         // inlined, as stepSlot calls them too, and this is the run loop's
         if (self.state == .fetch and !@call(.always_inline, fetchWord, .{self})) return;
-        while (self.state != .fetch) {
+        while (self.state == .execution) {
             @call(.always_inline, execute, .{ self, Instruction.decode(self.i).getSlot(self.slot) });
             if (self.suspended) return;
         }
     }
 
+    /// whether the last step left a `unext` loop for the next to go on with
+    pub fn paused(self: *const Computer) bool {
+        return self.state == .paused;
+    }
+
     /// Fetches the next instruction word, if the node is between words, or
-    /// otherwise executes the opcode in the current slot, which for `unext`
-    /// is one pass of its loop. Running the rest of the word with `step`
-    /// afterwards does the same as `step` would have done alone.
+    /// otherwise executes the opcode in the current slot. For `unext` that
+    /// is one pass of its loop, or of a loop of nothing else, every pass
+    /// but the last, which leaves the loop. Running the rest of the word
+    /// with `step` afterwards does the same as `step` would have done alone.
     pub fn stepSlot(self: *Computer) void {
         self.suspended = false;
         self.transfers = .{};
+        self.unext_left = unext_passes;
+        if (self.state == .paused) self.state = .execution;
         if (self.state == .fetch) {
             _ = self.fetchWord();
         } else self.execute(Instruction.decode(self.i).getSlot(self.slot));
@@ -426,9 +450,19 @@ pub const Computer = struct {
             },
             0x04 => {
                 if (self.state == .unext) {
-                    self.state = .execution;
+                    // A unext in slot 0 is its whole loop, a delay, as
+                    // `for unext` is. The passes left only count R down,
+                    // so they are taken at once, in the time they take.
+                    if (self.slot == 0) {
+                        self.time += @as(u64, @as(u18, @bitCast(self.return_stack.t))) * 2400;
+                        self.return_stack.t = 0;
+                    }
                     self.slot = 0;
                     self.unsettled = false;
+                    // any other loop is left to the next step after
+                    // `unext_passes` passes, as it may never end
+                    self.unext_left -= 1;
+                    self.state = if (self.unext_left == 0) .paused else .execution;
                 } else self.advance(false);
                 break :time 2400;
             },
@@ -1080,6 +1114,79 @@ test "unext loops R+1 times then continues with the next slot" {
     try expectEqual(8, computer.data_stack.s);
     try expectEqual(0, computer.return_stack.t);
     try expectEqual(1, computer.p.address.local);
+}
+
+test "a step leaves a long unext loop for the next step to go on with" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.data_stack.push(0);
+    computer.mem[0] = Instruction.encode(.{ .slot_0 = .@"@p", .slot_1 = .@">r", .slot_2 = .@".", .slot_3 = 7 });
+    computer.mem[1] = 3 * Computer.unext_passes;
+    computer.mem[2] = Instruction.encode(.{ .slot_0 = .@"2*", .slot_1 = .unext, .slot_2 = .inv, .slot_3 = 7 });
+    var whole = computer;
+
+    computer.step();
+    // three steps of passes, and one for the last pass and the rest
+    for (0..3) |k| {
+        computer.step();
+        try expect(computer.paused());
+        try expect(!computer.suspended);
+        try expectEqual(0, computer.slot);
+        try expectEqual(@as(Word, @intCast((2 - k) * Computer.unext_passes)), computer.return_stack.t);
+    }
+    computer.step();
+    try expect(!computer.paused());
+    try expectEqual(-1, computer.data_stack.t);
+    try expectEqual(3, computer.p.address.local);
+
+    // which takes the time, and leaves the node, as its slots one by one
+    whole.step();
+    whole.stepSlot();
+    while (whole.state != .fetch) whole.stepSlot();
+    try expectEqual(whole.data_stack, computer.data_stack);
+    try expectEqual(whole.return_stack, computer.return_stack);
+    try expectEqual(whole.p, computer.p);
+    try expectEqual(whole.time, computer.time);
+}
+
+test "a unext loop of nothing else is taken at once, in the time its passes take" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.return_stack.push(0x99);
+    // more passes than a step runs of any other loop
+    computer.return_stack.push(100_000);
+    computer.mem[0] = Instruction.encode(.{ .slot_0 = .unext, .slot_1 = .dup, .slot_2 = .@".", .slot_3 = 7 });
+    var slots = computer;
+
+    computer.step();
+    try expect(!computer.paused());
+    try expectEqual(0x99, computer.return_stack.t);
+    // each pass and the last unext, dup, two nops, and the next word's fetch
+    try expectEqual(100_001 * 2400 + 3 * 1400 + 1200, computer.time);
+
+    // and a slot step takes them all too
+    slots.stepSlot();
+    slots.stepSlot();
+    try expectEqual(0, slots.return_stack.t);
+    try expectEqual(0, slots.slot);
+    try expectEqual(100_000 * 2400, slots.time);
+}
+
+test "a step ends in a unext loop that never does" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.data_stack.push(5);
+    // dup >r unext, which sets R again each pass
+    computer.mem[0] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@">r", .slot_2 = .unext, .slot_3 = 7 });
+    for (0..3) |_| {
+        computer.step();
+        try expect(computer.paused());
+    }
+    try expectEqual(3 * Computer.unext_passes * (1400 + 1400 + 2400), computer.time);
+    // and a slot step goes on from where it paused
+    computer.stepSlot();
+    try expect(!computer.paused());
+    try expectEqual(1, computer.slot);
 }
 
 test "stepSlot fetches, then runs one opcode, or one pass of unext" {
