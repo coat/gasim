@@ -191,7 +191,10 @@ fn setLoadsText(loads: []const u32) void {
 
 /// whether a file has blocks to choose which to load
 fn hasBlocks(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".blk") or std.mem.endsWith(u8, path, ".cf");
+    return switch (gasim.Sim.Kind.ofPath(path)) {
+        .blk, .cf => true,
+        .ga, .af => false,
+    };
 }
 
 /// Asks where a file is, and opens it

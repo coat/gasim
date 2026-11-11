@@ -137,7 +137,7 @@ pub fn build(b: *std.Build) void {
     const test_web_step = b.step("test-web", "Run the web version's tests, with Deno");
     test_web_step.dependOn(&test_web.step);
 
-    // the GUI: the web version's Sim drawn with dvui in an SDL3 window,
+    // the GUI: the core's Sim drawn with dvui in an SDL3 window,
     // installed beside gasim with -Dgui. Only an option can say so, not a
     // step, as dvui is fetched as the build is configured, before the steps
     // asked for are known. On Linux it links the system's SDL3, as SDL3 built from source
@@ -171,10 +171,6 @@ pub fn build(b: *std.Build) void {
             };
         const gui_imports: []const std.Build.Module.Import = &.{
             .{ .name = "gasim", .module = mod },
-            .{ .name = "Sim", .module = b.createModule(.{
-                .root_source_file = b.path("src/web/Sim.zig"),
-                .imports = &.{.{ .name = "gasim", .module = mod }},
-            }) },
             .{ .name = "dvui", .module = dvui.module("dvui_sdl3") },
             .{ .name = "build_options", .module = gui_options.createModule() },
             .{ .name = "icons", .module = b.createModule(.{ .root_source_file = icons.add("icons.zig", icons_zig) }) },
@@ -327,21 +323,7 @@ pub fn build(b: *std.Build) void {
 
     const run_example_tests = b.addRunArtifact(example_tests);
 
-    // the web version's Sim, natively
-    const web_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/web/Sim.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "gasim", .module = mod }},
-        }),
-        .use_llvm = if (coverage or fuzz) true else null,
-    });
-
-    const run_web_tests = b.addRunArtifact(web_tests);
-
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_web_tests.step);
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
@@ -358,7 +340,6 @@ pub fn build(b: *std.Build) void {
         var run_test_steps: std.ArrayList(*std.Build.Step.Run) = .empty;
         run_test_steps.append(b.allocator, run_mod_tests) catch @panic("OOM");
         run_test_steps.append(b.allocator, run_exe_tests) catch @panic("OOM");
-        run_test_steps.append(b.allocator, run_web_tests) catch @panic("OOM");
 
         const kcov_bin = b.findProgram(.{ .names = &.{"kcov"} }) orelse "kcov";
 
