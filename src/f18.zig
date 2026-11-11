@@ -284,6 +284,15 @@ pub const Computer = struct {
             /// which the node took one word and lost the other (DB001 3.3.1)
             lost_word,
 
+            /// a few words for a list, where `text` is too long
+            pub fn short(self: Kind) []const u8 {
+                return switch (self) {
+                    .unsettled_add => "add with no . before it",
+                    .rom_write => "write to ROM",
+                    .lost_word => "word lost reading ports",
+                };
+            }
+
             pub fn text(self: Kind) []const u8 {
                 return switch (self) {
                     .unsettled_add => "added straight after an opcode that changed S, T or P9, which needs a . between (DB001 2.3.3)",
