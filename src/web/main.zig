@@ -4,7 +4,7 @@
 //! the length a call returns. No libc, and no imports besides jsLog.
 const std = @import("std");
 const gasim = @import("gasim");
-const Sim = @import("Sim.zig");
+const Sim = gasim.Sim;
 const Editor = gasim.Editor;
 
 const gpa = std.heap.wasm_allocator;

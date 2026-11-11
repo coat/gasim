@@ -1,4 +1,4 @@
-//! The GUI: the web version's Sim, drawn with dvui in an SDL3 window, as
+//! The GUI: the core's `Sim`, drawn with dvui in an SDL3 window, as
 //! `ui.zig` lays it out.
 //!
 //!     gasim-gui [--rom <path>] [<file>]

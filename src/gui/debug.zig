@@ -242,20 +242,6 @@ fn watch() void {
 
 // ---------- the history ----------
 
-/// what each kind of moment was saved before
-fn cause(c: Sim.Cause) []const u8 {
-    return switch (c) {
-        .step => "a step",
-        .round => "a round of steps",
-        .node => "a step of one node",
-        .run => "a run",
-        .line => "a line at the prompt",
-        .reset => "starting again",
-        .compile => "compiling a block",
-        .slot => "a step of one opcode",
-    };
-}
-
 pub fn historyHead() void {
     dvui.label(@src(), "{d} of {d} kept", .{ ui.sim.historyLen(), Sim.history_capacity }, .{ .color_text = .{ .color = dock.muted() }, .gravity_y = 0.5 });
 }
@@ -273,7 +259,7 @@ pub fn history() void {
     while (n > 0) {
         n -= 1;
         var label: [40]u8 = undefined;
-        const text = std.fmt.bufPrint(&label, "Before {s}", .{cause(moments[n].cause)}) catch unreachable;
+        const text = std.fmt.bufPrint(&label, "Before {s}", .{moments[n].cause.text()}) catch unreachable;
         moment(@src(), n + 1, text, moments[n].steps, n);
     }
 }
@@ -298,7 +284,7 @@ const expectEqual = std.testing.expectEqual;
 
 const dvui = @import("dvui");
 const gasim = @import("gasim");
-const Sim = @import("Sim");
+const Sim = gasim.Sim;
 const dock = @import("dock.zig");
 const ui = @import("ui.zig");
 

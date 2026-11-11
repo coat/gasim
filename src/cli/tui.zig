@@ -92,29 +92,7 @@ const Stacked = struct { panel: Panel, top: u16, height: u16 };
 /// steps and runs to go back to, or the hazards (see `Chip.hazards`)
 const Debug = enum { trace, breakpoints, history, hazards };
 
-/// what the chip was saved before, in the history
-const Cause = enum {
-    step,
-    round,
-    node,
-    slot,
-    run,
-    /// a line typed into the aforth panel
-    line,
-    compile,
-
-    fn text(self: Cause) []const u8 {
-        return switch (self) {
-            .step => "a step",
-            .round => "a round of steps",
-            .node => "a step of one node",
-            .slot => "a step of one opcode",
-            .run => "a run",
-            .line => "a line at the prompt",
-            .compile => "compiling a block",
-        };
-    }
-};
+const Cause = gasim.History.Cause;
 
 /// which tiles the map chooses: tiles of registers where they fit, and
 /// numbers otherwise; numbers; or tiles of registers, scrolling where
@@ -476,18 +454,8 @@ const Tui = struct {
     /// the chip as it started, which compiling colorForth starts it from
     /// again
     start: ?Chip.Snapshot = null,
-    /// the chip before each step or run, to go back to, allocated the first
-    /// time each is needed. The `history_len` kept start from the oldest at
-    /// `history_start`, and the oldest is dropped to make room. The one after
-    /// them is saved before each step or run, and kept once the chip changes.
-    history: []?Chip.Snapshot = &.{},
-    history_start: usize = 0,
-    history_len: usize = 0,
-    /// whether the snapshot after those kept was saved before the last step
-    /// or run
-    pending: bool = false,
-    /// what each snapshot in `history` was saved before
-    causes: [history_capacity + 1]Cause = undefined,
+    /// the chip before each step or run, to go back to
+    history: gasim.History = .{},
 
     debug: Debug = .trace,
     /// the row of the breakpoints or the history chosen, and the first in
@@ -532,7 +500,7 @@ const Tui = struct {
     fn deinit(self: *Tui) void {
         if (self.compiled_map) |*map| map.deinit(self.gpa);
         if (self.start) |*s| s.deinit(self.gpa);
-        for (self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(self.gpa);
+        self.history.deinit(self.gpa);
         if (self.trace) |t| {
             self.chip.trace = null;
             self.gpa.free(t.writer.buffer);
@@ -1029,7 +997,7 @@ const Tui = struct {
         return switch (self.debug) {
             .trace => 0,
             .breakpoints => self.chip.breakpoints.len + self.chip.watches.len,
-            .history => self.history_len + 1,
+            .history => self.history.len + 1,
             .hazards => self.chip.hazards.len,
         };
     }
@@ -1057,7 +1025,7 @@ const Tui = struct {
                     self.say("pause with space to go back");
                     return;
                 }
-                self.backTo(self.history_len - cursor);
+                self.backTo(self.history.len - cursor);
                 self.debug_cursor = 0;
             },
             .hazards => {
@@ -2084,62 +2052,31 @@ const Tui = struct {
     /// saves the chip before the user steps or runs it, to go back to if it
     /// changes
     fn remember(self: *Tui, cause: Cause) void {
-        // one is saved before it is kept
-        if (self.history.len < 2) return;
-        self.keepPending();
-        const index = self.historyIndex(self.history_len);
-        self.causes[index] = cause;
-        const snapshot = &self.history[index];
-        if (snapshot.* == null) snapshot.* = Chip.Snapshot.init(self.gpa, self.chip.layout) catch {
-            self.fail("there is no memory left to go back with");
-            return;
-        };
-        self.chip.save(&snapshot.*.?);
-        self.pending = true;
-    }
-
-    /// keeps the snapshot saved before the last step or run, unless nothing
-    /// has changed since
-    fn keepPending(self: *Tui) void {
-        if (!self.pending) return;
-        self.pending = false;
-        if (self.chip.matches(&self.history[self.historyIndex(self.history_len)].?)) return;
-        if (self.history_len == self.history.len - 1) {
-            self.history_start = self.historyIndex(1);
-        } else self.history_len += 1;
+        self.history.remember(self.gpa, self.chip, cause) catch self.fail("there is no memory left to go back with");
     }
 
     /// keeps the snapshot saved before the last step or run, for the
-    /// history to show, unless running: the chip may not have changed yet,
-    /// and keeping it then would drop it
+    /// history to show, unless running (see `History.keep`)
     fn keepPaused(self: *Tui) void {
-        if (!self.running) self.keepPending();
+        if (!self.running) self.history.keep(self.chip);
     }
 
     /// goes back to before the last step or run
     fn back(self: *Tui) void {
-        self.keepPending();
-        if (self.history_len == 0) {
+        self.history.keep(self.chip);
+        if (self.history.len == 0) {
             self.say("nothing to go back to");
             return;
         }
-        self.backTo(self.history_len - 1);
+        self.backTo(self.history.len - 1);
     }
 
     /// goes back to before the `n`th step or run kept, the oldest 0,
     /// forgetting those after it
     fn backTo(self: *Tui, n: usize) void {
-        self.keepPending();
-        if (n >= self.history_len) return;
-        self.history_len = n;
-        self.chip.restore(&self.history[self.historyIndex(n)].?);
+        if (!self.history.backTo(self.chip, n)) return;
         self.memory_scroll = null;
         self.say(self.printLasting("back to {d} steps", .{self.chip.steps}));
-    }
-
-    /// the index in `history` of the snapshot `i` from the oldest
-    fn historyIndex(self: Tui, i: usize) usize {
-        return (self.history_start + i) % self.history.len;
     }
 
     /// sets or clears a watch on the port of the selected node a key names
@@ -2653,7 +2590,7 @@ const Tui = struct {
         return switch (self.debug) {
             .trace => if (self.chip.trace == null) "5 trace" else "5 trace, tracing",
             .breakpoints => self.print("5 breakpoints {d}, watches {d}", .{ self.chip.breakpoints.len, self.chip.watches.len }),
-            .history => self.print("5 history {d} of {d}", .{ self.history_len, self.history.len -| 1 }),
+            .history => self.print("5 history {d} of {d}", .{ self.history.len, self.history.capacity() }),
             .hazards => self.print("5 hazards {d}, {d} times{s}", .{ self.chip.hazards.len, self.chip.hazard_count, if (self.chip.strict) ", stopping at them" else "" }),
         };
     }
@@ -2687,11 +2624,11 @@ const Tui = struct {
             },
             .history => {
                 self.keepPaused();
-                const rows = self.frame.allocator().alloc([]const u8, self.history_len + 1) catch return;
+                const rows = self.frame.allocator().alloc([]const u8, self.history.len + 1) catch return;
                 rows[0] = self.print("{s:<27}  {d} steps", .{ "now", self.chip.steps });
                 for (rows[1..], 1..) |*row, k| {
-                    const index = self.historyIndex(self.history_len - k);
-                    row.* = self.print("before {s:<20}  {d} steps", .{ self.causes[index].text(), self.history[index].?.steps });
+                    const moment = self.history.moment(self.history.len - k);
+                    row.* = self.print("before {s:<20}  {d} steps", .{ moment.cause.text(), moment.steps });
                 }
                 self.drawList(win, rows, "");
             },
@@ -3282,11 +3219,9 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
     vx.caps.sgr_pixels = false;
     try vx.setMouseMode(tty.writer(), true);
 
-    // and one more, saved before each step or run
-    var history: [history_capacity + 1]?Chip.Snapshot = @splat(null);
     var tui: Tui = .init(io, gpa, chip, options);
     defer tui.deinit();
-    tui.history = &history;
+    tui.history = try .init(gpa, history_capacity);
     tui.start = try .init(gpa, chip.layout);
     chip.save(&tui.start.?);
     while (true) {
@@ -3385,8 +3320,6 @@ const TestTui = struct {
     output: Io.Writer = undefined,
     console: Console = undefined,
     screen: vaxis.Screen = undefined,
-    /// keeping two
-    history: [3]?Chip.Snapshot = @splat(null),
     source_map: SourceMap = undefined,
     tui: Tui = undefined,
 
@@ -3411,7 +3344,8 @@ const TestTui = struct {
         try self.chip.attachConsole(&self.console, 0, .up);
         self.screen = try .init(gpa, .{ .rows = 30, .cols = 120, .x_pixel = 0, .y_pixel = 0 });
         self.tui = .init(std.testing.io, gpa, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up, .source_map = &self.source_map });
-        self.tui.history = &self.history;
+        // keeping two
+        self.tui.history = try .init(gpa, 2);
     }
 
     fn deinit(self: *TestTui) void {
@@ -4468,7 +4402,7 @@ test "steps that change nothing are not gone back to" {
     try t.press('z');
     try expectEqualStrings("nothing to go back to", t.tui.message.?);
     // each saved over the one before, so only one was allocated
-    try expect(t.tui.history[0] != null and t.tui.history[1] == null);
+    try expect(t.tui.history.snapshots[0] != null and t.tui.history.snapshots[1] == null);
 }
 
 const gasim = @import("gasim");
@@ -4914,7 +4848,7 @@ test "the debug panel traces, lists breakpoints and watches, and goes back" {
     try t.press('j');
     try t.press(vaxis.Key.enter);
     try expectEqual(1, t.chip.steps);
-    try expectEqual(0, t.tui.history_len);
+    try expectEqual(0, t.tui.history.len);
 }
 
 test "hazards are told of, listed in the debug panel, and stop the chip if asked" {
