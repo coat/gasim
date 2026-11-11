@@ -62,5 +62,17 @@ The real ROM was read from a chip by Michael Schuldt. It is
 [mschuldt/ga144-sim](https://github.com/mschuldt/ga144-sim) at commit
 `de5974a`.
 
-Without the disk, the tests that need the ROM are skipped. The disk's
-blocks also seed the fuzz test of polyFORTH blocks.
+It also assembles GreenArrays' stock code from the disk, as `STOCK LOAD`
+does in arrayForth 3, and checks each bin of RAM against the one
+arrayForth 3's own assembler made. Those are in `sF/OBJ-AF3` in its
+distribution. gasim keeps only their SHA-256s, in `src/af3-bins.zon`, so
+the test needs the disk but not `OBJ-AF3`.
+
+To write the SHA-256s again from another `OBJ-AF3`:
+
+```bash
+zig build bin-digests -- ~/.wine/drive_c/GreenArrays/EVB002/sF/OBJ-AF3 > src/af3-bins.zon
+```
+
+Without the disk, the tests that need the ROM or the stock code are
+skipped. The disk's blocks also seed the fuzz test of polyFORTH blocks.

@@ -40,7 +40,8 @@ commands alone (see [The CLI without the TUI](#the-cli-without-the-tui)).
   words, every control word, `..` and `<sl`, listings.
 - **arrayForth 3** (`src/arrayforth.zig`): `.af` text and `.blk` block disks,
   bins, boot descriptors, host definitions and control flow, and the IDE's
-  target words acting on the chip directly. 105 RAM bins match `OBJ-AF3`. No
+  target words acting on the chip directly. Its stock code assembles to the
+  111 bins of code in arrayForth 3's own `OBJ-AF3`, which the tests check. No
   GreenArrays source is vendored. `gasim aforth` is its prompt, with line
   editing, and the TUI, GUI and web version have an aforth panel.
 - **colorForth** (`src/colorforth.zig`, `src/Editor.zig`): packed blocks and

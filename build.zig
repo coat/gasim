@@ -225,6 +225,20 @@ pub fn build(b: *std.Build) void {
     const serve_step = b.step("serve", "Build the web version and serve it on http://localhost:8080 (-- PORT for another)");
     serve_step.dependOn(&serve_cmd.step);
 
+    // the digests in src/af3-bins.zon, from arrayForth 3's own object file
+    const bins = b.addExecutable(.{
+        .name = "bins",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bins/main.zig"),
+            .target = b.graph.host,
+            .optimize = .safe,
+        }),
+    });
+    const bins_cmd = b.addRunArtifact(bins);
+    bins_cmd.addPassthruArgs();
+    const bins_step = b.step("bin-digests", "Write the digests of the bins in arrayForth 3's sF/OBJ-AF3 (-- <OBJ-AF3>), for src/af3-bins.zon");
+    bins_step.dependOn(&bins_cmd.step);
+
     // ga-tools (github.com/mschuldt/ga-tools) compiles the programs, and
     // node 708 boots from ROM, so neither CI nor `test` runs this
     const ga = b.option([]const u8, "ga", "ga-tools' ga command, for the ga-tools step (default: ga on PATH)") orelse
