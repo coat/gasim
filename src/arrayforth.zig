@@ -3555,7 +3555,7 @@ fn inRam(address: i32, len: i32) bool {
 /// The linear number of a node in ccyyxx form, counting the nodes of chip
 /// cc after those of the chips before it, as arrayForth 3 numbers bins, or
 /// null if it is not one of the four chips' nodes
-fn nnToBin(nn: u32) ?i32 {
+pub fn nnToBin(nn: u32) ?i32 {
     const chip = nn / 10000;
     const y = nn / 100 % 100;
     const x = nn % 100;
