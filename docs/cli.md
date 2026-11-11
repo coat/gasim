@@ -186,7 +186,7 @@ A spec is a ZON list of cases. Each case has a `.program`, and can have:
 - `.args`, for `run`
 - `.input`
 - `.max_steps`
-- `.stop`, such as `.breakpoint`
+- `.stop`, such as `.breakpoint`, or `.hazard` with `--strict` in `.args`
 - `.output`
 - `.nodes`: each with a `.node` (as a string), the registers `.p` `.a` `.b`
   `.io` `.t` `.s` `.r` it should leave, and `.ram`, a list of `.address` and

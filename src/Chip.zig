@@ -62,6 +62,13 @@ step_limit: u64 = std.math.maxInt(u64),
 time_limit: u64 = std.math.maxInt(u64),
 /// that `run` stopped at a limit
 limited: bool = false,
+/// What nodes did that a real chip may not do as gasim does: the first few
+/// places that differ, and how many times in all. When a step has several,
+/// only the place of its first is kept.
+hazards: SmallSet(Hazard, max_hazards) = .{},
+hazard_count: u64 = 0,
+/// that a hazard stops running, as a breakpoint does
+strict: bool = false,
 
 /// the console, and the index of the node it is attached to
 console: ?struct { device: *Console, index: u16 } = null,
@@ -98,6 +105,7 @@ const Chip = @This();
 pub const max_breakpoints = 32;
 pub const max_watches = 32;
 pub const max_serdes = 4;
+pub const max_hazards = 16;
 
 pub const max_resets = 4;
 pub const max_uarts = 4;
@@ -220,16 +228,32 @@ pub const Watch = struct {
     write: bool,
 };
 
+/// A hazard, and the node, by index, that it is of
+pub const Hazard = struct {
+    index: u16,
+    hazard: Computer.Hazard,
+
+    /// formats it, such as `node 001 at 004, slot 2, added straight after
+    /// an opcode that changed S, T or P9, which needs a . between (DB001
+    /// 2.3.3)`
+    pub fn describe(self: Hazard, layout: Layout) Stop.Description {
+        return .{ .stop = .{ .hazard = self }, .layout = layout };
+    }
+};
+
 /// why running stopped
 pub const Stop = union(enum) {
     breakpoint: Breakpoint,
     /// with the value that was read or written
     watch: struct { watch: Watch, value: Word },
+    /// with `strict`
+    hazard: Hazard,
 
     pub fn index(self: Stop) u16 {
         return switch (self) {
             .breakpoint => |b| b.index,
             .watch => |w| w.watch.index,
+            .hazard => |h| h.index,
         };
     }
 
@@ -254,6 +278,7 @@ pub const Stop = union(enum) {
                     if (w.watch.write) "to" else "from",
                     w.watch.direction,
                 }),
+                .hazard => |h| try writer.print("node {f} at {x:0>3}, slot {d}, {s}", .{ nodeName(number), h.hazard.address, h.hazard.slot, h.hazard.kind.text() }),
             }
         }
     };
@@ -315,6 +340,8 @@ pub const Snapshot = struct {
     serdes: SerdesLinks = .{},
     resets: ResetLines = .{},
     held: u8 = 0,
+    hazards: SmallSet(Hazard, max_hazards) = .{},
+    hazard_count: u64 = 0,
 
     /// Allocates a snapshot of a chip with `layout`
     pub fn init(gpa: Allocator, layout: Layout) Allocator.Error!Snapshot {
@@ -646,6 +673,8 @@ pub fn save(self: Chip, snapshot: *Snapshot) void {
     snapshot.serdes = self.serdes.*;
     snapshot.resets = self.resets.*;
     snapshot.held = self.held;
+    snapshot.hazards = self.hazards;
+    snapshot.hazard_count = self.hazard_count;
     if (self.console) |console| snapshot.console_port = console.device.port;
     if (self.feeder) |feeder| {
         snapshot.feeder_port = feeder.device.port;
@@ -667,6 +696,8 @@ pub fn restore(self: *Chip, snapshot: *const Snapshot) void {
     self.serdes.* = snapshot.serdes;
     self.resets.* = snapshot.resets;
     self.held = snapshot.held;
+    self.hazards = snapshot.hazards;
+    self.hazard_count = snapshot.hazard_count;
     // the pins' histories are of the future the chip went back from
     self.wiring.reset();
     if (self.console) |console| console.device.port = snapshot.console_port;
@@ -806,7 +837,7 @@ pub fn execute(self: *Chip, i: u16, word: Word) error{NotWaitingForCode}!void {
     it = ports.iterator();
     while (it.next()) |direction| {
         const link = n.ports[@backingInt(direction)];
-        if (link.port) |p| p.cancelRead(link.side);
+        if (link.port) |p| _ = p.cancelRead(link.side);
     }
     n.return_stack.push(n.p.toWord());
     n.i = word;
@@ -1259,6 +1290,8 @@ fn stepQueued(self: *Chip, i: u16, comptime extent: Extent) void {
     }
     self.steps += 1;
     self.started = true;
+    // before a node that resets its own chip is as after reset
+    const hazard: ?Hazard = if (n.hazards != 0) self.noteHazard(i) else null;
     if (wired) {
         self.wiring.tell(i);
         self.wakeOnNets(i);
@@ -1283,12 +1316,28 @@ fn stepQueued(self: *Chip, i: u16, comptime extent: Extent) void {
         };
     };
     if (self.hit == null and self.breakpoints.len + self.watches.len > 0) self.hit = self.stopAt(i);
+    // a breakpoint or watch in the same step is why the run stopped
+    if (self.strict and self.hit == null) if (hazard) |h| {
+        self.hit = .{ .hazard = h };
+    };
 
     for (n.ports, before, 0..) |link, state, d| {
         const p = link.port orelse continue;
         if (std.meta.eql(state, p.state)) continue;
         self.portChanged(i, @fromBackingInt(@intCast(d)), state);
     }
+}
+
+/// Takes the hazards of node `i`'s step, counting them, and keeping the
+/// first if it differs from those kept and there is room. Returns the first.
+noinline fn noteHazard(self: *Chip, i: u16) Hazard {
+    const n = &self.nodes[i];
+    const noted: Hazard = .{ .index = i, .hazard = n.hazard.? };
+    self.hazard_count += n.hazards;
+    n.hazard = null;
+    n.hazards = 0;
+    self.hazards.insert(noted) catch {};
+    return noted;
 }
 
 /// Acts on the changes of chips' RESET- pins: a chip is held in reset from
@@ -2699,6 +2748,21 @@ test "stops at watched transfers" {
     try expectEqualStrings("node 000 reached 03f", try std.fmt.bufPrint(&buffer, "{f}", .{(Stop{ .breakpoint = .init(0, 0x3f) }).describe(chip.layout)}));
 }
 
+test "going back to a snapshot forgets the hazards after it" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble("1 dup + up b! @b", &diagnostic));
+    var snapshot: Snapshot = try .init(std.testing.allocator, chip.layout);
+    defer snapshot.deinit(std.testing.allocator);
+    chip.save(&snapshot);
+    try chip.run();
+    try expectEqual(1, chip.hazard_count);
+    chip.restore(&snapshot);
+    try expectEqual(0, chip.hazard_count);
+    try expectEqual(0, chip.hazards.len);
+}
+
 test "goes back to a snapshot" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 2 });
     defer chip.deinit(std.testing.allocator);
@@ -2879,6 +2943,57 @@ test "words are only refused for code delivered to the node" {
     try expect(before == .reading);
     try expectError(error.NotWaitingForCode, chip.execute(i, 0x15555));
     try expectEqual(before, left.port.?.state);
+}
+
+test "hazards are kept, each place once, and stop a strict run" {
+    const source =
+        \\ node 000
+        \\ : main 1 3 for dup + next up b! @b
+    ;
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var diagnostic: assembler.Diagnostic = .{};
+    try chip.load(try assembler.assemble(source, &diagnostic));
+    try chip.run();
+    try expectEqual(4, chip.hazard_count);
+    try expectEqual(1, chip.hazards.len);
+    try expectEqual(.unsettled_add, chip.hazards.items()[0].hazard.kind);
+    try expectEqual(null, chip.hit);
+
+    var strict: Chip = try .init(std.testing.allocator, .ga144);
+    defer strict.deinit(std.testing.allocator);
+    strict.strict = true;
+    try strict.load(try assembler.assemble(source, &diagnostic));
+    try strict.run();
+    try expectEqual(1, strict.hazard_count);
+    try expectEqual(0, strict.hit.?.hazard.index);
+
+    // each pass of a unext loop counts, though it is one step
+    var loop: Chip = try .init(std.testing.allocator, .ga144);
+    defer loop.deinit(std.testing.allocator);
+    try loop.load(try assembler.assemble("1 9 for dup + unext up b! @b", &diagnostic));
+    try loop.run();
+    try expectEqual(10, loop.hazard_count);
+    try expectEqual(1, loop.hazards.len);
+    var buffer: [160]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, "{f}", .{strict.hit.?.describe(strict.layout)});
+    try expect(std.mem.startsWith(u8, text, "node 000 at 003, slot 1, added straight after"));
+}
+
+test "a word lost to a read of several ports is a hazard" {
+    var chip: Chip = try .init(std.testing.allocator, .ga144);
+    defer chip.deinit(std.testing.allocator);
+    var programs: [3]assembler.Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    // 000 and 002 both write to 001, which reads either
+    for (try assembler.assembleNodes(
+        \\ node 000 : main right b! 65 !b left b! @b
+        \\ node 002 : main left b! 97 !b right b! @b
+        \\ node 001 : main r-l- a! @ @ down b! @b
+    , &programs, &diagnostic)) |program| try chip.load(program);
+    try chip.run();
+    try expectEqual(1, chip.hazard_count);
+    try expectEqual(Hazard{ .index = 1, .hazard = .{ .kind = .lost_word, .address = 0, .slot = 2 } }, chip.hazards.items()[0]);
 }
 
 test "stops when interrupted" {

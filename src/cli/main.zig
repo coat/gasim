@@ -495,6 +495,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
 
     var chip: Chip = try .initChips(init.gpa, spec, layout.chips);
     defer chip.deinit(init.gpa);
+    chip.strict = o.strict;
 
     // a snapshot's nodes hold theirs
     const roms = if (loaded != null and path == null) null else readRom(io, arena, init.environ_map, rom_path);
@@ -558,6 +559,11 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         first.noted,
         first.found,
         assembled.feedback_differs - 1,
+    });
+    for (programs) |program| if (program.unsettled_add) |add| std.log.warn("{f}: '{s}' runs straight after an opcode that changes S or T, which on a real chip needs a . between (DB001 2.3.3){s}", .{
+        Where{ .path = source_path, .line = add.line, .kind = if (blocks) .blocks else if (colorforth) .colorforth else .text },
+        add.token,
+        if (program.unsettled_adds > 1) ", as do others in its node" else "",
     });
     if (assembled.unresolved_then) |line| std.log.warn("{f}: then has nothing to resolve, which arrayForth 2 went past", .{
         Where{ .path = source_path, .line = line, .kind = .colorforth },
@@ -1024,6 +1030,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     const stop: report.Stop = if (chip.hit) |hit| switch (hit) {
         .breakpoint => .breakpoint,
         .watch => .watch,
+        .hazard => .hazard,
     } else if (chip.limited) .limit else if (interruptible.?.interrupted.load(.monotonic)) .interrupted else if (command == .step and !stepped.settled) .step else .settled;
     // after what was traced up to it
     stderr_file_writer.interface.flush() catch {};
@@ -1058,6 +1065,12 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
             try jw.objectField("waiting");
             try report.waiting(&jw, &chip);
         }
+        if (chip.hazard_count > 0) {
+            try jw.objectField("hazards");
+            try report.hazards(&jw, &chip);
+            try jw.objectField("hazard_count");
+            try jw.write(chip.hazard_count);
+        }
         if (o.show != .none) {
             try jw.objectField("nodes");
             try jw.beginArray();
@@ -1087,6 +1100,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         }
     }
     if (chip.wiring.contention) |c| logContention(chip, c);
+    logHazards(&chip);
     if (stop == .settled) {
         if (uart_node) |node| {
             if (!uart.used) {
@@ -1345,6 +1359,22 @@ fn logNode(chip: *const Chip, i: u16) void {
     report.nodeText(&text, chip, i) catch unreachable;
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, text.buffered(), "\n"), '\n');
     while (lines.next()) |line| std.log.info("{s}", .{line});
+}
+
+/// Warns of what nodes did that a real chip may not do as gasim does, each
+/// place once, and says how many times in all if that is more. The one the
+/// run stopped at with --strict is said already, as why it stopped.
+fn logHazards(chip: *const Chip) void {
+    const stopped_at: ?Chip.Hazard = if (chip.hit) |hit| switch (hit) {
+        .hazard => |h| h,
+        else => null,
+    } else null;
+    for (chip.hazards.items()) |h| {
+        if (stopped_at) |s| if (std.meta.eql(s, h)) continue;
+        std.log.warn("{f}", .{h.describe(chip.layout)});
+    }
+    if (stopped_at == null and chip.hazard_count > chip.hazards.len)
+        std.log.warn("{d} times in all, which a real chip may not do as gasim does (--strict stops at the first)", .{chip.hazard_count});
 }
 
 /// Warns of pins driven both ways on the same net, naming the nodes on it

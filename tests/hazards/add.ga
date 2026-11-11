@@ -1,0 +1,6 @@
+\ add.ga - an add straight after a literal, which is a hazard, for
+\ examples/test.zon to check that --strict stops at it
+
+: main
+    48 1 + up b! !b
+    left b! @b
