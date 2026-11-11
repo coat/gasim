@@ -103,6 +103,70 @@ test "the ROM source assembles to the chip's ROM" {
     try expect(isG144A12(assembled));
 }
 
+/// A bin of code that arrayForth 3's own assembler made, in its object
+/// file, by its number there and the SHA-256 of its RAM (`binDigest`)
+pub const Bin = struct { bin: u16, sha256: []const u8 };
+
+/// the bins with code in arrayForth 3's object file, `sF/OBJ-AF3`, which
+/// hold its stock code (see `tools/bins`)
+pub const af3_bins: []const Bin = @import("af3-bins.zon");
+
+/// SHA-256 of a bin's RAM as arrayForth 3's object file holds it: each
+/// word in 4 bytes, the highest first
+pub fn binDigest(ram: *const [64]f18.Word) [Sha256.digest_length]u8 {
+    var bytes: [64 * 4]u8 = undefined;
+    for (ram, 0..) |word, i| std.mem.writeInt(u32, bytes[i * 4 ..][0..4], @as(u18, @bitCast(word)), .big);
+    var hash: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(&bytes, &hash, .{});
+    return hash;
+}
+
+test "the stock code assembles to the bins arrayForth 3 made of it" {
+    const gpa = std.testing.allocator;
+    const disk = std.Io.Dir.cwd().readFileAlloc(std.testing.io, "rom/pFDISK.blk", gpa, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer gpa.free(disk);
+    const programs = try gpa.alloc(assembler.Program, 4 * 144);
+    defer gpa.free(programs);
+    const descriptors = try gpa.alloc(boot.Descriptor, 4 * 144);
+    defer gpa.free(descriptors);
+    var diagnostic: assembler.Diagnostic = .{};
+    // CONFIG, which STOCK needs, and STOCK, which assembles all of
+    // GreenArrays' code (DB013 4.1.2)
+    const assembled = arrayforth.assembleScript("1562 LOAD  2280 LOAD", disk, programs, descriptors, &diagnostic) catch |err| {
+        std.debug.print("{t} at block {d} line {d} '{s}'\n", .{ err, (diagnostic.line -| 1) / 16, (diagnostic.line -| 1) % 16, diagnostic.token });
+        return err;
+    };
+
+    // a bin with no code, all `call warm`, is not in the object file's list
+    const no_code = binDigest(&@as([64]f18.Word, @splat(0x134a9)));
+    var found: usize = 0;
+    for (assembled.programs) |program| {
+        const number = program.bin orelse program.node;
+        const bin = arrayforth.nnToBin(number).?;
+        const made = binDigest(&program.ram);
+        const expected = for (af3_bins) |b| {
+            if (b.bin == bin) break b;
+        } else {
+            expect(std.mem.eql(u8, &made, &no_code)) catch |err| {
+                std.debug.print("bin {d} has code, and arrayForth 3's has none\n", .{number});
+                return err;
+            };
+            continue;
+        };
+        found += 1;
+        var hex: [Sha256.digest_length * 2]u8 = undefined;
+        expectEqualStrings(expected.sha256, try std.fmt.bufPrint(&hex, "{x}", .{&made})) catch |err| {
+            std.debug.print("bin {d} differs from arrayForth 3's\n", .{number});
+            return err;
+        };
+    }
+    // and every bin arrayForth 3 made was assembled
+    try expectEqual(af3_bins.len, found);
+}
+
 test write {
     var roms: [2]ga144.NodeRom = .{
         .{ .node = 708, .words = @splat(1) },
@@ -120,10 +184,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 const expectEqualDeep = std.testing.expectEqualDeep;
+const expectEqualStrings = std.testing.expectEqualStrings;
 
 const arrayforth = @import("arrayforth.zig");
 const assembler = @import("assembler.zig");
+const boot = @import("boot.zig");
+const f18 = @import("f18.zig");
 const Chip = @import("Chip.zig");
 const ga144 = @import("ga144.zig");
 const Spec = @import("Spec.zig");
