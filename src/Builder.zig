@@ -47,6 +47,16 @@ instruction: Instruction = nops,
 /// the call that a following return turns into a jump
 last_call: ?Location = null,
 
+/// whether the opcode before the next, as the code runs on into it, changes
+/// S or T, so that an add there is a hazard on a real chip
+unsettled: bool = false,
+/// The first `+` or `+*` in RAM, in slot 0, 1 or 2, that runs straight
+/// after an opcode that changes S or T, which DB001 2.3.3 says needs a nop
+/// between, and how many there are. Only the code before it in the source
+/// is looked at, not jumps to it.
+unsettled_add: ?Diagnostic = null,
+unsettled_adds: u16 = 0,
+
 labels: [64]Label = undefined,
 label_count: u8 = 0,
 fixups: [64]Fixup = undefined,
@@ -109,8 +119,19 @@ pub fn emit(self: *Builder, opcode: Opcode) Error!void {
         self.finishWord(.nops);
         try self.startWord();
     }
+    // slot 3 is safe, as the next word's fetch gives the carry time, and
+    // ROM is as it is on a real chip
+    if (self.unsettled and (opcode == .@"+" or opcode == .@"+*") and self.slot != 3 and self.word.? < 64) {
+        if (self.unsettled_add == null) self.unsettled_add = .{ .line = self.line, .token = @tagName(opcode) };
+        self.unsettled_adds +|= 1;
+    }
     self.setSlot(opcode);
     self.slot += 1;
+    // every opcode here but the nop and those that end or loop in the word
+    self.unsettled = switch (opcode) {
+        .@".", .@";", .ex, .unext => false,
+        else => true,
+    };
     if (opcode == .@";" or opcode == .ex) {
         self.finishWord(.blank);
     } else if (self.slot == 4) self.finishWord(.nops);
@@ -164,6 +185,7 @@ pub fn literalLabel(self: *Builder, name: []const u8) Error!void {
 pub fn data(self: *Builder, value: Word) Error!void {
     self.last_call = null;
     self.finishWord(.nops);
+    self.unsettled = false;
     self.mem[try self.alloc()] = value;
 }
 
@@ -172,6 +194,7 @@ pub fn org(self: *Builder, destination: Word) Error!void {
     self.last_call = null;
     self.finishWord(.nops);
     if (destination < 0 or destination >= @as(Word, if (self.wrap) 0x100 else 64)) return error.NumberOutOfRange;
+    self.unsettled = false;
     self.here = @intCast(destination);
 }
 
@@ -307,7 +330,10 @@ const Fill = enum {
 /// stores the instruction word being packed
 fn finishWord(self: *Builder, fill: Fill) void {
     const word = self.word orelse return;
-    if (fill == .nops) while (self.slot < 4) : (self.slot += 1) self.setSlot(.@".");
+    if (fill == .nops) while (self.slot < 4) : (self.slot += 1) {
+        self.setSlot(.@".");
+        self.unsettled = false;
+    };
     self.mem[word] = self.instruction.encode();
     self.word = null;
 }
@@ -336,6 +362,8 @@ fn emitJump(self: *Builder, opcode: Opcode, destination: ?u10) Error!Location {
     const field = (destination orelse 0) & Instruction.destinationMask(jump.slot);
     self.mem[jump.address] = self.instruction.encodeJump(jump.slot, @intCast(field));
     self.word = null;
+    // a jump changes neither S nor T, wherever the code goes on from it
+    self.unsettled = false;
     return jump;
 }
 
@@ -415,6 +443,38 @@ test "calls to labels defined later must reach them" {
     try builder.define("near");
     try builder.finish(&diagnostic);
     try expectEqual(1, builder.mem[0] & Instruction.destinationMask(2));
+}
+
+test "an add straight after an opcode that changes S or T is noted" {
+    var builder: Builder = .{ .line = 3 };
+    try builder.literal(1);
+    try builder.emit(.@"+");
+    try expectEqual(3, builder.unsettled_add.?.line);
+    try expectEqualStrings("+", builder.unsettled_add.?.token);
+
+    // not after a nop, in slot 3, at the start of a loop or after a call
+    builder = .{};
+    try builder.literal(1);
+    try builder.emit(.@".");
+    try builder.emit(.@"+");
+    for (0..4) |_| try builder.emit(.dup);
+    try builder.emit(.@"+");
+    try builder.emit(.dup);
+    try builder.emit(.@">r");
+    const loop = try builder.begin();
+    try builder.emit(.@"+*");
+    try builder.unext(loop);
+    try builder.emit(.dup);
+    try builder.call(0xaa);
+    try builder.emit(.@"+");
+    try expectEqual(null, builder.unsettled_add);
+
+    // but in the next word, as its fetch may be too soon (DB001 2.4.2)
+    builder = .{};
+    for (0..4) |_| try builder.emit(.dup);
+    try builder.emit(.@"+*");
+    try builder.emit(.@"+*");
+    try expectEqual(2, builder.unsettled_adds);
 }
 
 const Diagnostic = @import("assembler.zig").Diagnostic;

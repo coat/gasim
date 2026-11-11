@@ -93,6 +93,7 @@ These options are for `run` and `step`.
 | `--hits <n>` | stops at the nth stop, going past the ones before it. The default is 1. |
 | `--show <nodes>` | when the run stops, prints the registers and stacks of these nodes, such as `105,708`, or `all` |
 | `--why` | when the run stops, says what each node is waiting for |
+| `--strict` | stops when a node does something a real chip may not do as gasim does. See [Hazards](#hazards). |
 | `--stats` | says how many steps the nodes took, how fast, and how much time passed on the chip |
 | `--trace` | prints a line to stderr for each word a node runs. With `--json`, each line is a JSON object. |
 | `--trace-node <node>` | traces only this node |
@@ -135,6 +136,47 @@ info: node 000 waiting to read up
 info: node 001 waiting to read right
 info: 142 nodes waiting on several ports, as after reset
 ```
+
+### Hazards
+
+A hazard is something a program does that GreenArrays' documentation says
+not to do. gasim does it anyway, in one fixed way, but a real chip may not
+do the same. gasim knows three:
+
+| Hazard | What the node did | Why it is a hazard |
+| --- | --- | --- |
+| `unsettled_add` | ran `+` or `+*` in slot 0, 1 or 2 straight after an opcode that changed S, T or P9 | the carry needs time to settle, so the sum may be wrong. Put a `.` before the add (DB001 2.3.3). |
+| `rom_write` | wrote to ROM | gasim ignores the write. A real node may hang (DB001 2.4.3). |
+| `lost_word` | read several ports at once after two neighbours had written to it | gasim takes one word and drops the other. Only one neighbour may write at a time (DB001 3.3.1). |
+
+When a run ends, gasim warns of each place a hazard happened, once, and says
+how many times they happened in all. It keeps the first 16 places. A step
+runs a whole instruction word, and when one step has several hazards, gasim
+counts them all but keeps only the place of the first.
+
+For example, line 2 of `add.ga` is `48 1 + up b! !b`:
+
+```
+$ gasim run add.ga
+warning: add.ga:2: '+' runs straight after an opcode that changes S or T, which on a real chip needs a . between (DB001 2.3.3)
+1
+warning: node 000 at 000, slot 2, added straight after an opcode that changed S, T or P9, which needs a . between (DB001 2.3.3)
+```
+
+The first warning is from the assembler. It finds adds that follow such an
+opcode in the source, without running the program. It does not follow
+jumps, so it can miss some. The second is from the run.
+
+The TUI lists them in its [debug panel](tui.md#the-debug-panel).
+
+With `--strict`, the run stops at the first hazard, as at a breakpoint, and
+exits with 7. Use it in scripts and tests to make sure a program has none.
+With `--json`, the object has a `hazards` list and a `hazard_count` when
+there are any.
+
+gasim does not check an add in slot 3, which DB001 allows, or an add in
+ROM, which is GreenArrays' own code. It still checks code in ROM for the
+other two hazards.
 
 ### Stats
 
@@ -198,4 +240,5 @@ slot and carry.
 | 4 | a watch |
 | 5 | a limit: `--max-steps` or `--max-time` |
 | 6 | `gasim test` found a difference |
+| 7 | a hazard, with `--strict` |
 | 128 + the signal | a signal stopped the run, such as 130 for SIGINT |

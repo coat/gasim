@@ -2572,6 +2572,8 @@ const Interpreter = struct {
             },
             .entry = .{ .io = false, .rom = false, .local = main },
             .rom_word = bin.rom_word,
+            .unsettled_add = bin.builder.unsettled_add,
+            .unsettled_adds = bin.builder.unsettled_adds,
         };
         // its own labels of code in RAM or in ROM assembled, not constants,
         // nor the ROM's labels arrayForth gives the node. A label of code

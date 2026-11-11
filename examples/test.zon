@@ -5,9 +5,15 @@
     } },
     .{ .name = "hello, stopped", .program = "hello.ga", .args = .{ "--break", "000:004" }, .stop = .breakpoint, .output = "" },
     .{ .name = "hello, in a few steps", .program = "hello.ga", .max_steps = 10, .stop = .limit },
+    // --strict stops at what a real chip may not do as gasim does
+    .{ .name = "an add with no nop before it, strict", .program = "../tests/hazards/add.ga", .args = .{"--strict"}, .stop = .hazard, .output = "" },
     .{ .program = "hello.cf", .output = "Hello, world!\n" },
     .{ .program = "hello.af", .output = "Hello, world!\n" },
     .{ .program = "echo.ga", .input = "echo me\n", .output = "echo me\n" },
     .{ .program = "upcase.ga", .input = "Hello\n", .output = "HELLO\n" },
+    // --strict stops at anything a real chip may not do as gasim does
+    .{ .name = "upcase, strict", .program = "upcase.ga", .args = .{"--strict"}, .input = "Hello\n", .output = "HELLO\n" },
+    .{ .name = "upcase in arrayForth 3, strict", .program = "upcase.af", .args = .{"--strict"}, .input = "Hello\n", .output = "HELLO\n" },
+    .{ .name = "upcase in colorForth, strict", .program = "upcase.cf", .args = .{"--strict"}, .input = "Hello\n", .output = "HELLO\n" },
     .{ .name = "hello through a UART", .program = "uart.ga", .args = .{ "--uart", "708" }, .output = "Hello, world!\n" },
 }

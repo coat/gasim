@@ -16,8 +16,9 @@ node 001
     right b!
     begin @b upcase !b again
 
-\ -if jumps to then unless T is negative, without dropping T
+\ -if jumps to then unless T is negative, without dropping T. A real chip
+\ needs the . before each +, to give the number before it time to settle.
 : upcase ( c - C )
-    dup -97 + -if drop ; then      \ below a
-    -26 + -if drop -32 + ; then    \ a to z
+    dup -97 . + -if drop ; then        \ below a
+    -26 . + -if drop -32 . + ; then    \ a to z
     drop ;

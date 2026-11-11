@@ -130,17 +130,20 @@ pub const Port = struct {
 
     /// Withdraws a read by `side`, used when another port of a multiport read
     /// completed instead. A value already delivered to `side` is discarded:
-    /// its writer has completed, and only one port's value is taken.
-    pub fn cancelRead(self: *Port, side: Side) void {
+    /// its writer has completed, and only one port's value is taken. Returns
+    /// whether it discarded one.
+    pub fn cancelRead(self: *Port, side: Side) bool {
         switch (self.state) {
             .reading => |r| if (r == side) {
                 self.state = .idle;
             },
             .delivered => |d| if (d.side == side) {
                 self.state = .idle;
+                return true;
             },
             else => {},
         }
+        return false;
     }
 
     /// Withdraws a pending write by `side`, used when another port of a
@@ -251,17 +254,17 @@ test "cancel" {
     var port: Port = .{};
 
     _ = port.read(.a);
-    port.cancelRead(.b);
+    try expect(!port.cancelRead(.b));
     try expect(port.otherReading(.b));
-    port.cancelRead(.a);
+    try expect(!port.cancelRead(.a));
     try expectEqual(Port.State.idle, port.state);
 
     // a value delivered to the canceled side is discarded
     _ = port.read(.a);
     try expect(port.write(.b, 1));
-    port.cancelRead(.b);
+    try expect(!port.cancelRead(.b));
     try expectEqual(.delivered, std.meta.activeTag(port.state));
-    port.cancelRead(.a);
+    try expect(port.cancelRead(.a));
     try expectEqual(Port.State.idle, port.state);
 
     _ = port.write(.a, 1);

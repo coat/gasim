@@ -59,6 +59,10 @@ pub const Program = struct {
     entry: Address,
     /// where the program first calls a ROM word, which needs the node's ROM
     rom_word: ?Diagnostic = null,
+    /// the first add that runs straight after an opcode that changes S or
+    /// T, and how many there are (see `Builder.unsettled_add`)
+    unsettled_add: ?Diagnostic = null,
+    unsettled_adds: u16 = 0,
     /// code assembled into ROM by arrayForth 3, as for checking a chip's ROM
     rom: ?Rom = null,
 
@@ -262,6 +266,8 @@ const Assembler = struct {
             .lines = self.builder.lines[0..64].*,
             .entry = .{ .io = false, .rom = false, .local = self.builder.labelAddress("main") orelse 0 },
             .rom_word = self.rom_word,
+            .unsettled_add = self.builder.unsettled_add,
+            .unsettled_adds = self.builder.unsettled_adds,
         };
         var labels: [64]struct { index: ?u7, name: []const u8 } = undefined;
         for (self.builder.labels[0..self.builder.label_count], labels[0..self.builder.label_count]) |label, *l| {

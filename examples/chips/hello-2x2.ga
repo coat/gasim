@@ -18,7 +18,7 @@ node 100
 \ a start bit, 8 data bits from the lowest, and a stop bit, inverted
 : send ( c )
     3 bit
-    7 for dup 1 and 1 xor 2 + bit 2/ next drop
+    7 for dup 1 and 1 xor 2 . + bit 2/ next drop
     2 bit ;
 
 : message 13 , "Hello, world!" 10 ,

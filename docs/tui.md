@@ -8,7 +8,7 @@ The terminal UI (TUI) shows the whole chip on one page, in panels:
 | console | `alt+2` | what nodes write to the console, and a prompt to type input |
 | node | `alt+3` | the selected node's registers, stacks and memory |
 | aforth | `alt+4` | an arrayForth 3 prompt |
-| debug | `alt+5` | the trace, breakpoints and watches, and history |
+| debug | `alt+5` | the trace, breakpoints and watches, history, and hazards |
 | colorForth editor | `alt+6` | the [colorForth editor](colorForth.md#the-editor) |
 
 Open it with `gasim <program>` or `gasim tui <program>`. To open a chip as a
@@ -199,7 +199,7 @@ selects another node.
 
 ## The debug panel
 
-The debug panel is hidden until you press `5`. It has three views. Use `h`
+The debug panel is hidden until you press `5`. It has four views. Use `h`
 and `l` to move between them.
 
 **Trace.** A line for each step that runs code, as `--trace` prints.
@@ -222,3 +222,14 @@ and `l` to move between them.
 
 **History.** The steps and runs you can undo, the latest first. Press
 `enter` to go back to before the one chosen. This forgets the ones after it.
+
+**Hazards.** The places where a node did something a real chip may not do
+the same way, such as `+` straight after an opcode that changed the stack.
+See [Hazards](options.md#hazards). The status bar also tells you the first
+time one happens in a new place. Choose one with `up` and `down`.
+
+| Key | What it does |
+| --- | --- |
+| `enter` | show its node, and the word in its memory |
+| `t` | stop the chip at the next hazard, or only list them. `gasim tui --strict` starts with stopping on. |
+| `c` | clear the list |

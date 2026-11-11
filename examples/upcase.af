@@ -11,11 +11,12 @@ ASM[ # 0 NODE ERS  # 0 org
 >BIN
 
 # 1 NODE ERS  # 0 org
-\ -if jumps to then unless T is negative, without dropping T
+\ -if jumps to then unless T is negative, without dropping T. A real chip
+\ needs the . before each +, to give the number before it time to settle.
 : upcase ( c - C)
-   dup -97. + -if drop ; then            \ below a
+   dup -97. . + -if drop ; then          \ below a
    \ in slot 2, -if could only reach a then in the same 8 words
-   -26. + # 2 <sl -if drop -32. + ; then \ a to z
+   -26. . + # 2 <sl -if drop -32. . + ; then \ a to z
    drop ;
 : main  right b!  begin @b upcase !b again
 >BIN ]ASM
