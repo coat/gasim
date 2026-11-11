@@ -11,5 +11,9 @@
     .{ .program = "hello.af", .output = "Hello, world!\n" },
     .{ .program = "echo.ga", .input = "echo me\n", .output = "echo me\n" },
     .{ .program = "upcase.ga", .input = "Hello\n", .output = "HELLO\n" },
+    // --strict stops at anything a real chip may not do as gasim does
+    .{ .name = "upcase, strict", .program = "upcase.ga", .args = .{"--strict"}, .input = "Hello\n", .output = "HELLO\n" },
+    .{ .name = "upcase in arrayForth 3, strict", .program = "upcase.af", .args = .{"--strict"}, .input = "Hello\n", .output = "HELLO\n" },
+    .{ .name = "upcase in colorForth, strict", .program = "upcase.cf", .args = .{"--strict"}, .input = "Hello\n", .output = "HELLO\n" },
     .{ .name = "hello through a UART", .program = "uart.ga", .args = .{ "--uart", "708" }, .output = "Hello, world!\n" },
 }

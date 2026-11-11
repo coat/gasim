@@ -4,6 +4,6 @@
 
 : main
     up b!
-    1 2499 for 1999 for dup 2* + 1 xor next next
+    1 2499 for 1999 for dup 2* . + 1 xor next next
     !b
     left b! @b             \ left faces off the west edge, so wait forever
