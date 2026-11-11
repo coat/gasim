@@ -88,9 +88,9 @@ const Border = union(enum) { columns, rows: usize };
 /// a panel in the left column, where it was last drawn
 const Stacked = struct { panel: Panel, top: u16, height: u16 };
 
-/// what the debug panel shows: the trace, the breakpoints and watches, or
-/// the steps and runs to go back to
-const Debug = enum { trace, breakpoints, history };
+/// what the debug panel shows: the trace, the breakpoints and watches, the
+/// steps and runs to go back to, or the hazards (see `Chip.hazards`)
+const Debug = enum { trace, breakpoints, history, hazards };
 
 /// what the chip was saved before, in the history
 const Cause = enum {
@@ -203,7 +203,7 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "esc", "done" },
     } },
     .{ "debug", &.{
-        .{ "h l, left right", "trace, breakpoints and watches, or history" },
+        .{ "h l, left right", "trace, breakpoints and watches, history, or hazards" },
         .{ "t", "trace or stop, keeping what was traced" },
         .{ "o", "trace only the selected node, or every node" },
         .{ "c", "clear the trace" },
@@ -212,6 +212,9 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "up down, j k", "choose a breakpoint, watch or step" },
         .{ "enter", "show the breakpoint or watch, or go back to the step" },
         .{ "x X", "remove the breakpoint or watch, or all of them" },
+        .{ "enter", "show where the hazard happened" },
+        .{ "t", "stop at hazards, or only list them" },
+        .{ "c", "clear the hazards" },
     } },
     .{ "colorForth editor", &.{
         .{ "h l, b w", "the word before or after" },
@@ -432,6 +435,11 @@ const Tui = struct {
     message: ?[]const u8 = null,
     message_kind: MessageKind = .info,
     message_buffer: [message_capacity]u8 = undefined,
+    /// how many of the chip's hazards a message has told of
+    hazards_told: usize = 0,
+    /// whether a message says why the chip stopped, since hazards were last
+    /// told of, so that one of a hazard does not take its place
+    stop_said: bool = false,
     /// the last failures, in a ring, for `:messages`
     log: [log_capacity][message_capacity]u8 = undefined,
     log_lengths: [log_capacity]u16 = undefined,
@@ -552,6 +560,11 @@ const Tui = struct {
     fn fail(self: *Tui, text: []const u8) void {
         self.message = text;
         self.message_kind = .failure;
+        self.logMessage(text);
+    }
+
+    /// keeps a message for `:messages`, without showing it
+    fn logMessage(self: *Tui, text: []const u8) void {
         const slot = self.log_count % log_capacity;
         const len = @min(text.len, message_capacity);
         @memcpy(self.log[slot][0..len], text[0..len]);
@@ -604,6 +617,7 @@ const Tui = struct {
                     self.running = false;
                     self.chip.step_limit = std.math.maxInt(u64);
                     self.fail(self.printLasting("stopped at the limit, after {d} steps", .{self.chip.steps}));
+                    self.stop_said = true;
                     return;
                 }
             }
@@ -621,6 +635,42 @@ const Tui = struct {
         self.select(hit.index());
         self.memory_scroll = null;
         self.fail(self.printLasting("{f}", .{hit.describe(self.chip.layout)}));
+        self.stop_said = true;
+        if (hit == .hazard) {
+            self.showWord(hit.hazard.hazard.address);
+            self.hazards_told = self.chip.hazards.len;
+        }
+    }
+
+    /// Tells of a hazard in a place where none happened before, which the
+    /// debug panel lists, without stopping the chip
+    fn tellHazards(self: *Tui) void {
+        const hazards = self.chip.hazards.items();
+        const stop_said = self.stop_said;
+        self.stop_said = false;
+        // cleared, or gone back from, as a snapshot has the hazards before it
+        self.hazards_told = @min(self.hazards_told, hazards.len);
+        if (self.hazards_told == hazards.len) return;
+        const first = hazards[self.hazards_told];
+        const more = hazards.len - self.hazards_told - 1;
+        self.hazards_told = hazards.len;
+        // why the chip stopped stays in the status bar
+        if (stop_said) {
+            var buffer: [message_capacity]u8 = undefined;
+            return self.logMessage(printCut(&buffer, "hazard: {f}", .{first.describe(self.chip.layout)}));
+        }
+        self.fail(if (more == 0)
+            self.printLasting("hazard: {f}", .{first.describe(self.chip.layout)})
+        else
+            self.printLasting("hazard, and {d} more: {f}", .{ more, first.describe(self.chip.layout) }));
+    }
+
+    /// moves the memory listing to the word at an address, if it lists it
+    fn showWord(self: *Tui, address: u9) void {
+        // a word from a port or an I/O register is not in the listing
+        const row = memoryRow(.fromWord(address)) orelse return;
+        self.memory_cursor = row;
+        self.memory_scroll = row -| self.memoryPage() / 2;
     }
 
     /// Handles an event, returning false to quit
@@ -939,7 +989,18 @@ const Tui = struct {
                 if (k.matches(vaxis.Key.page_up, .{})) self.trace_scroll += self.textPage(.debug);
                 if (k.matches(vaxis.Key.page_down, .{})) self.trace_scroll -|= self.textPage(.debug);
             },
-            .breakpoints, .history => {
+            .breakpoints, .history, .hazards => {
+                if (self.debug == .hazards) {
+                    if (k.matches('t', .{})) {
+                        self.chip.strict = !self.chip.strict;
+                        self.say(if (self.chip.strict) "the chip stops at a hazard" else "hazards are listed without stopping the chip");
+                    }
+                    if (k.matches('c', .{})) {
+                        self.chip.hazards = .{};
+                        self.chip.hazard_count = 0;
+                        self.debug_cursor = 0;
+                    }
+                }
                 if (k.matchesAny(&.{ vaxis.Key.up, 'k' }, .{})) self.debug_cursor -|= 1;
                 if (k.matchesAny(&.{ vaxis.Key.down, 'j' }, .{}) and self.debug_cursor + 1 < self.debugRows()) self.debug_cursor += 1;
                 if (k.matches(vaxis.Key.enter, .{})) self.chooseDebug();
@@ -969,6 +1030,7 @@ const Tui = struct {
             .trace => 0,
             .breakpoints => self.chip.breakpoints.len + self.chip.watches.len,
             .history => self.history_len + 1,
+            .hazards => self.chip.hazards.len,
         };
     }
 
@@ -986,10 +1048,7 @@ const Tui = struct {
                     self.select(b.index);
                     // one on an I/O register, as --break can set, is not in
                     // the listing
-                    if (memoryRow(.fromWord(b.address))) |row| {
-                        self.memory_cursor = row;
-                        self.memory_scroll = row -| self.memoryPage() / 2;
-                    }
+                    self.showWord(b.address);
                 } else self.select(self.chip.watches.items()[cursor - stops.len].index);
             },
             .history => {
@@ -1000,6 +1059,11 @@ const Tui = struct {
                 }
                 self.backTo(self.history_len - cursor);
                 self.debug_cursor = 0;
+            },
+            .hazards => {
+                const h = self.chip.hazards.items()[cursor];
+                self.select(h.index);
+                self.showWord(h.hazard.address);
             },
         }
     }
@@ -2590,6 +2654,7 @@ const Tui = struct {
             .trace => if (self.chip.trace == null) "5 trace" else "5 trace, tracing",
             .breakpoints => self.print("5 breakpoints {d}, watches {d}", .{ self.chip.breakpoints.len, self.chip.watches.len }),
             .history => self.print("5 history {d} of {d}", .{ self.history_len, self.history.len -| 1 }),
+            .hazards => self.print("5 hazards {d}, {d} times{s}", .{ self.chip.hazards.len, self.chip.hazard_count, if (self.chip.strict) ", stopping at them" else "" }),
         };
     }
 
@@ -2629,6 +2694,12 @@ const Tui = struct {
                     row.* = self.print("before {s:<20}  {d} steps", .{ self.causes[index].text(), self.history[index].?.steps });
                 }
                 self.drawList(win, rows, "");
+            },
+            .hazards => {
+                const hazards = self.chip.hazards.items();
+                const rows = self.frame.allocator().alloc([]const u8, hazards.len) catch return;
+                for (hazards, rows) |h, *row| row.* = self.print("{d:0>3} at {x:0>3}, slot {d}: {s}", .{ layout.nodeNumber(h.index), h.hazard.address, h.hazard.slot, h.hazard.kind.short() });
+                self.drawList(win, rows, "none: what a node does that a real chip may not do as gasim does is listed here, such as + straight after an opcode that changed S or T. t stops the chip at them.");
             },
         }
     }
@@ -3003,6 +3074,7 @@ const Tui = struct {
                 .trace => &.{ .{ "h/l", "views" }, .{ "t", "trace or stop" }, .{ "o", "only this node" }, .{ "w", "save trace.txt" }, .{ "c", "clear" }, .{ "pgup/pgdn", "scroll" }, .{ "space", "run" }, .{ "tab", "next" } },
                 .breakpoints => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "x", "remove" }, .{ "X", "remove all" }, .{ "space", "run" }, .{ "tab", "next" } },
                 .history => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "go back" }, .{ "space", "run" }, .{ "tab", "next" } },
+                .hazards => &.{ .{ "h/l", "views" }, .{ "up/down", "choose" }, .{ "enter", "show" }, .{ "t", "stop at them or not" }, .{ "c", "clear" }, .{ "space", "run" }, .{ "tab", "next" } },
             },
         };
         var bar: [3]vaxis.Segment = undefined;
@@ -3226,6 +3298,7 @@ pub fn run(io: Io, gpa: Allocator, environ: *std.process.Environ.Map, chip: *Chi
             if (!try tui.handle(event)) return;
         }
         if (tui.running and !tui.settled) try tui.run();
+        tui.tellHazards();
 
         tui.draw(vx.window());
         try vx.render(tty.writer());
@@ -4842,6 +4915,59 @@ test "the debug panel traces, lists breakpoints and watches, and goes back" {
     try t.press(vaxis.Key.enter);
     try expectEqual(1, t.chip.steps);
     try expectEqual(0, t.tui.history_len);
+}
+
+test "hazards are told of, listed in the debug panel, and stop the chip if asked" {
+    var t: TestTui = .{ .chip = undefined };
+    // @p + and the jump back in one word, so each step is a hazard
+    try t.init("begin 1 + again");
+    defer t.deinit();
+    t.draw();
+    try t.pressWith('5', .{ .alt = true });
+    try t.press('h');
+    try expect(try panelShows(&t, .debug, "5 hazards 0, 0 times"));
+    try expect(try panelShows(&t, .debug, "none: what a node does"));
+
+    // a hazard somewhere new is told of once, without stopping
+    for (0..2) |_| try t.press('n');
+    t.tui.tellHazards();
+    try expect(std.mem.startsWith(u8, t.tui.message.?, "hazard: node 000 at 000, slot 1, added straight after"));
+    for (0..2) |_| try t.press('n');
+    t.tui.tellHazards();
+    try expectEqualStrings("node 000 stepped", t.tui.message.?);
+    try expect(try panelShows(&t, .debug, "5 hazards 1, 4 times"));
+    try expect(try panelShows(&t, .debug, "000 at 000, slot 1: add with no . before it"));
+
+    // enter shows where, and t has the chip stop at the next
+    t.tui.select(5);
+    try t.press(vaxis.Key.enter);
+    try expectEqual(0, t.tui.selected);
+    try expectEqual(memoryRow(.fromWord(0)), t.tui.memory_cursor);
+    try t.press('t');
+    try expect(t.chip.strict);
+    try expect(try panelShows(&t, .debug, "stopping at them"));
+    t.tui.running = true;
+    try t.tui.run();
+    try expect(!t.tui.running);
+    try expect(std.mem.startsWith(u8, t.tui.message.?, "node 000 at 000, slot 1, added straight after"));
+
+    // a hazard somewhere new in a run that stops for another reason is
+    // kept for :messages, and why the chip stopped stays shown
+    t.chip.strict = false;
+    t.chip.hazards = .{};
+    t.tui.tellHazards();
+    _ = try t.chip.breakpoints.toggle(.init(0, 0));
+    const kept = t.tui.log_count;
+    t.tui.running = true;
+    try t.tui.run();
+    t.tui.tellHazards();
+    try expectEqualStrings("node 000 reached 000", t.tui.message.?);
+    try expectEqual(kept + 2, t.tui.log_count);
+
+    // and c clears them
+    try t.press('c');
+    try expectEqual(0, t.chip.hazards.len);
+    try expect(try panelShows(&t, .debug, "5 hazards 0, 0 times"));
 }
 
 test "the history shown while running keeps the run to go back before" {

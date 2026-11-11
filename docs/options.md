@@ -167,6 +167,8 @@ The first warning is from the assembler. It finds adds that follow such an
 opcode in the source, without running the program. It does not follow
 jumps, so it can miss some. The second is from the run.
 
+The TUI lists them in its [debug panel](tui.md#the-debug-panel).
+
 With `--strict`, the run stops at the first hazard, as at a breakpoint, and
 exits with 7. Use it in scripts and tests to make sure a program has none.
 With `--json`, the object has a `hazards` list and a `hazard_count` when
