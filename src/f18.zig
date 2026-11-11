@@ -231,6 +231,15 @@ pub const Computer = struct {
     /// picoseconds of execution, which waiting on a port does not add to
     time: u64,
 
+    /// whether the last opcode of the word executed before this one changed
+    /// S, T or P9, so that an add in slot 0 is a hazard (see `addUnsettled`)
+    unsettled: bool = false,
+    /// the first hazard since this was last cleared, which `Chip` does
+    /// after each step, and how many there were, as a step can have several,
+    /// such as one in each pass of a `unext` loop
+    hazard: ?Hazard = null,
+    hazards: u32 = 0,
+
     /// The nets of a node's pins (see `pins.Wiring`), told when the node
     /// reads io or a port, to set `pin_inputs` as they are at the node's
     /// time, and when it writes io, which can change how it drives its
@@ -254,6 +263,35 @@ pub const Computer = struct {
         context: *anyopaque,
         read: *const fn (context: *anyopaque, node: *const Computer) ?u18,
         written: *const fn (context: *anyopaque, node: *const Computer) void,
+    };
+
+    /// Something a node did that a real chip may not do as gasim does, as
+    /// DB001 says not to do it
+    pub const Hazard = struct {
+        kind: Kind,
+        /// the word the node was executing, and the slot of the opcode
+        address: u9,
+        slot: Slot,
+
+        pub const Kind = enum {
+            /// `+` or `+*` in slot 0, 1 or 2 straight after an opcode that
+            /// changed S, T or P9, with no time for the carry to settle
+            /// (DB001 2.3.3)
+            unsettled_add,
+            /// a write to ROM, which may hang a real node (DB001 2.4.3)
+            rom_write,
+            /// a read of several ports that two neighbours had written, of
+            /// which the node took one word and lost the other (DB001 3.3.1)
+            lost_word,
+
+            pub fn text(self: Kind) []const u8 {
+                return switch (self) {
+                    .unsettled_add => "added straight after an opcode that changed S, T or P9, which needs a . between (DB001 2.3.3)",
+                    .rom_write => "wrote to ROM, which may hang a real node (DB001 2.4.3)",
+                    .lost_word => "read several ports that two neighbours had written, and lost a word (DB001 3.3.1)",
+                };
+            }
+        };
     };
 
     pub const Status = union(enum) {
@@ -373,30 +411,61 @@ pub const Computer = struct {
                 // transfer of program control ends the instruction word
                 self.state = .fetch;
                 const empty = empty_next and @as(u9, @bitCast(self.p.address)) == @as(u9, @bitCast(self.word_address));
+                // these leave S and T, and note themselves whether they
+                // changed P9, which an add uses (`unsettled`)
                 break :time if (empty) 5000 else 5200;
             },
             0x04 => {
                 if (self.state == .unext) {
                     self.state = .execution;
                     self.slot = 0;
-                } else self.advance();
+                    self.unsettled = false;
+                } else self.advance(false);
                 break :time 2400;
             },
             0x08...0x0f => {
-                self.advance();
+                self.advance(true);
                 break :time if (io) 3500 else 5000;
             },
             else => {
-                self.advance();
+                // An add straight after an opcode that changed S, T or P9
+                // is a hazard. Slot 3 is safe, as the next word's fetch
+                // gives the carry time, and so is ROM, which works as it is
+                // on a real chip.
+                if ((opcode == .@"+" or opcode == .@"+*") and self.slot != 3 and !self.word_address.rom and self.addUnsettled()) self.note(.unsettled_add);
+                self.advance(opcode != .@".");
                 break :time 1400;
             },
         };
         self.time += time;
     }
 
-    /// moves on to the next slot, or the next instruction word after slot 3
-    fn advance(self: *Computer) void {
+    /// Counts a hazard, and notes it, at the opcode being executed, unless
+    /// one is noted. One found fetching a word is at slot 0, as no opcode
+    /// of the word has run.
+    pub fn note(self: *Computer, kind: Hazard.Kind) void {
+        self.hazards +|= 1;
+        if (self.hazard == null) self.hazard = .{ .kind = kind, .address = @bitCast(self.current()), .slot = if (self.state == .fetch) 0 else self.slot };
+    }
+
+    /// Whether the opcode executed before the one in the current slot
+    /// changed S, T or P9. Worked out only for an add, from the slot before
+    /// it, or for slot 0, from how the word before ended, so that other
+    /// opcodes do not pay for it.
+    fn addUnsettled(self: *const Computer) bool {
+        if (self.slot == 0) return self.unsettled;
+        return switch (Instruction.decode(self.i).getSlot(self.slot - 1)) {
+            // the only opcodes a word runs on from that change none of them
+            .@".", .unext => false,
+            else => true,
+        };
+    }
+
+    /// Moves on to the next slot, or the next instruction word after slot
+    /// 3, noting then whether the opcode, the word's last, `changed` S or T
+    fn advance(self: *Computer, changed: bool) void {
         if (self.slot == 3) {
+            self.unsettled = changed;
             self.state = .fetch;
             self.time += fetchTime(Instruction.decode(self.i));
         } else {
@@ -488,7 +557,7 @@ pub const Computer = struct {
             var others = ports.iterator();
             while (others.next()) |other| {
                 const other_link = self.ports[@backingInt(other)];
-                if (other_link.port) |o| o.cancelRead(other_link.side);
+                if (other_link.port) |o| if (o.cancelRead(other_link.side)) self.note(.lost_word);
             }
             return word;
         }
@@ -600,7 +669,7 @@ pub const Computer = struct {
         }
         if (!address.rom) {
             self.mem[local] = value;
-        }
+        } else self.note(.rom_write);
     }
 
     pub const reset: Computer = .{
@@ -1300,6 +1369,8 @@ test "multiport read discards values written to the other ports" {
     try expectEqual(1, node.read(rdlu));
     try expectEqual(port.Port.State.idle, right.state);
     try expectEqual(port.Port.State.idle, up.state);
+    try expectEqual(.lost_word, node.hazard.?.kind);
+    try expectEqual(1, node.hazards);
 
     // the up port is free for a new transfer
     try expect(!node.write(Address.fromWord(0x145), 3));
@@ -1391,6 +1462,57 @@ test "data register" {
     node.data = 0;
     try expect(node.write(data, @bitCast(@as(u18, 0x3fffe))));
     try expectEqual(0x3fffe, @as(u18, @bitCast(node.read(data).?)));
+}
+
+test "an add straight after an opcode that changed S or T is a hazard" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    // dup + is one, in slot 1, but not . + after it, nor + in slot 3
+    computer.mem[0] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@"+", .slot_2 = .@".", .slot_3 = 5 });
+    computer.step();
+    try expectEqual(Computer.Hazard{ .kind = .unsettled_add, .address = 0, .slot = 1 }, computer.hazard.?);
+
+    computer.hazard = null;
+    computer.mem[1] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@".", .slot_2 = .@"+", .slot_3 = 7 });
+    computer.mem[2] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .dup, .slot_2 = .dup, .slot_3 = 5 });
+    computer.step();
+    computer.step();
+    try expectEqual(null, computer.hazard);
+
+    // the word after is too soon, as its fetch gives no time to rely on
+    computer.mem[3] = Instruction.encode(.{ .slot_0 = .@"+*", .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 });
+    computer.step();
+    try expectEqual(Computer.Hazard{ .kind = .unsettled_add, .address = 3, .slot = 0 }, computer.hazard.?);
+}
+
+test "an add straight after a jump that changed P9 is a hazard, but not in ROM" {
+    var computer: Computer = .reset;
+    computer.p.address = .{ .io = false, .rom = false, .local = 0 };
+    computer.mem[0] = Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 0x201);
+    computer.mem[1] = Instruction.encode(.{ .slot_0 = .@"+", .slot_1 = .dup, .slot_2 = .@".", .slot_3 = 7 });
+    computer.step();
+    computer.step();
+    try expectEqual(.unsettled_add, computer.hazard.?.kind);
+
+    // a jump that leaves P9 as it is changes nothing an add uses
+    computer.hazard = null;
+    computer.mem[2] = Instruction.encodeJump(.{ .slot_0 = .jump, .slot_1 = .@".", .slot_2 = .@".", .slot_3 = 7 }, 0, 0x201);
+    computer.step();
+    computer.step();
+    try expectEqual(null, computer.hazard);
+
+    // the ROM is as it is on a real chip, where it works
+    computer.p = .reset;
+    computer.mem[64 + 0x2a] = Instruction.encode(.{ .slot_0 = .dup, .slot_1 = .@"+", .slot_2 = .@".", .slot_3 = 7 });
+    computer.step();
+    try expectEqual(null, computer.hazard);
+}
+
+test "a write to ROM is a hazard, and changes nothing" {
+    var computer: Computer = .reset;
+    try expect(computer.write(Address.fromWord(0x80), 5));
+    try expectEqual(0, computer.mem[64]);
+    try expectEqual(.rom_write, computer.hazard.?.kind);
 }
 
 test "undefined I/O addresses hang" {

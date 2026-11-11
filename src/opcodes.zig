@@ -101,7 +101,22 @@ pub const opcodes = [_]OpCodeFn{
 /// **Return**. Moves R into P, popping the return stack. Skips any remaining slots
 /// and fetches next instruction word.
 fn ret(c: *Computer) void {
-    c.p = .fromWord(c.return_stack.pop());
+    setP(c, .fromWord(c.return_stack.pop()));
+}
+
+/// Sets P as a transfer of program control does, noting whether P9 changed.
+/// These opcodes end their word, and an add straight after a change of P9
+/// is a hazard on a real chip (see `Computer.unsettled`).
+fn setP(c: *Computer, p: f18.ProgramCounter) void {
+    c.unsettled = p.extended_arithmetic != c.p.extended_arithmetic;
+    c.p = p;
+}
+
+/// Jumps to the destination in the instruction word, as `setP` does
+fn jumpP(c: *Computer) void {
+    var p = c.p;
+    p.jump(c.slot, c.i);
+    setP(c, p);
 }
 
 test ret {
@@ -117,7 +132,7 @@ test ret {
 /// **Execute**. Exchanges R and P, skips any remaining slots and fetches next instruction word.
 fn ex(c: *Computer) void {
     const current = c.p;
-    c.p = .fromWord(c.return_stack.t);
+    setP(c, .fromWord(c.return_stack.t));
     c.return_stack.t = current.toWord();
 }
 
@@ -134,7 +149,7 @@ test ex {
 ///
 /// **Jump**. Sets P to destination address and fetches next instruction word.
 fn jump(c: *Computer) void {
-    c.p.jump(c.slot, c.i);
+    jumpP(c);
 }
 
 test "slot 0 jump" {
@@ -172,7 +187,7 @@ test "slot 2 jump" {
 /// destination address and fetches next instruction word.
 pub fn call(c: *Computer) void {
     c.return_stack.push(c.p.toWord());
-    c.p.jump(c.slot, c.i);
+    jumpP(c);
 }
 
 test "call and return preserve extended arithmetic mode" {
@@ -252,9 +267,10 @@ test unext {
 pub fn next(c: *Computer) void {
     if (c.return_stack.t == 0) {
         _ = c.return_stack.pop();
+        c.unsettled = false;
     } else {
         c.return_stack.t -%= 1;
-        c.p.jump(c.slot, c.i);
+        jumpP(c);
     }
 }
 
@@ -280,9 +296,7 @@ test next {
 ///
 /// **If**. If T is nonzero, continues with the next instruction word addressed by P. If T is zero, jumps
 pub fn _if(c: *Computer) void {
-    if (c.data_stack.t == 0) {
-        c.p.jump(c.slot, c.i);
-    }
+    if (c.data_stack.t == 0) jumpP(c) else c.unsettled = false;
 }
 
 test _if {
@@ -305,9 +319,7 @@ test _if {
 /// Minus-if. If T is negative (T17 set), continues with the next instruction
 /// word addressed by P. If T is positive, jumps
 pub fn minus_if(c: *Computer) void {
-    if (c.data_stack.t >= 0) {
-        c.p.jump(c.slot, c.i);
-    }
+    if (c.data_stack.t >= 0) jumpP(c) else c.unsettled = false;
 }
 
 test minus_if {

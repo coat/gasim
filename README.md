@@ -126,6 +126,10 @@ codes, and [Options](docs/options.md) for every option. `gasim help
 `--break`, `--watch`, `--trace`, `--why` and `--stats` show what a run is
 doing. `gasim listing` shows the words a program assembles to.
 
+gasim warns when a program does something a real chip may not do the same
+way, such as `+` straight after an opcode that changed the stack. `--strict`
+stops the run there. See [Hazards](docs/options.md#hazards).
+
 ```
 $ echo hi | gasim run --why examples/upcase.ga
 HI

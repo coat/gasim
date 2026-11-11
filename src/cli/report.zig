@@ -12,6 +12,8 @@ pub const Stop = enum {
     settled,
     breakpoint,
     watch,
+    /// with --strict
+    hazard,
     limit,
     interrupted,
     /// the steps asked for are taken
@@ -24,6 +26,7 @@ pub const Stop = enum {
             .breakpoint => 3,
             .watch => 4,
             .limit => 5,
+            .hazard => 7,
             .interrupted => 128 + signal,
         };
     }
@@ -330,7 +333,7 @@ pub fn stopFields(jw: *Stringify, chip: *const Chip, stop: Stop) Stringify.Error
     try jw.objectField("stop");
     try jw.write(@tagName(stop));
     const hit = chip.hit orelse return;
-    if (stop != .breakpoint and stop != .watch) return;
+    if (stop != .breakpoint and stop != .watch and stop != .hazard) return;
     try jw.objectField("node");
     try nodeNumber(jw, chip.layout.nodeNumber(hit.index()));
     switch (hit) {
@@ -346,7 +349,34 @@ pub fn stopFields(jw: *Stringify, chip: *const Chip, stop: Stop) Stringify.Error
             try jw.objectField("value");
             try hex(jw, @as(u18, @bitCast(w.value)), 5);
         },
+        .hazard => |h| try hazardFields(jw, h),
     }
+}
+
+/// Writes where a hazard is and what it is, as an object's fields, after
+/// its node
+fn hazardFields(jw: *Stringify, h: Chip.Hazard) Stringify.Error!void {
+    try jw.objectField("address");
+    try hex(jw, h.hazard.address, 3);
+    try jw.objectField("slot");
+    try jw.write(h.hazard.slot);
+    try jw.objectField("hazard");
+    try jw.write(@tagName(h.hazard.kind));
+    try jw.objectField("message");
+    try jw.write(h.hazard.kind.text());
+}
+
+/// Writes the hazards the chip kept, as an array of objects
+pub fn hazards(jw: *Stringify, chip: *const Chip) Stringify.Error!void {
+    try jw.beginArray();
+    for (chip.hazards.items()) |h| {
+        try jw.beginObject();
+        try jw.objectField("node");
+        try nodeNumber(jw, chip.layout.nodeNumber(h.index));
+        try hazardFields(jw, h);
+        try jw.endObject();
+    }
+    try jw.endArray();
 }
 
 test bytes {
@@ -362,6 +392,7 @@ test "a run's status says how it ended" {
     try std.testing.expectEqual(3, Stop.breakpoint.status(0));
     try std.testing.expectEqual(4, Stop.watch.status(0));
     try std.testing.expectEqual(5, Stop.limit.status(0));
+    try std.testing.expectEqual(7, Stop.hazard.status(0));
     try std.testing.expectEqual(143, Stop.interrupted.status(15));
 }
 

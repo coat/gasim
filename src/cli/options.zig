@@ -44,8 +44,8 @@ const about_run =
     \\compiles F18 code, from block 0 or the blocks --load names.
     \\
     \\Exits 0 when every node is waiting, 3 at a breakpoint, 4 at a watch, 5 at
-    \\a limit, 128 and the signal if one stopped it, 2 for wrong usage and 1 for
-    \\any other error.
+    \\a limit, 7 at a hazard with --strict, 128 and the signal if one stopped
+    \\it, 2 for wrong usage and 1 for any other error.
     \\
 ;
 
@@ -164,6 +164,10 @@ const options_stops =
     \\                             stop when the node reads from or writes to the
     \\                             port, such as 105:right:write. Can be given
     \\                             more than once.
+    \\  --strict                   stop when a node does what a real chip may not
+    \\                             do as gasim does, such as + straight after
+    \\                             an opcode that changed S or T, rather than
+    \\                             only warn of it
     \\
 ;
 
@@ -414,6 +418,7 @@ const flags = [_]Flag{
     .{ .name = "--json", .value = false, .commands = .initMany(&.{ .run, .aforth, .start, .step, .show, .cf_pack, .cf_expand, .@"test" }) },
     .{ .name = "--show", .commands = running },
     .{ .name = "--why", .value = false, .commands = running },
+    .{ .name = "--strict", .value = false, .commands = stopping },
     .{ .name = "--stats", .value = false, .commands = running },
     .{ .name = "--trace", .value = false, .commands = running },
     .{ .name = "--trace-node", .commands = running },
@@ -478,6 +483,7 @@ pub const Options = struct {
     trace_node: ?u16 = null,
     trace_file: ?[]const u8 = null,
     why: bool = false,
+    strict: bool = false,
     stats: bool = false,
     json: bool = false,
     show: Show = .none,
@@ -671,6 +677,8 @@ fn setSwitch(o: *Options, arg: []const u8) void {
         o.trace = true;
     } else if (is(u8, arg, "--why")) {
         o.why = true;
+    } else if (is(u8, arg, "--strict")) {
+        o.strict = true;
     } else if (is(u8, arg, "--slot")) {
         o.slot = true;
     } else if (is(u8, arg, "--stats")) {
