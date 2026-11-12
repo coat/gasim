@@ -20,7 +20,7 @@ const magic = "gasimsnp";
 
 /// what `write` writes by hand, beyond the fields of types the hash covers:
 /// raise it when that changes
-const format_version = 1;
+const format_version = 2;
 
 /// What to build again before reading a chip's state: what chip or board it
 /// was, and how its devices were attached
@@ -50,14 +50,8 @@ pub const Machine = struct {
     pub const Setting = struct { name: []const u8, on: bool };
 };
 
-/// devices the chip does not hold
-pub const Devices = struct {
-    flash: ?*Flash = null,
-    sram: ?*Sram = null,
-};
-
 /// the hash of the fields a type is saved with
-fn typeHash(comptime T: type) u64 {
+pub fn typeHash(comptime T: type) u64 {
     @setEvalBranchQuota(2_000_000);
     return comptime hash: {
         var h: std.hash.Fnv1a_64 = .init();
@@ -110,7 +104,7 @@ fn skipped(comptime T: type, comptime name: []const u8) bool {
 }
 
 /// Writes a value, field by field
-fn put(writer: *Io.Writer, value: anytype) Error!void {
+pub fn put(writer: *Io.Writer, value: anytype) Error!void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
         .int => |info| {
@@ -150,7 +144,7 @@ fn put(writer: *Io.Writer, value: anytype) Error!void {
 
 /// Reads a value into `out`, leaving the fields that are not saved as they
 /// are, with slices in `arena`
-fn get(reader: *Io.Reader, arena: Allocator, out: anytype) Error!void {
+pub fn get(reader: *Io.Reader, arena: Allocator, out: anytype) Error!void {
     const T = @typeInfo(@TypeOf(out)).pointer.child;
     switch (@typeInfo(T)) {
         .int => |info| {
@@ -179,7 +173,7 @@ fn get(reader: *Io.Reader, arena: Allocator, out: anytype) Error!void {
         .pointer => |p| {
             const len = try reader.takeInt(u64, .little);
             if (len > reader.bufferedLen()) return error.Invalid;
-            const items = try arena.alloc(p.child, len);
+            const items = try arena.alloc(p.child, @intCast(len));
             for (items) |*item| try get(reader, arena, item);
             out.* = items;
         },
@@ -212,13 +206,13 @@ fn get(reader: *Io.Reader, arena: Allocator, out: anytype) Error!void {
 /// what the file's fields are, to refuse a file of others
 const format_hash = hash: {
     var h = typeHash(Machine) +% format_version;
-    for (.{ Computer, Port, Console, Chip.Feeder, Uart, Sync, Flash, Sram, Serdes, Chip.ResetLine, pins.History, pins.Net, pins.Contention }) |T|
+    for (.{ Computer, Port, Serdes, Chip.ResetLine, pins.History, pins.Net, pins.Contention }) |T|
         h = h *% 31 +% typeHash(T);
     break :hash h;
 };
 
 /// Writes the machine and the chip's state
-pub fn write(writer: *Io.Writer, machine: Machine, chip: *const Chip, devices: Devices) Error!void {
+pub fn write(writer: *Io.Writer, machine: Machine, chip: *const Chip) Error!void {
     try writer.writeAll(magic);
     try writer.writeInt(u64, format_hash, .little);
     try put(writer, machine);
@@ -246,34 +240,11 @@ pub fn write(writer: *Io.Writer, machine: Machine, chip: *const Chip, devices: D
     }
     try put(writer, chip.wiring.contention);
 
-    if (chip.console) |console| try put(writer, console.device.*);
-    if (chip.feeder) |feeder| try put(writer, feeder.device.*);
-    for (chip.uarts.slice()) |uart| try put(writer, uart.device.*);
-    if (chip.sync) |sync| try put(writer, sync.device.*);
-    if (devices.flash) |flash| try put(writer, flash.*);
-    if (devices.sram) |sram| {
-        try put(writer, sram.*);
-        try putSparse(writer, sram.words);
-    }
-}
-
-/// the words that are not zero, as an SRAM is mostly
-fn putSparse(writer: *Io.Writer, words: []const u16) Error!void {
-    var count: u64 = 0;
-    for (words) |word| count += @intFromBool(word != 0);
-    try writer.writeInt(u64, count, .little);
-    for (words, 0..) |word, i| if (word != 0) {
-        try writer.writeInt(u32, @intCast(i), .little);
-        try writer.writeInt(u16, word, .little);
-    };
-}
-
-fn getSparse(reader: *Io.Reader, words: []u16) Error!void {
-    @memset(words, 0);
-    for (0..try reader.takeInt(u64, .little)) |_| {
-        const i = try reader.takeInt(u32, .little);
-        if (i >= words.len) return error.OtherMachine;
-        words[i] = try reader.takeInt(u16, .little);
+    // each device after the hash of its fields
+    for (chip.devices.slice()) |d| {
+        const state = d.device.vtable.state;
+        try writer.writeInt(u64, state.hash, .little);
+        try state.write(d.device.context, writer);
     }
 }
 
@@ -295,7 +266,7 @@ fn getInto(reader: *Io.Reader, arena: Allocator, slice: anytype) Error!void {
 
 /// Reads a chip's state, after `readMachine`, into a chip built as it says,
 /// with its devices attached
-pub fn readChip(reader: *Io.Reader, arena: Allocator, chip: *Chip, devices: Devices) Error!void {
+pub fn readChip(reader: *Io.Reader, arena: Allocator, chip: *Chip) Error!void {
     try getInto(reader, arena, chip.nodes);
     try getInto(reader, arena, chip.ports);
     try getInto(reader, arena, chip.queue);
@@ -317,14 +288,12 @@ pub fn readChip(reader: *Io.Reader, arena: Allocator, chip: *Chip, devices: Devi
     }
     try get(reader, arena, &chip.wiring.contention);
 
-    if (chip.console) |console| try get(reader, arena, console.device);
-    if (chip.feeder) |feeder| try get(reader, arena, feeder.device);
-    for (chip.uarts.slice()) |uart| try get(reader, arena, uart.device);
-    if (chip.sync) |sync| try get(reader, arena, sync.device);
-    if (devices.flash) |flash| try get(reader, arena, flash);
-    if (devices.sram) |sram| {
-        try get(reader, arena, sram);
-        try getSparse(reader, sram.words);
+    for (chip.devices.slice()) |d| {
+        const state = d.device.vtable.state;
+        // a chip built as the file's machine says has the file's devices,
+        // so this is a device of other fields, from another gasim
+        if (try reader.takeInt(u64, .little) != state.hash) return error.OtherVersion;
+        try state.read(d.device.context, reader, arena);
     }
 }
 
@@ -343,22 +312,22 @@ fn runInTwo(arena: Allocator, source: []const u8, input: []const u8, at: u9, fir
         defer chip.deinit(std.testing.allocator);
         var console = testConsole(first);
         console.preload = input;
-        try chip.attachConsole(&console, 0, .up);
+        try console.attach(&chip, 0, .up);
         var diagnostic: assembler.Diagnostic = .{};
         var programs: [1]assembler.Program = undefined;
         for (try assembler.assembleNodes(source, &programs, &diagnostic)) |program| try chip.load(program);
         try chip.breakpoints.insert(.init(0, at));
         try chip.run();
         try std.testing.expect(chip.hit != null);
-        try write(&file.writer, .{}, &chip, .{});
+        try write(&file.writer, .{}, &chip);
     }
     var reader: Io.Reader = .fixed(file.written());
     _ = try readMachine(&reader, arena);
     var chip: Chip = try .init(std.testing.allocator, .ga144);
     defer chip.deinit(std.testing.allocator);
     var console = testConsole(second);
-    try chip.attachConsole(&console, 0, .up);
-    try readChip(&reader, arena, &chip, .{});
+    try console.attach(&chip, 0, .up);
+    try readChip(&reader, arena, &chip);
     try chip.run();
     return chip.steps;
 }
@@ -377,7 +346,7 @@ test "a run goes on from a file as if it had not stopped" {
     defer chip.deinit(std.testing.allocator);
     var console = testConsole(&whole);
     console.preload = "abc";
-    try chip.attachConsole(&console, 0, .up);
+    try console.attach(&chip, 0, .up);
     var diagnostic: assembler.Diagnostic = .{};
     var programs: [1]assembler.Program = undefined;
     for (try assembler.assembleNodes(source, &programs, &diagnostic)) |program| try chip.load(program);
@@ -411,25 +380,13 @@ test "the machine reads back" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 1 });
     defer chip.deinit(std.testing.allocator);
     const setting: Machine.Setting = .{ .name = "J26", .on = false };
-    try write(&writer, .{ .board = "evb002", .settings = &.{setting}, .uart_node = 708, .sync = true }, &chip, .{});
+    try write(&writer, .{ .board = "evb002", .settings = &.{setting}, .uart_node = 708, .sync = true }, &chip);
     var reader: Io.Reader = .fixed(writer.buffered());
     const machine = try readMachine(&reader, arena.allocator());
     try std.testing.expectEqualStrings("evb002", machine.board);
     try std.testing.expectEqualStrings("J26", machine.settings[0].name);
     try std.testing.expectEqual(708, machine.uart_node.?);
     try std.testing.expect(machine.sync and !machine.flash);
-}
-
-test "an SRAM's words read back" {
-    var words: [8]u16 = @splat(0);
-    words[3] = 0xbeef;
-    var buffer: [64]u8 = undefined;
-    var writer: Io.Writer = .fixed(&buffer);
-    try putSparse(&writer, &words);
-    var reader: Io.Reader = .fixed(writer.buffered());
-    var read: [8]u16 = @splat(1);
-    try getSparse(&reader, &read);
-    try std.testing.expectEqualSlices(u16, &words, &read);
 }
 
 const std = @import("std");
@@ -441,10 +398,6 @@ const Chip = @import("Chip.zig");
 const Computer = @import("f18.zig").Computer;
 const Console = @import("Console.zig");
 const Direction = @import("port.zig").Direction;
-const Flash = @import("Flash.zig");
 const pins = @import("pins.zig");
 const Port = @import("port.zig").Port;
 const Serdes = @import("Serdes.zig");
-const Sram = @import("Sram.zig");
-const Sync = @import("Sync.zig");
-const Uart = @import("Uart.zig");

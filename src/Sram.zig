@@ -39,7 +39,7 @@ high: [2]Timeline(bool) = .{ .{ .before = false }, .{ .before = false } },
 
 const Sram = @This();
 
-/// which `snapshot` saves as the few that are not zero
+/// which are saved as the few that are not zero (`writeState`)
 pub const snapshot_skip = .{"words"};
 
 /// the words of the EVB002's SRAM
@@ -48,6 +48,38 @@ pub const evb002_words = 1 << 20;
 /// An SRAM of `words`, as many as its address lines reach, a power of 2
 pub fn init(words: []u16) Sram {
     return .{ .words = words };
+}
+
+/// The SRAM as a device of the chip. Put it on its buses with
+/// `Chip.attachBus` and on its pins with `Chip.attachPin`.
+pub fn device(self: *Sram) Device {
+    return .{ .context = self, .vtable = &vtable };
+}
+
+const vtable: Device.VTable = .{ .state = .{ .hash = snapshot.typeHash(Sram), .write = writeState, .read = readState } };
+
+/// its words as the few that are not zero, as an SRAM is mostly
+fn writeState(context: *anyopaque, writer: *Io.Writer) snapshot.Error!void {
+    const self: *Sram = @ptrCast(@alignCast(context));
+    try snapshot.put(writer, self.*);
+    var count: u64 = 0;
+    for (self.words) |word| count += @intFromBool(word != 0);
+    try writer.writeInt(u64, count, .little);
+    for (self.words, 0..) |word, i| if (word != 0) {
+        try writer.writeInt(u32, @intCast(i), .little);
+        try writer.writeInt(u16, word, .little);
+    };
+}
+
+fn readState(context: *anyopaque, reader: *Io.Reader, arena: Allocator) snapshot.Error!void {
+    const self: *Sram = @ptrCast(@alignCast(context));
+    try snapshot.get(reader, arena, self);
+    @memset(self.words, 0);
+    for (0..try reader.takeInt(u64, .little)) |_| {
+        const i = try reader.takeInt(u32, .little);
+        if (i >= self.words.len) return error.OtherMachine;
+        self.words[i] = try reader.takeInt(u16, .little);
+    }
 }
 
 pub fn addressBus(self: *Sram) Computer.BusDevice {
@@ -277,7 +309,28 @@ test "a write stores the data bus's word at the address, and a read drives it" {
     try std.testing.expectEqual(0xbeef, words[2 << 18 | 7]);
 }
 
+test "an SRAM's words read back" {
+    var words: [8]u16 = @splat(0);
+    words[3] = 0xbeef;
+    var sram: Sram = .init(&words);
+    var writer: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    const state = sram.device().vtable.state;
+    try state.write(&sram, &writer.writer);
+    var reader: Io.Reader = .fixed(writer.written());
+    var read: [8]u16 = @splat(1);
+    var other: Sram = .init(&read);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try state.read(&other, &reader, arena.allocator());
+    try std.testing.expectEqualSlices(u16, &words, &read);
+}
+
+const Device = @import("Device.zig");
 const pins = @import("pins.zig");
+const snapshot = @import("snapshot.zig");
 const Computer = @import("f18.zig").Computer;
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;

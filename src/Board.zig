@@ -58,6 +58,9 @@ fn number(chip: u8, node: u16) u16 {
     return @as(u16, chip) *| Chip.Layout.chip_numbers +| node;
 }
 
+/// the most serial ports that can have a UART each at once
+pub const max_serial = 4;
+
 /// A serial port, such as a USB serial chip's, which sends on `rx`, the
 /// chip's pin that receives, and listens on `tx`, the one that sends
 pub const Serial = struct {
@@ -350,8 +353,8 @@ pub fn apply(self: Board, chip: *Chip, ports: []const Attachment, settings: []co
     for (ports) |attachment| {
         const s = attachment.port;
         fault.* = .{ .name = s.name };
-        try chip.attachUartPins(
-            attachment.uart,
+        try attachment.uart.attachPins(
+            chip,
             if (self.jumperOn(s.rx.jumper, settings)) s.rx.ref() else null,
             if (self.jumperOn(s.tx.jumper, settings)) s.tx.ref() else null,
         );
@@ -360,21 +363,22 @@ pub fn apply(self: Board, chip: *Chip, ports: []const Attachment, settings: []co
 
 /// Puts `flash` on the board's flash pins, each connected while its jumper
 /// is on, as `settings` set it
-pub fn attachFlash(self: Board, chip: *Chip, flash: *Flash, settings: []const Setting) error{ NoFlash, NoSuchPin, TwoDevices }!void {
+pub fn attachFlash(self: Board, chip: *Chip, flash: *Flash, settings: []const Setting) error{ NoFlash, NoSuchPin, TwoDevices, Full }!void {
     const f = self.flash orelse return error.NoFlash;
     var refs: [4]?Chip.PinRef = undefined;
     for (f.terminals(), &refs) |t, *ref| ref.* = if (self.jumperOn(t.jumper, settings)) t.ref() else null;
-    try chip.attachFlashPins(flash, refs[0], refs[1], refs[2], refs[3]);
+    try flash.attachPins(chip, refs[0], refs[1], refs[2], refs[3]);
 }
 
 /// Puts `sram` on the board's SRAM buses and pins, each pin connected while
 /// its jumper is on, as `settings` set it
-pub fn attachSram(self: Board, chip: *Chip, sram: *Sram, settings: []const Setting) error{ NoSram, NoSuchNode, NoBus, NoSuchPin, TwoDevices }!void {
+pub fn attachSram(self: Board, chip: *Chip, sram: *Sram, settings: []const Setting) error{ NoSram, NoSuchNode, NoBus, NoSuchPin, TwoDevices, Full }!void {
     const m = self.sram orelse return error.NoSram;
     try chip.attachBus(m.address.number(), sram.addressBus());
     try chip.attachBus(m.data.number(), sram.dataBus());
     const devices = [4]pins.Device{ sram.highDevice(0), sram.highDevice(1), sram.enableDevice(), sram.writeDevice() };
     for (m.terminals(), devices) |t, device| if (self.jumperOn(t.jumper, settings)) try chip.attachPin(t.ref(), device);
+    try chip.attachDevice(sram.device(), null, false);
 }
 
 /// Parses a board file, allocating what it names in `arena`. On

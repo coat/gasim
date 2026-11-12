@@ -66,6 +66,72 @@ pub fn init(baud: u32, output: *Io.Writer) Uart {
     return .{ .bit_time = 1_000_000_000_000 / @as(u64, baud), .output = output };
 }
 
+/// Attaches the UART to the pins of a node, the node driving `tx_pin` and
+/// the UART `rx_pin`
+pub fn attach(self: *Uart, chip: *Chip, number: u16) error{ NoSuchNode, NoPins }!void {
+    const n = chip.node(number) orelse return error.NoSuchNode;
+    if (n.pins & self.rx_pin == 0 or n.pins & self.tx_pin == 0) return error.NoPins;
+    self.attachPins(chip, .{ .node = number, .pin = @intCast(@ctz(self.rx_pin)) }, .{ .node = number, .pin = @intCast(@ctz(self.tx_pin)) }) catch
+        return error.NoPins;
+}
+
+/// Attaches the UART to two pins, which may be of different nodes: it
+/// drives `rx`, which the chip receives on, and listens to `tx`, which it
+/// sends on. Either may be left out, as a board's jumper can leave a line
+/// unconnected.
+pub fn attachPins(self: *Uart, chip: *Chip, rx: ?Chip.PinRef, tx: ?Chip.PinRef) error{ NoSuchPin, TwoDevices, Full }!void {
+    // a pin there is not, before one that is taken
+    for ([_]?Chip.PinRef{ rx, tx }) |pin| if (pin) |p| {
+        _ = try chip.pinTaken(p);
+    };
+    for ([_]?Chip.PinRef{ rx, tx }) |pin| if (pin) |p| if (try chip.pinTaken(p)) return error.TwoDevices;
+    if (rx != null and tx != null and try chip.sameNet(rx.?, tx.?)) return error.TwoDevices;
+    // serviced at the time of the node it sends to, if it sends
+    const pin = rx orelse tx orelse return;
+    try chip.attachDevice(self.device(), pin, rx != null);
+    if (rx) |p| {
+        self.rx_pin = @as(u18, 1) << p.pin;
+        chip.attachPin(p, self.rxDevice()) catch unreachable;
+    }
+    if (tx) |p| {
+        self.tx_pin = @as(u18, 1) << p.pin;
+        chip.attachPin(p, self.txDevice()) catch unreachable;
+    }
+}
+
+/// the UART as a device of the chip
+pub fn device(self: *Uart) Device {
+    return .{
+        .context = self,
+        .vtable = &vtable,
+        .output = self.output,
+        .interrupted = &self.interrupted,
+        .waiting = &self.waiting,
+    };
+}
+
+const vtable: Device.VTable = .{
+    .service = serviceDevice,
+    .nextEdge = nextEdge,
+    .pinRead = pinRead,
+    .state = .of(Uart),
+};
+
+fn serviceDevice(context: *anyopaque, time: u64, wait: bool) Device.ServiceError!bool {
+    const self: *Uart = @ptrCast(@alignCast(context));
+    return if (wait) self.waitForInput(time) else self.service(time);
+}
+
+fn nextEdge(context: *anyopaque, time: u64) ?u64 {
+    const self: *Uart = @ptrCast(@alignCast(context));
+    return self.nextRxEdge(time);
+}
+
+fn pinRead(context: *anyopaque) void {
+    const self: *Uart = @ptrCast(@alignCast(context));
+    self.used = true;
+}
+
 /// The UART as the device driving the net of the pin it sends on
 pub fn rxDevice(self: *Uart) pins.Device {
     return .{ .context = self, .drive = rxDrive };
@@ -312,6 +378,8 @@ test "input arriving on an idle line is sent from when it arrived" {
     try expect(!try uart.waitForInput(2000));
 }
 
+const Chip = @import("Chip.zig");
+const Device = @import("Device.zig");
 const pins = @import("pins.zig");
 const Console = @import("Console.zig");
 
