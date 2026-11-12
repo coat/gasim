@@ -30,6 +30,23 @@ pub const Direction = enum(u2) {
 /// The set of ports selected by a (multiport) I/O address
 pub const Select = std.EnumSet(Direction);
 
+/// The ports of a set in order, right first. Faster than the set's own
+/// iterator, which is not made for four.
+pub const Each = struct {
+    mask: u4,
+
+    pub inline fn next(self: *Each) ?Direction {
+        if (self.mask == 0) return null;
+        const direction: Direction = @fromBackingInt(@intCast(@ctz(self.mask)));
+        self.mask &= self.mask - 1;
+        return direction;
+    }
+};
+
+pub inline fn each(ports: Select) Each {
+    return .{ .mask = ports.bits.mask };
+}
+
 /// Decodes the ports selected by an I/O address such as x1D5 (right) or
 /// x1A5 (rdlu), or returns null if the address does not select any port.
 pub fn select(address: u9) ?Select {
@@ -54,7 +71,15 @@ pub fn multiport(ports: Select) u9 {
 }
 
 pub const Port = struct {
+    /// only for the length of a step, and as they start between steps
+    pub const snapshot_skip = .{ "before", "marked" };
+
     state: State = .idle,
+    /// While a node steps, how the port was before the node first changed
+    /// it, for the chip to tell what the step did (`mark`). Between steps
+    /// these are as they start.
+    before: State = .idle,
+    marked: bool = false,
 
     pub const State = union(enum) {
         idle,
@@ -69,6 +94,22 @@ pub const Port = struct {
         /// its write when it resumes
         taken: Side,
     };
+
+    /// Keeps the state as it is in `before`, unless it is kept already. A
+    /// node calls it before each change it makes in a step.
+    pub inline fn mark(self: *Port) void {
+        if (self.marked) return;
+        self.marked = true;
+        self.before = self.state;
+    }
+
+    /// Returns the state kept by `mark`, and forgets it
+    pub inline fn unmark(self: *Port) State {
+        const state = self.before;
+        self.marked = false;
+        self.before = .idle;
+        return state;
+    }
 
     /// Returns the value written by the other side, or null if `side` must
     /// suspend until the other side writes.
@@ -168,6 +209,31 @@ pub const Link = struct {
     port: ?*Port = null,
     side: Side = .a,
 };
+
+test each {
+    var it = each(select(0x1a5).?);
+    for ([_]Direction{ .right, .down, .left, .up }) |direction| try std.testing.expectEqual(direction, it.next().?);
+    try std.testing.expectEqual(null, it.next());
+    it = each(select(0x175).?);
+    try std.testing.expectEqual(Direction.left, it.next().?);
+    try std.testing.expectEqual(null, it.next());
+}
+
+test "a marked port keeps how it was before the first change" {
+    var port: Port = .{};
+    port.mark();
+    _ = port.write(.a, 7);
+    port.mark();
+    port.cancelWrite(.a);
+    try std.testing.expect(port.marked);
+    try std.testing.expectEqual(Port.State.idle, port.unmark());
+    try std.testing.expectEqual(Port{}, port);
+
+    _ = port.read(.b);
+    port.mark();
+    _ = port.write(.a, 7);
+    try std.testing.expectEqual(Port.State{ .reading = .b }, port.unmark());
+}
 
 test select {
     try expectEqual(Select.initOne(.right), select(0x1d5).?);

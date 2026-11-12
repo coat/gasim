@@ -295,7 +295,11 @@ fn take(self: *Uart, now: u64, wait: bool) !bool {
     const room = self.taken[pending..];
     if (room.len == 0) return false;
     var got = input.queue.get(input.io, room, 0) catch |err| switch (err) {
-        error.Closed => return false,
+        error.Closed => {
+            // the end of input, which is not asked for again each round
+            self.input = null;
+            return false;
+        },
         else => |e| return e,
     };
     if (got == 0) {
@@ -304,7 +308,10 @@ fn take(self: *Uart, now: u64, wait: bool) !bool {
         self.waiting.store(true, .release);
         defer self.waiting.store(false, .release);
         got = input.queue.get(input.io, room, 1) catch |err| switch (err) {
-            error.Closed => return false,
+            error.Closed => {
+                self.input = null;
+                return false;
+            },
             else => |e| return e,
         };
     }

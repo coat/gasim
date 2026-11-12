@@ -49,7 +49,7 @@ For a quick measure without the benchmark, use `--stats`:
 
 ```
 $ gasim run --stats tools/bench/ring.ga > /dev/null
-info: 7300937 steps in 0.670 s, 10.9M steps/s, and 44.882 ms of the chip's time
+info: 7300937 steps in 0.344 s, 21.2M steps/s, and 44.882 ms of the chip's time
 ```
 
 See [`--stats`](options.md#debugging) for what a step is.
