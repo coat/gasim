@@ -82,6 +82,10 @@ devices: Devices = .{},
 interactive: u8 = 0,
 /// how many of `devices` drive a wakeup pin and say when it changes
 wakers: u8 = 0,
+/// That `run` has to service the devices before its next round: one may
+/// have something to do. While it is false, none can have, and `run` skips
+/// them (see `poll`).
+devices_due: bool = true,
 /// rung by whatever gives the devices on pins input, so that a run with
 /// more than one waits for any of them (see `waitForInput`)
 doorbell: ?Device.Queue = null,
@@ -103,8 +107,13 @@ held: u8 = 0,
 /// where each node starts after reset, as `init`, `loadRom` and
 /// `attachFeeder` leave it, for a chip that is reset again
 reset_address: []Address,
+/// the node on each port of each node, or `no_neighbour`, as
+/// `Layout.neighbour` works out
+neighbours: [][4]u16,
 
 const Chip = @This();
+
+const no_neighbour = std.math.maxInt(u16);
 
 pub const max_breakpoints = 32;
 pub const max_watches = 32;
@@ -631,6 +640,11 @@ pub fn initChips(gpa: Allocator, spec: Spec, chips: u8) Allocator.Error!Chip {
     resets.* = .{};
     const reset_address = try gpa.alloc(Address, count);
     errdefer gpa.free(reset_address);
+    const neighbours = try gpa.alloc([4]u16, count);
+    errdefer gpa.free(neighbours);
+    for (neighbours, 0..) |*of, i| for (of, 0..) |*j, d| {
+        j.* = layout.neighbour(@intCast(i), @fromBackingInt(@intCast(d))) orelse no_neighbour;
+    };
 
     var chip: Chip = .{
         .layout = layout,
@@ -643,6 +657,7 @@ pub fn initChips(gpa: Allocator, spec: Spec, chips: u8) Allocator.Error!Chip {
         .serdes = serdes,
         .resets = resets,
         .reset_address = reset_address,
+        .neighbours = neighbours,
     };
     @memset(ports, .{});
     @memset(queued, false);
@@ -688,6 +703,7 @@ pub fn deinit(self: *Chip, gpa: Allocator) void {
     gpa.destroy(self.serdes);
     gpa.destroy(self.resets);
     gpa.free(self.reset_address);
+    gpa.free(self.neighbours);
     self.* = undefined;
 }
 
@@ -855,13 +871,13 @@ pub fn execute(self: *Chip, i: u16, word: Word) error{NotWaitingForCode}!void {
     const ports = port.select(@bitCast(n.p.address)).?;
     // a word already delivered to the node is code it will run first, so
     // check every port before withdrawing the node's reads from any
-    var it = ports.iterator();
+    var it = port.each(ports);
     while (it.next()) |direction| {
         const link = n.ports[@backingInt(direction)];
         const p = link.port orelse continue;
         if (p.state == .delivered and p.state.delivered.side == link.side) return error.NotWaitingForCode;
     }
-    it = ports.iterator();
+    it = port.each(ports);
     while (it.next()) |direction| {
         const link = n.ports[@backingInt(direction)];
         if (link.port) |p| _ = p.cancelRead(link.side);
@@ -1273,15 +1289,20 @@ fn stepByHand(self: *Chip, i: u16, comptime extent: Extent) void {
 /// `stepNode` for a node that is not in the queue
 fn stepQueued(self: *Chip, i: u16, comptime extent: Extent) void {
     const n = &self.nodes[i];
-    var before: [4]Port.State = undefined;
-    for (n.ports, &before) |link, *state| state.* = if (link.port) |p| p.state else .idle;
-
     const fetching = n.state == .fetch;
     const retrying = n.suspended;
     // the devices on the pins' nets, told the nets' levels as the node
     // writes io during the step (`pin_device`), and at its end, as time has
     // passed for them
     const wired = n.pin_device != null;
+    // A node that can reset a chip may reset its own in the step, which
+    // clears its ports and their marks. Its ports are then compared as
+    // they were before the step, as the marks cannot say what changed.
+    const resets = wired and self.resets.len > 0;
+    var before: [4]Port.State = undefined;
+    if (resets) for (n.ports, &before) |link, *state| {
+        state.* = if (link.port) |p| p.state else .idle;
+    };
     switch (extent) {
         .word => n.step(),
         .slot => n.stepSlot(),
@@ -1320,8 +1341,24 @@ fn stepQueued(self: *Chip, i: u16, comptime extent: Extent) void {
         self.hit = .{ .hazard = h };
     };
 
-    for (n.ports, before, 0..) |link, state, d| {
+    if (resets) return self.portsChangedSince(i, before);
+    // The ports the step changed, which it marked. A step that neither
+    // waits nor transfers a word changed none.
+    if (n.suspended or n.transfers.any()) for (n.ports, 0..) |link, d| {
         const p = link.port orelse continue;
+        if (!p.marked) continue;
+        const state = p.unmark();
+        if (std.meta.eql(state, p.state)) continue;
+        self.portChanged(i, @fromBackingInt(@intCast(d)), state);
+    };
+}
+
+/// The ports of node `i` that are not as `before` says, after a step that
+/// may have reset its chip
+noinline fn portsChangedSince(self: *Chip, i: u16, before: [4]Port.State) void {
+    for (self.nodes[i].ports, before, 0..) |link, state, d| {
+        const p = link.port orelse continue;
+        if (p.marked) _ = p.unmark();
         if (std.meta.eql(state, p.state)) continue;
         self.portChanged(i, @fromBackingInt(@intCast(d)), state);
     }
@@ -1455,10 +1492,13 @@ noinline fn serdesSent(self: *Chip, i: u16) void {
 /// once, as it is behind, it would only wait again. Out of line, as most
 /// steps change no port.
 noinline fn portChanged(self: *Chip, i: u16, direction: Direction, state: Port.State) void {
-    const j = self.layout.neighbour(i, direction) orelse {
+    const j = self.neighbours[i][@backingInt(direction)];
+    if (j == no_neighbour) {
+        // a port that faces off the chip, which a device may be on
+        self.devices_due = true;
         if (direction == .up and self.serdes.len > 0) self.serdesPortChanged(i);
         return;
-    };
+    }
     const n = &self.nodes[i];
     const other = &self.nodes[j];
     // a word passes between neighbours when the second of them gets to the
@@ -1621,8 +1661,13 @@ const Polled = struct {
     interrupted: bool = false,
 };
 
+/// Services the devices, and notes whether any may have something to do
+/// before a node next changes a port that faces off the chip
+/// (`devices_due`): one on a port that is not idle, one on pins, which
+/// works at its node's time, or one with output still to flush.
 inline fn poll(self: *Chip) !Polled {
     var polled: Polled = .{};
+    var due = false;
     for (self.devices.slice()) |d| {
         if (d.device.output) |output| polled.pending += output.end;
         _ = try self.serviceOne(d, false);
@@ -1630,9 +1675,19 @@ inline fn poll(self: *Chip) !Polled {
         if (d.device.interrupted) |flag| if (flag.load(.monotonic)) {
             polled.interrupted = true;
         };
+        if (d.device.vtable.service != null) {
+            if (d.port) |p| {
+                if (p.state != .idle) due = true;
+            } else due = true;
+        }
     }
+    self.devices_due = due or polled.pending_after != 0;
     return polled;
 }
+
+/// the most rounds `run` takes without servicing the devices, so that it
+/// sees an interruption soon
+const rounds_unpolled = 256;
 
 /// Runs until every node is suspended on something no device can complete,
 /// a node reaches a breakpoint or makes a watched transfer, or a device is
@@ -1648,21 +1703,30 @@ pub fn run(self: *Chip) !void {
     }
     var quiet_rounds: u16 = 0;
     if (self.interrupted()) return self.flushOutput();
+    // whatever was done to the chip since the last run
+    self.devices_due = true;
+    var unpolled: u16 = 0;
     while (self.hit == null and !self.pastLimit()) {
-        const polled = try self.poll();
-        // seen in the same pass as the devices are serviced, so they are
-        // serviced once more than they would be if it were checked first
-        if (polled.interrupted) break;
-        // flush once output stops for a while, so a busy node does not hold
-        // it up while a steady stream of output is still written in blocks
-        if (polled.pending == 0 or polled.pending_after != polled.pending) {
-            quiet_rounds = 0;
-        } else if (quiet_rounds == flush_after_rounds) {
-            try self.flushOutput();
-        } else quiet_rounds += 1;
+        if (self.devices_due or unpolled == rounds_unpolled) {
+            unpolled = 0;
+            const polled = try self.poll();
+            // seen in the same pass as the devices are serviced, so they
+            // are serviced once more than they would be if it were checked
+            // first
+            if (polled.interrupted) break;
+            // flush once output stops for a while, so a busy node does not
+            // hold it up while a steady stream of output is still written
+            // in blocks
+            if (polled.pending == 0 or polled.pending_after != polled.pending) {
+                quiet_rounds = 0;
+            } else if (quiet_rounds == flush_after_rounds) {
+                try self.flushOutput();
+            } else quiet_rounds += 1;
+        } else unpolled += 1;
         if (self.step()) continue;
         // with nothing else to do, wait for input
         if (!try self.waitForInput()) break;
+        self.devices_due = true;
     }
     try self.flushOutput();
 }

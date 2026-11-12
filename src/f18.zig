@@ -353,7 +353,7 @@ pub const Computer = struct {
         };
         // an address that is not a port waits forever
         const ports = port.select(address) orelse return true;
-        var it = ports.iterator();
+        var it = port.each(ports);
         while (it.next()) |direction| {
             const link = self.ports[@backingInt(direction)];
             const p = link.port orelse {
@@ -421,7 +421,16 @@ pub const Computer = struct {
     }
 
     pub fn execute(self: *Computer, opcode: Opcode) void {
-        const code = @backingInt(opcode);
+        // each opcode has its own copy of what follows, with the opcode
+        // known, so that what depends on it is worked out when gasim is
+        // built and the opcode itself is not called through a table
+        switch (opcode) {
+            inline else => |known| self.executeKnown(known),
+        }
+    }
+
+    inline fn executeKnown(self: *Computer, comptime opcode: Opcode) void {
+        const code = comptime @backingInt(opcode);
         // the address a memory opcode uses, before it moves A or P on. DB002
         // only times @p and !p as memory opcodes, but with P in io space, as
         // in port execution, they read and write the port as @b and !b do
@@ -434,7 +443,7 @@ pub const Computer = struct {
         // DB002's empty next, `begin next`: the next is its word's whole
         // loop, and jumps back to it
         const empty_next = opcode == .next and self.slot == 0 and self.return_stack.t != 0;
-        opcodes.opcodes[code](self);
+        @call(.always_inline, opcodes.opcodes[code], .{self});
         if (self.suspended) return;
 
         // typical times of the G144A12 (DB002 §5.3), in picoseconds. Not
@@ -534,8 +543,14 @@ pub const Computer = struct {
 
     /// Reads from memory or I/O space. Returns null, suspending the computer,
     /// while waiting on a comm port. Undefined I/O addresses hang forever.
-    pub fn read(self: *Computer, address: Address) ?Word {
+    pub inline fn read(self: *Computer, address: Address) ?Word {
+        // memory is read in line, as most reads are of it
         if (!address.io) return self.fetch(address);
+        return self.readIoSpace(address);
+    }
+
+    /// `read`, of an address in io space
+    fn readIoSpace(self: *Computer, address: Address) ?Word {
         // the pins, read in io and on the wakeup pin's port
         if (self.pin_device) |device| device.read(device.context, self);
 
@@ -557,12 +572,16 @@ pub const Computer = struct {
 
     /// Writes to memory or I/O space. Returns false, suspending the computer,
     /// while waiting on a comm port. Undefined I/O addresses hang forever.
-    pub fn write(self: *Computer, address: Address, value: Word) bool {
+    pub inline fn write(self: *Computer, address: Address, value: Word) bool {
         if (!address.io) {
             self.store(address, value);
             return true;
         }
+        return self.writeIoSpace(address, value);
+    }
 
+    /// `write`, of an address in io space
+    fn writeIoSpace(self: *Computer, address: Address, value: Word) bool {
         const raw: u9 = @bitCast(address);
         if (raw == io_address) {
             self.io = value;
@@ -585,22 +604,26 @@ pub const Computer = struct {
     /// A multiport read completes with the first port that is written, or
     /// the wakeup pin reaching the state it waits for
     fn readPorts(self: *Computer, ports: port.Select) ?Word {
-        var it = ports.iterator();
+        var it = port.each(ports);
         while (it.next()) |direction| {
             const link = self.ports[@backingInt(direction)];
-            const word = if (link.port) |p|
-                p.read(link.side) orelse continue
-            else if (self.awake(direction))
+            const word = if (link.port) |p| word: {
+                p.mark();
+                break :word p.read(link.side) orelse continue;
+            } else if (self.awake(direction))
                 // a value the program must drop
                 0
             else
                 continue;
             self.transfers.read.insert(direction);
             self.transfers.value_read = word;
-            var others = ports.iterator();
+            var others = port.each(ports);
             while (others.next()) |other| {
                 const other_link = self.ports[@backingInt(other)];
-                if (other_link.port) |o| if (o.cancelRead(other_link.side)) self.note(.lost_word);
+                if (other_link.port) |o| {
+                    o.mark();
+                    if (o.cancelRead(other_link.side)) self.note(.lost_word);
+                }
             }
             return word;
         }
@@ -646,10 +669,11 @@ pub const Computer = struct {
     /// read, or completes with the first port to read it
     fn writePorts(self: *Computer, ports: port.Select, value: Word) bool {
         var written = false;
-        var it = ports.iterator();
+        var it = port.each(ports);
         while (it.next()) |direction| {
             const link = self.ports[@backingInt(direction)];
             const p = link.port orelse continue;
+            p.mark();
             if (p.write(link.side, value)) {
                 written = true;
                 self.transfers.written.insert(direction);
@@ -657,10 +681,13 @@ pub const Computer = struct {
             }
         }
         if (written) {
-            it = ports.iterator();
+            it = port.each(ports);
             while (it.next()) |direction| {
                 const link = self.ports[@backingInt(direction)];
-                if (link.port) |p| p.cancelWrite(link.side);
+                if (link.port) |p| {
+                    p.mark();
+                    p.cancelWrite(link.side);
+                }
             }
         }
         return written;
