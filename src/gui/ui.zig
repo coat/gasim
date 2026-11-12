@@ -75,14 +75,7 @@ pub fn stop() void {
 /// loading `loads` of `.blk` and `.cf` files. The editor saves colorForth
 /// back to `saved_to`, or asks where.
 pub fn open(path: []const u8, file: []const u8, loads: []const u32, saved_to: ?[]const u8) Allocator.Error!void {
-    const kind: Sim.Kind = if (std.mem.endsWith(u8, path, ".af"))
-        .af
-    else if (std.mem.endsWith(u8, path, ".blk"))
-        .blk
-    else if (std.mem.endsWith(u8, path, ".cf"))
-        .cf
-    else
-        .ga;
+    const kind: Sim.Kind = .ofPath(path);
     running = false;
     dock.forgetInput();
     const loaded = sim.load(kind, file, loads);
@@ -1033,7 +1026,7 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const dvui = @import("dvui");
 const gasim = @import("gasim");
 const Chip = gasim.Chip;
-const Sim = @import("Sim");
+const Sim = gasim.Sim;
 const dock = @import("dock.zig");
 const editor = @import("editor.zig");
 const files = @import("files.zig");

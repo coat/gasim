@@ -334,6 +334,559 @@ fn writeOut(io: Io, text: []const u8) !u8 {
     return 0;
 }
 
+/// where stdin and stdout go, and the chip's file, once a board has had its
+/// say
+const Wiring = struct {
+    chip_path: ?[]const u8,
+    /// the board's serial port on stdin and stdout
+    serial: ?gasim.Board.Serial = null,
+    /// the node whose UART is on stdin and stdout
+    uart_node: ?u16,
+    uart_baud: u32,
+};
+
+/// Checks the options given with a board against it, and finds which of its
+/// serial ports is on stdin and stdout
+fn wire(arena: Allocator, o: *const Options, board: ?gasim.Board, from_snapshot: bool) !Wiring {
+    var wiring: Wiring = .{ .chip_path = o.chip_path, .uart_node = o.uart_node, .uart_baud = o.uart_baud };
+    const b = board orelse return wiring;
+    const settings = o.settings[0..o.settings_len];
+    const ptys = o.pty_ports[0..o.pty_len];
+    // the terminal user interface and arrayForth 3 know one chip
+    if (b.chips > 1 and (o.command == .tui or o.command == .aforth)) usage("--board with more than one chip needs run", .{});
+    for (settings) |setting| {
+        for (b.jumpers) |j| {
+            if (std.mem.eql(u8, j.name, setting.name)) break;
+        } else usage("--jumper {s}: {s} has no such jumper", .{ setting.name, b.name });
+    }
+    // relative to the board file, unless absolute
+    if (!from_snapshot) wiring.chip_path = if (std.mem.eql(u8, b.chip, "ga144")) null else try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(o.board_path.?) orelse ".", b.chip });
+    if (b.serial.len > 0 and o.console_given) usage("--board puts its serial port on stdin and stdout, so there is no console for --console", .{});
+    if (o.flash_path != null and b.flash == null) usage("--flash: {s} has no SPI flash", .{b.name});
+    // the ports on ptys, and the one on stdin and stdout, if any
+    for (ptys, 0..) |p, k| {
+        const s = b.serialPort(p.name) orelse usage("--pty {s}: {s} has no such serial port", .{ p.name, b.name });
+        for (ptys[0..k]) |other| if (std.mem.eql(u8, other.name, p.name)) usage("--pty {s} is given twice", .{p.name});
+        if (o.usb) |name| if (std.mem.eql(u8, name, p.name)) usage("--usb {s} puts port {s} on stdin and stdout, so --pty cannot", .{ name, name });
+        if (!b.jumperOn(s.rx.jumper, settings) and !b.jumperOn(s.tx.jumper, settings))
+            usage("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches its pty", .{s.name});
+    }
+    if (ptys.len == o.pty_ports.len and o.usb != null) usage("more than {d} serial ports, with --usb's", .{Chip.max_uarts});
+    // with ptys, stdin and stdout are on a port only if --usb says
+    wiring.serial = port: {
+        if (o.usb) |name| break :port b.serialPort(name) orelse usage("--usb {s}: {s} has no such serial port", .{ name, b.name });
+        break :port if (b.serial.len > 0 and ptys.len == 0) b.serial[0] else null;
+    };
+    const s = wiring.serial orelse {
+        if (ptys.len > 0) {
+            if (o.input != .stdin) usage("--input has nothing to read it, with --pty and no --usb", .{});
+            if (o.boot) usage("--boot sends through the port on stdin and stdout, which --pty leaves on none without --usb", .{});
+            if (o.console_given) usage("--board with --pty has no console for --console", .{});
+        }
+        return wiring;
+    };
+    const rx = b.jumperOn(s.rx.jumper, settings);
+    const tx = b.jumperOn(s.tx.jumper, settings);
+    if (!rx and !tx) usage("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches stdin or stdout", .{s.name});
+    if (!rx and (o.boot or o.path == null) and !from_snapshot)
+        usage("--jumper {s}=off leaves port {s}'s rx unconnected, so nothing can boot node {f} from it", .{ s.rx.jumper.?, s.name, Chip.nodeName(s.rx.ref().node) });
+    wiring.uart_node = if (rx) s.rx.ref().node else s.tx.ref().node;
+    wiring.uart_baud = s.baud;
+    return wiring;
+}
+
+/// Exits with what is wrong with a board on its chip, if anything is
+fn checkBoard(b: gasim.Board, spec: gasim.Spec, path: []const u8) void {
+    var fault: gasim.Board.Fault = .none;
+    b.check(spec, &fault) catch |err| switch (fault) {
+        .none => fatal("{s}: {t}", .{ path, err }),
+        .name => |name| fatal("{s}: {s}: {t}", .{ path, name, err }),
+        .pin => |pin| fatal("{s}: {f}.{d}: {t}, on {s}", .{ path, Chip.nodeName(pin.node), pin.pin, err, spec.name }),
+        .node => |node| fatal("{s}: {f}: {t}, on {s}", .{ path, Chip.nodeName(node), err, spec.name }),
+        .link => unreachable,
+    };
+}
+
+/// a program's file
+const Source = struct {
+    /// its bytes, or none for colorForth, whose blocks have room to grow
+    file: []const u8 = "",
+    /// as lines of text, which a listing shows and blocks are numbered by
+    text: []const u8 = "",
+    colorforth: ?ColorForthBlocks = null,
+};
+
+fn readSource(io: Io, arena: Allocator, o: *const Options, kind: Kind) !Source {
+    const path = o.path orelse return .{};
+    // the editor creates a file that does not exist yet
+    const colorforth: ?ColorForthBlocks = if (kind == .cf) try readColorForth(io, arena, path, o.command == .tui) else null;
+    const file = switch (kind) {
+        .cf => "",
+        .blk => Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_blocks_len)) catch |err| fatal("{s}: {t}", .{ path, err }),
+        // one spare byte tells a file of the most allowed from a longer one
+        .ga, .af => Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_source_len + 1)) catch |err| switch (err) {
+            error.StreamTooLong => fatal("{s}: file is too large", .{path}),
+            else => fatal("{s}: {t}", .{ path, err }),
+        },
+    };
+    return .{
+        .file = file,
+        // blocks are listed as lines of text, numbered the same way
+        .text = if (kind == .cf and o.command == .listing)
+            try colorForthText(arena, colorforth.?)
+        else if (kind == .blk)
+            gasim.arrayforth.blockText(file, try arena.alloc(u8, gasim.arrayforth.blockCount(file) * 16 * 65))
+        else
+            file,
+        .colorforth = colorforth,
+    };
+}
+
+/// Exits with where a source failed to assemble
+fn failAssembling(err: anyerror, where: Where, diagnostic: *const assembler.Diagnostic, layout: Chip.Layout) noreturn {
+    switch (err) {
+        error.TooManyNodes => fatal("{f}: more nodes than {f} has at '{s}'", .{ where, layout, diagnostic.token }),
+        error.NoSuchBlock => if (diagnostic.line == 0) fatal("{s}: has fewer blocks than --load needs", .{where.path}),
+        error.NoSuchBin => if (diagnostic.line == 0) fatal("{s}: a boot descriptor loads a bin that was never saved", .{where.path}),
+        else => {},
+    }
+    fatal("{f}: {t} at '{s}'", .{ where, err, diagnostic.token });
+}
+
+/// Warns of what a source assembled with that a real chip or arrayForth
+/// would not take as gasim did
+fn warnAssembled(assembled: gasim.arrayforth.Assembled, path: []const u8, kind: Kind) void {
+    if (assembled.first_difference) |first| std.log.warn("{f}: arrayForth 2 noted {x:0>3} here, where gasim is at {x:0>3}, and {d} more gray numbers differ", .{
+        Where{ .path = path, .line = first.line, .kind = .cf },
+        first.noted,
+        first.found,
+        assembled.feedback_differs - 1,
+    });
+    for (assembled.programs) |program| if (program.unsettled_add) |add| std.log.warn("{f}: '{s}' runs straight after an opcode that changes S or T, which on a real chip needs a . between (DB001 2.3.3){s}", .{
+        Where{ .path = path, .line = add.line, .kind = kind },
+        add.token,
+        if (program.unsettled_adds > 1) ", as do others in its node" else "",
+    });
+    if (assembled.unresolved_then) |line| std.log.warn("{f}: then has nothing to resolve, which arrayForth 2 went past", .{
+        Where{ .path = path, .line = line, .kind = .cf },
+    });
+}
+
+/// Writes each program as its words beside its source, and the boot
+/// descriptors
+fn writeListing(io: Io, assembled: gasim.arrayforth.Assembled, source: []const u8) !u8 {
+    var buffer: [4096]u8 = undefined;
+    var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
+    const writer = &file_writer.interface;
+    for (assembled.programs, 0..) |program, n| {
+        if (n > 0) try writer.writeByte('\n');
+        if (program.bin) |bin| try writer.print("bin {d} ", .{bin});
+        try writer.print("node {f}\n", .{Chip.nodeName(program.node)});
+        try gasim.disassembler.listing(writer, program, source);
+    }
+    for (assembled.descriptors) |descriptor| try writer.print("\n{f}", .{descriptor});
+    try writer.flush();
+    return 0;
+}
+
+/// how a program gets into the chip
+const Start = enum {
+    /// set up in its nodes, as if they had booted
+    direct,
+    /// as a stream in the board's SPI flash, which node 705's ROM reads
+    flash,
+    /// as a stream sent to the serial port's node, as to 708
+    uart,
+    /// as a stream clocked into node 300's synchronous line
+    sync,
+    /// as a stream fed into node 001's up port, as from its SERDES
+    serdes,
+};
+
+/// How the program gets into the chip, exiting if gasim cannot send what it
+/// has that way.
+///
+/// Boot descriptors say what to load into nodes and how to start them, as a
+/// stream's frame does even if it describes no node. The parts of a stream
+/// set nodes up one after another, and /ROOT and FORWARD are for the root's
+/// ROM, which only the STREAMER's stream does, through 708's UART, 300's
+/// synchronous line or 705's flash.
+fn startOf(o: *const Options, assembled: gasim.arrayforth.Assembled, uart_node: ?u16, on_board: bool, path: []const u8) Start {
+    const interactive = o.command == .tui or o.command == .aforth;
+    // Streams and pF/144's nucleus sent one after another, as block 1665
+    // sends them, are not yet (ROADMAP step 6).
+    if (assembled.sends().len > 0)
+        fatal("{s} sends streams or pF/144's nucleus with !STREAM, !stream or !NUCLEUS, which gasim doesn't send yet", .{path});
+    const root: ?u16 = if (assembled.stream) |s| s.root else null;
+    const start: Start = if (!o.boot) .direct else if (root == 705) .flash else if (uart_node != null) .uart else if (root == 300) .sync else .serdes;
+    if (o.boot and root == 207)
+        fatal("--boot: {s}'s stream is for node 207, which pF/144's snorkel sends, and gasim does not run pF/144", .{path});
+    // a board's pins are the board's, and its serial port the root it
+    // boots from
+    if (o.boot and root == 300 and on_board)
+        fatal("--boot clocks {s}'s stream into node 300's pins itself, which --board leaves to the board", .{path});
+    if (assembled.stream) |s| {
+        if (s.root == 207 and s.frame_count > 1)
+            fatal("{s}'s stream from node 207 has several frames, which pF/144's snorkel sends, and gasim sets up the nodes of only one", .{path});
+        if ((s.part_count != s.frame_count or s.frame_count > 1) and (start == .direct or start == .serdes))
+            fatal("{s}'s stream has several frames, or /ROOT or FORWARD, which only --boot sends to the root's ROM, with --uart 708, a --board's flash for 705, or 300's synchronous line", .{path});
+    }
+    // the flash is not in the chip's snapshots, which the interface
+    // restarts from
+    if (start == .flash and interactive) fatal("--boot from a board's flash needs run", .{});
+    if (start == .sync and interactive) fatal("--boot through node 300's synchronous line needs run", .{});
+    return start;
+}
+
+/// a program assembled, and the chip it is for
+const Loading = struct {
+    path: []const u8,
+    assembled: gasim.arrayforth.Assembled,
+    descriptors: []const gasim.boot.Descriptor,
+    spec: *const gasim.Spec,
+    layout: Chip.Layout,
+    /// whether the chip's ROM is loaded
+    rom: bool,
+};
+
+/// The program's stream packed for a board's flash, which 705's ROM reads
+/// it from
+fn flashStream(arena: Allocator, o: *const Options, board: ?gasim.Board, l: *const Loading) ![]const u8 {
+    const b = board orelse fatal("--boot: {s}'s stream is for node 705, which boots from a board's SPI flash (see --board)", .{l.path});
+    const pins = b.flash orelse fatal("--boot: {s}'s stream is for node 705, which boots from an SPI flash, and {s} has none", .{ l.path, b.name });
+    const settings = o.settings[0..o.settings_len];
+    if (o.flash_path != null) fatal("--boot puts {s}'s stream in the flash, so --flash cannot", .{l.path});
+    if (!std.meta.eql(pins.data_in.ref(), Chip.PinRef{ .node = 705, .pin = 17 }))
+        fatal("--boot: {s}'s flash sends on {f}.{d}, not 705.17, which 705's ROM reads", .{ b.name, Chip.nodeName(pins.data_in.ref().node), pins.data_in.pin });
+    if (l.spec.node(705).rom != .spi_boot) fatal("--boot needs node 705 to have an SPI boot ROM, as the GA144's does", .{});
+    if (!l.rom) fatal("--boot needs a ROM, for node 705 to boot from (see --rom)", .{});
+    for (b.pulls) |pull| if (pull.high and std.meta.eql(pull.terminal().ref(), pins.data_in.ref()) and b.jumperOn(pull.jumper, settings))
+        fatal("--boot: {s} holds 705.17 high{s}{s}, so 705 does not boot from the flash", .{ b.name, if (pull.jumper != null) " through " else "", pull.jumper orelse "" });
+    const words = layOut(arena, l.layout, l.assembled, l.path);
+    return gasim.streamer.pack(words, try arena.alloc(u8, (words.len * 18 + 15) / 16 * 2)) catch
+        fatal("--boot: {s}'s stream is too long for the STREAMER to pack", .{l.path});
+}
+
+/// The bytes that boot the chip through the UART of node `root`: the
+/// program's stream, or gasim's own for a program without one
+fn uartStream(gpa: Allocator, arena: Allocator, l: *const Loading, root: u16, uart_option: []const u8) ![]const u8 {
+    // gasim's boot stream sets up nodes of the chip it goes to, where
+    // the STREAMER's paths can go on to another
+    if (l.assembled.stream == null) for (l.descriptors) |descriptor| if (descriptor.node / Chip.Layout.chip_numbers != root / Chip.Layout.chip_numbers)
+        fatal("--boot through node {f} boots its chip, not node {f}", .{ Chip.nodeName(root), Chip.nodeName(descriptor.node) });
+    if (l.spec.node(root).rom != .async_boot)
+        fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {f}", .{ uart_option, Chip.nodeName(root) });
+    if (!l.rom) fatal("--boot needs a ROM, for node {f} to boot from (see --rom)", .{Chip.nodeName(root)});
+    // laid out as arrayForth 3's STREAMER does, for a STREAM[ ]STREAM
+    const words = if (l.assembled.stream) |s| streamer: {
+        if (root != s.root) fatal("--boot: {s}'s stream is for node {f}, not the --uart node {f}", .{ l.path, Chip.nodeName(s.root), Chip.nodeName(root) });
+        break :streamer layOut(arena, l.layout, l.assembled, l.path);
+    } else gasim: {
+        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(l.layout, l.descriptors) + 3 * (l.descriptors.len + 2));
+        break :gasim gasim.boot.asyncStream(gpa, l.layout, root, l.descriptors, l.assembled.programs, buffer) catch |err| switch (err) {
+            error.NoSuchNode => fatal("--uart node {f} is not in {f}", .{ Chip.nodeName(root), l.layout }),
+            error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
+            error.RootTooLong => fatal("--boot: node {f}'s program leaves no room in its RAM for the code that sets it up", .{Chip.nodeName(root)}),
+            else => |e| return e,
+        };
+    };
+    return gasim.boot.asyncBytes(words, try arena.alloc(u8, 3 * words.len));
+}
+
+/// The program's stream to clock into node 300's pins, as the EVB002's host
+/// 300 would its target's, whose pins are the board's
+fn syncStream(arena: Allocator, o: *const Options, l: *const Loading) []gasim.Word {
+    if (o.console_node == 300 and o.console_port == .left) fatal("--boot clocks the stream into node 300's wakeup pin, which its left port reads, so the console cannot use it", .{});
+    if (l.spec.node(300).rom != .sync_boot) fatal("--boot needs node 300 to have a sync boot ROM, as the GA144's does", .{});
+    if (!l.rom) fatal("--boot needs a ROM, for node 300 to boot from (see --rom)", .{});
+    return layOut(arena, l.layout, l.assembled, l.path);
+}
+
+/// gasim's boot stream to feed into node 001's up port
+fn serdesStream(gpa: Allocator, arena: Allocator, o: *const Options, l: *const Loading) ![]const gasim.Word {
+    if (o.console_node == 1 and o.console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
+    if (l.spec.node(1).rom != .serdes_boot) fatal("--boot needs node 001 to have a SERDES boot ROM, as the GA144's does", .{});
+    if (!l.rom) fatal("--boot needs a ROM, for node 001 to boot from (see --rom)", .{});
+    for (l.descriptors) |descriptor| if (descriptor.node >= Chip.Layout.chip_numbers)
+        fatal("--boot through node 001 boots its chip, not node {f}", .{Chip.nodeName(descriptor.node)});
+    const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(l.layout, l.descriptors));
+    return gasim.boot.stream(gpa, l.layout, 1, .up, l.descriptors, l.assembled.programs, buffer) catch |err| switch (err) {
+        error.NoSuchNode => fatal("--boot needs node 001, which is not in {f}", .{l.layout}),
+        error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
+        error.NoSuchBin => fatal("{s}: a node loads a bin that was not saved", .{l.path}),
+        else => |e| return e,
+    };
+}
+
+/// Sets the breakpoints and watches the options name
+fn setStops(chip: *Chip, o: *const Options) void {
+    const layout = chip.layout;
+    for (o.breakpoints[0..o.breakpoints_len]) |b| {
+        const index = layout.index(b.node) orelse
+            fatal("breakpoint node {f} is not in {f}", .{ Chip.nodeName(b.node), layout });
+        // the same breakpoint twice is still set
+        chip.breakpoints.insert(.init(index, b.address)) catch unreachable;
+    }
+    for (o.watches[0..o.watches_len]) |w| {
+        const index = layout.index(w.node) orelse
+            fatal("watch node {f} is not in {f}", .{ Chip.nodeName(w.node), layout });
+        for ([_]bool{ false, true }) |write| {
+            if (!(if (write) w.write else w.read)) continue;
+            chip.watches.insert(.{ .index = index, .direction = w.direction, .write = write }) catch
+                fatal("more than {d} watches", .{Chip.max_watches});
+        }
+    }
+}
+
+/// The serial ports on ptys, each with its UART. Each is read on its own
+/// thread, as stdin is, ringing the doorbell that a run waiting for any
+/// input waits on.
+///
+/// It keeps pointers to its own fields, so it must not move once `open`.
+const Ptys = struct {
+    ports: []const Options.Pty,
+    devices: [max]Pty,
+    uarts: [max]gasim.Uart,
+    inputs: [max]Io.Queue(u8),
+    input_buffers: [max][1024]u8,
+    output_buffers: [max][1024]u8,
+    queue_buffers: [max][4096]u8,
+    read_buffers: [max][1024]u8,
+    readers: [max]Io.File.Reader,
+    reading: [max]Io.Future((error{ReadFailed} || Io.Cancelable)!void),
+    writing: [max]Io.Future((Io.File.Writer.Error || Io.QueueClosedError)!void),
+
+    const max = Chip.max_uarts;
+
+    fn open(self: *Ptys, io: Io, arena: Allocator, ports: []const Options.Pty) void {
+        self.ports = ports;
+        for (ports, 0..) |p, k| {
+            self.devices[k] = Pty.open(io, arena, &self.output_buffers[k], &self.queue_buffers[k]) catch |err| fatal("--pty {s}: {t}", .{ p.name, err });
+            self.inputs[k] = .init(&self.input_buffers[k]);
+            self.readers[k] = .initStreaming(self.devices[k].master, io, &self.read_buffers[k]);
+        }
+    }
+
+    fn close(self: *Ptys, io: Io) void {
+        for (self.devices[0..self.ports.len]) |*device| device.close(io);
+    }
+
+    /// the UART of port `k`, at `baud`, on its pty
+    fn uart(self: *Ptys, io: Io, k: usize, baud: u32) *gasim.Uart {
+        self.uarts[k] = .init(baud, &self.devices[k].writer);
+        self.uarts[k].input = .{ .io = io, .queue = &self.inputs[k] };
+        return &self.uarts[k];
+    }
+
+    /// Starts reading and writing each, saying where it is
+    fn start(self: *Ptys, io: Io, doorbell: *Io.Queue(u8)) void {
+        for (self.ports, 0..) |p, k| {
+            self.reading[k] = io.concurrent(readRinging, .{ io, &self.readers[k].interface, &self.inputs[k], doorbell }) catch |err|
+                fatal("cannot read input concurrently: {t}", .{err});
+            self.writing[k] = io.concurrent(Pty.writeOut, .{&self.devices[k]}) catch |err|
+                fatal("cannot write output concurrently: {t}", .{err});
+            std.log.info("port {s}: {s}", .{ p.name, self.devices[k].path });
+        }
+    }
+
+    fn stop(self: *Ptys, io: Io) void {
+        for (self.writing[0..self.ports.len]) |*future| future.cancel(io) catch {};
+        for (self.reading[0..self.ports.len]) |*future| future.cancel(io) catch {};
+    }
+
+    fn warnDropped(self: *const Ptys) void {
+        for (self.ports, 0..) |p, k| if (self.devices[k].dropped > 0)
+            std.log.warn("port {s}: {d} bytes were dropped, as nothing read them from {s}", .{ p.name, self.devices[k].dropped, self.devices[k].path });
+    }
+};
+
+/// Attaches a board's serial ports, jumpers and pulls to the chip, and its
+/// flash and SRAM if asked for. Returns the SRAM.
+fn attachBoard(
+    io: Io,
+    arena: Allocator,
+    o: *const Options,
+    b: gasim.Board,
+    chip: *Chip,
+    /// the port on stdin and stdout, with its UART
+    serial: ?gasim.Board.Serial,
+    uart: *gasim.Uart,
+    ptys: *Ptys,
+    flash: ?*gasim.Flash,
+    with_sram: bool,
+) !?*gasim.Sram {
+    const path = o.board_path.?;
+    const settings = o.settings[0..o.settings_len];
+    var fault: gasim.Board.Fault = .none;
+    var attachments: [Chip.max_uarts]gasim.Board.Attachment = undefined;
+    var count: usize = 0;
+    if (serial) |s| {
+        attachments[0] = .{ .uart = uart, .port = s };
+        count = 1;
+    }
+    for (ptys.ports, 0..) |p, k| {
+        const s = b.serialPort(p.name).?;
+        attachments[count] = .{ .uart = ptys.uart(io, k, s.baud), .port = s };
+        count += 1;
+    }
+    b.apply(chip, attachments[0..count], settings, &fault) catch |err| switch (fault) {
+        .none => fatal("{s}: {t}", .{ path, err }),
+        .name => |name| fatal("{s}: port {s}: {t}", .{ path, name, err }),
+        .pin => |pin| fatal("{s}: {f}.{d}: {t}", .{ path, Chip.nodeName(pin.node), pin.pin, err }),
+        .node => |node| fatal("{s}: {f}: {t}", .{ path, Chip.nodeName(node), err }),
+        .link => |link| fatal("{s}: SERDES {f} to {f}: {t}", .{ path, Chip.nodeName(link[0]), Chip.nodeName(link[1]), err }),
+    };
+    if (flash) |f| b.attachFlash(chip, f, settings) catch |err|
+        fatal("{s}: the SPI flash's pins: {t}", .{ path, err });
+    const m = b.sram orelse return null;
+    if (!with_sram) return null;
+    // zeroed
+    const sram = try arena.create(gasim.Sram);
+    const words = try arena.alloc(u16, m.words);
+    @memset(words, 0);
+    sram.* = .init(words);
+    b.attachSram(chip, sram, settings) catch |err|
+        fatal("{s}: the SRAM: {t}", .{ path, err });
+    return sram;
+}
+
+/// Runs arrayForth 3's prompt, or the lines given, on the chip
+fn runAforth(
+    init: std.process.Init,
+    arena: Allocator,
+    o: *const Options,
+    chip: *Chip,
+    session: *gasim.arrayforth.Session,
+    diagnostic: *const assembler.Diagnostic,
+    /// the terminal
+    terminal: *Io.Writer,
+    /// with --json, what the prompt wrote, and what the console did
+    said: *Io.Writer.Allocating,
+    console_said: *Io.Writer.Allocating,
+    saving: Saving,
+    settle: bool,
+) !u8 {
+    const io = init.io;
+    const out = if (o.json) &said.writer else terminal;
+    const edit = try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io) and o.lines_len == 0;
+    var stderr_lines_buffer: [1024]u8 = undefined;
+    var stderr_lines: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_lines_buffer);
+    var errors: Io.Writer.Allocating = .init(arena);
+    const failed = try aforth.run(io, arena, chip, session, diagnostic, out, .{
+        .edit = edit,
+        .history = historyPath(io, arena, init.environ_map),
+        .lines = o.lines[0..o.lines_len],
+        .errors = if (o.json) &errors.writer else if (edit) out else &stderr_lines.interface,
+        .settle = settle,
+    });
+    if (o.to) |p| try saving.write(io, arena, p, chip);
+    if (o.json) {
+        var jw: std.json.Stringify = .{ .writer = terminal };
+        try jw.beginObject();
+        try jw.objectField("stop");
+        try jw.write(if (failed) "error" else "done");
+        try jw.objectField("output");
+        try report.bytes(&jw, said.written());
+        try jw.objectField("console");
+        try report.bytes(&jw, console_said.written());
+        try jw.objectField("errors");
+        try report.bytes(&jw, errors.written());
+        if (o.to) |p| {
+            try jw.objectField("snapshot");
+            try report.bytes(&jw, p);
+        }
+        try jw.endObject();
+        try terminal.writeByte('\n');
+        try terminal.flush();
+    }
+    return if (failed) report.status_error else 0;
+}
+
+/// what a snapshot of the chip is written with
+const Saving = struct {
+    machine: gasim.snapshot.Machine,
+    devices: gasim.snapshot.Devices,
+
+    fn write(self: Saving, io: Io, arena: Allocator, path: []const u8, chip: *const Chip) !void {
+        return writeSnapshot(io, arena, path, self.machine, chip, self.devices);
+    }
+};
+
+/// how a run or the steps of `step` ended
+const Ended = struct {
+    stop: report.Stop,
+    stepped: Stepped,
+    elapsed: Io.Duration,
+};
+
+/// Writes how a run ended as one JSON object, with the `output` its nodes
+/// wrote
+fn writeEnded(writer: *Io.Writer, o: *const Options, chip: *const Chip, ended: Ended, output: []const u8) !void {
+    const layout = chip.layout;
+    var jw: std.json.Stringify = .{ .writer = writer };
+    try jw.beginObject();
+    try report.stopFields(&jw, chip, ended.stop);
+    try jw.objectField("steps");
+    try jw.write(chip.steps);
+    try jw.objectField("time_ps");
+    try jw.write(report.chipTime(chip));
+    try jw.objectField("output");
+    try report.bytes(&jw, output);
+    if (ended.stepped.last) |i| {
+        try jw.objectField("stepped");
+        try report.nodeNumber(&jw, layout.nodeNumber(i));
+    }
+    if (o.to) |p| {
+        try jw.objectField("snapshot");
+        try report.bytes(&jw, p);
+    }
+    if (o.stats) {
+        try jw.objectField("seconds");
+        try jw.write(@as(f64, @floatFromInt(ended.elapsed.toNanoseconds())) / 1e9);
+    }
+    if (o.why) {
+        try jw.objectField("waiting");
+        try report.waiting(&jw, chip);
+    }
+    if (chip.hazard_count > 0) {
+        try jw.objectField("hazards");
+        try report.hazards(&jw, chip);
+        try jw.objectField("hazard_count");
+        try jw.write(chip.hazard_count);
+    }
+    if (o.show != .none) {
+        try jw.objectField("nodes");
+        try jw.beginArray();
+        switch (o.show) {
+            .none => {},
+            .all => for (0..chip.nodes.len) |i| try report.node(&jw, chip, @intCast(i)),
+            .nodes => |nodes| for (nodes) |node| try report.node(&jw, chip, layout.index(node).?),
+        }
+        try jw.endArray();
+    }
+    try jw.endObject();
+    try writer.writeByte('\n');
+    try writer.flush();
+}
+
+/// Logs how a run ended, and what the options ask to see of it
+fn logEnded(o: *const Options, chip: *const Chip, ended: Ended) void {
+    const layout = chip.layout;
+    if (o.stats) logStats(chip.*, ended.elapsed);
+    if (chip.hit) |hit| {
+        std.log.info("{f}", .{hit.describe(layout)});
+        logRegisters(&chip.nodes[hit.index()]);
+    }
+    if (ended.stepped.last) |i| std.log.info("stepped node {f}", .{Chip.nodeName(layout.nodeNumber(i))});
+    if (ended.stop == .limit) std.log.info("stopped at a limit, after {d} steps and {d} ps of the chip's time", .{ chip.steps, report.chipTime(chip) });
+    if (o.why) logWaiting(chip.*);
+    switch (o.show) {
+        .none => {},
+        .all => for (0..chip.nodes.len) |i| logNode(chip, @intCast(i)),
+        .nodes => |nodes| for (nodes) |node| logNode(chip, layout.index(node).?),
+    }
+}
+
 /// Sets the chip up as the options say, and does what the command does with
 /// it, returning the status to exit with
 fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8 {
@@ -348,162 +901,69 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     }
     const o = &from_snapshot;
     const command = o.command;
-    const listing = command == .listing;
-    var chip_path = o.chip_path;
-    const board_path = o.board_path;
-    const usb = o.usb;
-    const pty_ports = &o.pty_ports;
-    const pty_len = o.pty_len;
-    const settings = &o.settings;
-    const settings_len = o.settings_len;
-    const flash_path = o.flash_path;
-    const layout_given = o.layout;
-    const console_node = o.console_node;
-    const console_port = o.console_port;
-    const console_given = o.console_given;
-    var uart_node = o.uart_node;
-    var uart_baud = o.uart_baud;
-    const path = o.path;
-    const rom_path = o.rom_path;
-    const boot = o.boot;
-    const trace = o.trace;
-    const why = o.why;
-    const stats = o.stats;
-    var loads = o.loads;
-    var loads_len = o.loads_len;
-    const breakpoints = &o.breakpoints;
-    const breakpoints_len = o.breakpoints_len;
-    const watches = &o.watches;
-    const watches_len = o.watches_len;
+    const interactive = command == .tui or command == .aforth;
+    const settings = o.settings[0..o.settings_len];
+
     // the board, its chip, and the serial port on stdin and stdout, which is
     // as --uart is
-    if (board_path != null) {
-        if (chip_path != null or layout_given != null) usage("--board gives the chip, so --chip and --layout cannot", .{});
-        if (uart_node != null) usage("--board puts its serial port on stdin and stdout, so --uart cannot", .{});
-    } else if (usb != null or settings_len > 0 or pty_len > 0 or flash_path != null) usage("--usb, --pty, --jumper and --flash need --board", .{});
+    if (o.board_path != null) {
+        if (o.chip_path != null or o.layout != null) usage("--board gives the chip, so --chip and --layout cannot", .{});
+        if (o.uart_node != null) usage("--board puts its serial port on stdin and stdout, so --uart cannot", .{});
+    } else if (o.usb != null or o.settings_len > 0 or o.pty_len > 0 or o.flash_path != null) usage("--usb, --pty, --jumper and --flash need --board", .{});
     var board_text: []const u8 = o.board_text orelse "";
     var chip_text: []const u8 = o.chip_text orelse "";
-    const board: ?gasim.Board = if (board_path) |p| readBoard(io, arena, init.gpa, p, &board_text) else null;
-    if (board) |b| {
-        // the terminal user interface and arrayForth 3 know one chip
-        if (b.chips > 1 and (command == .tui or command == .aforth)) usage("--board with more than one chip needs run", .{});
-        for (settings[0..settings_len]) |setting| {
-            for (b.jumpers) |j| {
-                if (std.mem.eql(u8, j.name, setting.name)) break;
-            } else usage("--jumper {s}: {s} has no such jumper", .{ setting.name, b.name });
-        }
-        // relative to the board file, unless absolute
-        if (loaded == null) chip_path = if (std.mem.eql(u8, b.chip, "ga144")) null else try std.fs.path.resolve(arena, &.{ std.fs.path.dirname(board_path.?) orelse ".", b.chip });
-        if (b.serial.len > 0 and console_given) usage("--board puts its serial port on stdin and stdout, so there is no console for --console", .{});
-        if (flash_path != null and b.flash == null) usage("--flash: {s} has no SPI flash", .{b.name});
-    }
-    var flash: gasim.Flash = .init(if (flash_path) |p| Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(gasim.Flash.max_len + 1)) catch |err| switch (err) {
+    const board: ?gasim.Board = if (o.board_path) |p| readBoard(io, arena, init.gpa, p, &board_text) else null;
+    const wiring = try wire(arena, o, board, loaded != null);
+    const serial = wiring.serial;
+    const uart_node = wiring.uart_node;
+    var flash: gasim.Flash = .init(if (o.flash_path) |p| Io.Dir.cwd().readFileAlloc(io, p, arena, .limited(gasim.Flash.max_len + 1)) catch |err| switch (err) {
         error.StreamTooLong => fatal("--flash {s} is larger than a flash's 16 MB", .{p}),
         else => fatal("--flash {s}: {t}", .{ p, err }),
     } else &.{});
-    // the ports on ptys, and the one on stdin and stdout, if any
-    const ptys = pty_ports[0..pty_len];
-    for (ptys, 0..) |p, k| {
-        if (board.?.serialPort(p.name) == null) usage("--pty {s}: {s} has no such serial port", .{ p.name, board.?.name });
-        for (ptys[0..k]) |other| if (std.mem.eql(u8, other.name, p.name)) usage("--pty {s} is given twice", .{p.name});
-        if (usb) |name| if (std.mem.eql(u8, name, p.name)) usage("--usb {s} puts port {s} on stdin and stdout, so --pty cannot", .{ name, name });
-        const s = board.?.serialPort(p.name).?;
-        if (!board.?.jumperOn(s.rx.jumper, settings[0..settings_len]) and !board.?.jumperOn(s.tx.jumper, settings[0..settings_len]))
-            usage("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches its pty", .{s.name});
-    }
-    if (pty_len == pty_ports.len and usb != null) usage("more than {d} serial ports, with --usb's", .{Chip.max_uarts});
-    // with ptys, stdin and stdout are on a port only if --usb says
-    const serial: ?gasim.Board.Serial = if (board) |b| port: {
-        if (usb) |name| break :port b.serialPort(name) orelse usage("--usb {s}: {s} has no such serial port", .{ name, b.name });
-        break :port if (b.serial.len > 0 and pty_len == 0) b.serial[0] else null;
-    } else null;
-    if (board != null and serial == null and pty_len > 0) {
-        if (o.input != .stdin) usage("--input has nothing to read it, with --pty and no --usb", .{});
-        if (boot) usage("--boot sends through the port on stdin and stdout, which --pty leaves on none without --usb", .{});
-        if (console_given) usage("--board with --pty has no console for --console", .{});
-    }
-    if (serial) |s| {
-        const on = settings[0..settings_len];
-        const rx = board.?.jumperOn(s.rx.jumper, on);
-        const tx = board.?.jumperOn(s.tx.jumper, on);
-        if (!rx and !tx) usage("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches stdin or stdout", .{s.name});
-        if (!rx and (boot or path == null) and loaded == null)
-            usage("--jumper {s}=off leaves port {s}'s rx unconnected, so nothing can boot node {f} from it", .{ s.rx.jumper.?, s.name, Chip.nodeName(s.rx.ref().node) });
-        uart_node = if (rx) s.rx.ref().node else s.tx.ref().node;
-        uart_baud = s.baud;
-    }
     // for messages, what put stdin and stdout on a UART
     const uart_option = if (board != null) "--board" else "--uart";
-    if (path == null and loaded == null and needsProgram(command, uart_node != null or pty_len > 0)) usage("{s} needs a program: gasim help {s} says more", .{ command.name(), command.name() });
+    if (o.path == null and loaded == null and needsProgram(command, uart_node != null or o.pty_len > 0)) usage("{s} needs a program: gasim help {s} says more", .{ command.name(), command.name() });
     if (command == .blocks) {
-        try writeBlocks(io, arena, path.?, loads[0..loads_len]);
+        try writeBlocks(io, arena, o.path.?, o.loads[0..o.loads_len]);
         return 0;
     }
-    if (chip_path != null and layout_given != null) usage("--chip and --layout both give the chip", .{});
-    const spec: gasim.Spec = if (chip_path != null or chip_text.len > 0)
-        readChip(io, arena, init.gpa, chip_path orelse "the snapshot's chip", &chip_text)
-    else if (layout_given) |l|
+
+    // the chip
+    if (wiring.chip_path != null and o.layout != null) usage("--chip and --layout both give the chip", .{});
+    const spec: gasim.Spec = if (wiring.chip_path != null or chip_text.len > 0)
+        readChip(io, arena, init.gpa, wiring.chip_path orelse "the snapshot's chip", &chip_text)
+    else if (o.layout) |l|
         .{ .rows = l.rows, .columns = l.columns }
     else
         .ga144;
     const layout = if (board) |b| b.layout(spec) else spec.layout();
-    if (board) |b| {
-        var fault: gasim.Board.Fault = .none;
-        b.check(spec, &fault) catch |err| switch (fault) {
-            .none => fatal("{s}: {t}", .{ board_path.?, err }),
-            .name => |name| fatal("{s}: {s}: {t}", .{ board_path.?, name, err }),
-            .pin => |pin| fatal("{s}: {f}.{d}: {t}, on {s}", .{ board_path.?, Chip.nodeName(pin.node), pin.pin, err, spec.name }),
-            .node => |node| fatal("{s}: {f}: {t}, on {s}", .{ board_path.?, Chip.nodeName(node), err, spec.name }),
-            .link => unreachable,
-        };
-    }
-    const source_path = path orelse "";
+    if (board) |b| checkBoard(b, spec, o.board_path.?);
+
+    // the program
+    const source_path = o.path orelse "";
+    const kind: Kind = .ofPath(source_path);
     // colorForth blocks, which the terminal user interface edits, and only
     // compiles at the start with --load
-    const colorforth = std.mem.endsWith(u8, source_path, ".cf");
-    const compile_colorforth = colorforth and (loads_len > 0 or command != .tui);
-    if (uart_node != null and (command == .tui or command == .aforth)) usage("{s} needs run, as stdin and stdout are its serial port's", .{if (loaded != null) "the snapshot's serial port" else if (board != null) "--board" else "--uart"});
-    if (uart_node != null and console_given) usage("--uart puts stdin and stdout on the UART, so there is no console for --console", .{});
-    if (uart_node != null and boot and path == null) usage("--boot needs a program to send node {f}", .{Chip.nodeName(uart_node.?)});
-
-    const blocks = std.mem.endsWith(u8, source_path, ".blk");
-    if (loads_len > 0 and !blocks and !colorforth) usage("--load needs a .blk or .cf file of blocks", .{});
-    if (loads_len == 0) {
-        loads[0] = 0;
-        loads_len = 1;
-    }
-    // one spare byte tells a full buffer apart from a longer file
-    var source_buffer: [max_source_len + 1]u8 = undefined;
-    // the editor creates a file that does not exist yet
-    const colorforth_blocks: ?ColorForthBlocks = if (colorforth) try readColorForth(io, arena, source_path, command == .tui) else null;
-    const file = if (path == null or colorforth)
-        ""
-    else if (blocks)
-        Io.Dir.cwd().readFileAlloc(io, source_path, arena, .limited(max_blocks_len)) catch |err|
-            fatal("{s}: {t}", .{ source_path, err })
-    else
-        Io.Dir.cwd().readFile(io, source_path, &source_buffer) catch |err|
-            fatal("{s}: {t}", .{ source_path, err });
-    if (!blocks and file.len > max_source_len) fatal("{s}: file is too large", .{source_path});
-    // blocks are listed as lines of text, numbered the same way
-    const source = if (colorforth and listing)
-        try colorForthText(arena, colorforth_blocks.?)
-    else if (blocks)
-        gasim.arrayforth.blockText(file, try arena.alloc(u8, gasim.arrayforth.blockCount(file) * 16 * 65))
-    else
-        file;
+    const compile_colorforth = kind == .cf and (o.loads_len > 0 or command != .tui);
+    if (uart_node != null and interactive) usage("{s} needs run, as stdin and stdout are its serial port's", .{if (loaded != null) "the snapshot's serial port" else if (board != null) "--board" else "--uart"});
+    if (uart_node != null and o.console_given) usage("--uart puts stdin and stdout on the UART, so there is no console for --console", .{});
+    if (uart_node != null and o.boot and o.path == null) usage("--boot needs a program to send node {f}", .{Chip.nodeName(uart_node.?)});
+    if (o.loads_len > 0 and kind != .blk and kind != .cf) usage("--load needs a .blk or .cf file of blocks", .{});
+    const loads: []const u32 = if (o.loads_len > 0) o.loads[0..o.loads_len] else &.{0};
+    const source = try readSource(io, arena, o, kind);
+    const file = source.file;
 
     var chip: Chip = try .initChips(init.gpa, spec, layout.chips);
     defer chip.deinit(init.gpa);
     chip.strict = o.strict;
 
     // a snapshot's nodes hold theirs
-    const roms = if (loaded != null and path == null) null else readRom(io, arena, init.environ_map, rom_path);
+    const roms = if (loaded != null and o.path == null) null else readRom(io, arena, init.environ_map, o.rom_path);
     // which readRom checks for
     if (roms) |r| chip.loadRom(r) catch unreachable;
-    if (uart_node != null and path == null and roms == null and loaded == null)
+    if (uart_node != null and o.path == null and roms == null and loaded == null)
         fatal("--uart without a program needs a ROM, for node {f} to boot from its input (see --rom)", .{Chip.nodeName(uart_node.?)});
-    if (flash_path != null and roms == null) std.log.warn("--flash without a ROM: no node boots from the flash (see --rom)", .{});
+    if (o.flash_path != null and roms == null) std.log.warn("--flash without a ROM: no node boots from the flash (see --rom)", .{});
 
     const program_buffer = try arena.alloc(assembler.Program, layout.count());
     // each frame of a stream has descriptors of its own
@@ -514,231 +974,81 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     var aforth_writer: Io.File.Writer = .init(.stdout(), io, &aforth_buffer);
     // or with --json, here, and the console apart
     var aforth_captured: Io.Writer.Allocating = .init(arena);
-    const aforth_out = if (o.json) &aforth_captured.writer else &aforth_writer.interface;
     var captured: Io.Writer.Allocating = .init(arena);
     // and the terminal user interface's forth panel here
     var forth_buffer: [tui.forth_capacity]u8 = undefined;
     var forth_output: Io.Writer = .fixed(&forth_buffer);
     // arrayForth 3 at the prompt or in the forth panel keeps the bins and
     // labels of an arrayForth 3 program
-    const session: ?*gasim.arrayforth.Session = if (command == .tui or command == .aforth) session: {
+    const session: ?*gasim.arrayforth.Session = if (interactive) session: {
         const session = try arena.create(gasim.arrayforth.Session);
         session.* = .init(program_buffer, descriptor_buffer, &diagnostic, .{
-            .out = if (command == .tui) &forth_output else aforth_out,
+            .out = if (command == .tui) &forth_output else if (o.json) &aforth_captured.writer else &aforth_writer.interface,
             .chip = &chip,
-            .blocks = if (blocks) file else null,
+            .blocks = if (kind == .blk) file else null,
         });
         break :session session;
     } else null;
-    const ga = path != null and !blocks and !colorforth and !std.mem.endsWith(u8, source_path, ".af");
-    const assembled = (if (colorforth)
-        compileColorForth(session, colorforth_blocks.?, if (compile_colorforth) loads[0..loads_len] else &.{}, program_buffer, descriptor_buffer, &diagnostic)
-    else if (session != null and !ga)
-        loadSession(arena, session.?, &diagnostic, file, blocks, loads[0..loads_len], path != null)
-    else if (blocks)
-        gasim.arrayforth.assembleBlocks(file, loads[0..loads_len], program_buffer, descriptor_buffer, &diagnostic)
+    const assembled = (if (kind == .cf)
+        compileColorForth(session, source.colorforth.?, if (compile_colorforth) loads else &.{}, program_buffer, descriptor_buffer, &diagnostic)
+    else if (session != null and (kind != .ga or o.path == null))
+        loadSession(arena, session.?, &diagnostic, file, kind == .blk, loads, o.path != null)
+    else if (kind == .blk)
+        gasim.arrayforth.assembleBlocks(file, loads, program_buffer, descriptor_buffer, &diagnostic)
     else
-        assemble(&spec, source_path, file, program_buffer, descriptor_buffer, &diagnostic)) catch |err| {
-        const where: Where = .{ .path = source_path, .line = diagnostic.line, .kind = if (blocks) .blocks else if (colorforth) .colorforth else .text };
-        switch (err) {
-            error.TooManyNodes => fatal("{f}: more nodes than {f} has at '{s}'", .{ where, layout, diagnostic.token }),
-            error.NoSuchBlock => if (diagnostic.line == 0) fatal("{s}: has fewer blocks than --load needs", .{source_path}),
-            error.NoSuchBin => if (diagnostic.line == 0) fatal("{s}: a boot descriptor loads a bin that was never saved", .{source_path}),
-            else => {},
-        }
-        fatal("{f}: {t} at '{s}'", .{ where, err, diagnostic.token });
-    };
+        assemble(&spec, source_path, file, program_buffer, descriptor_buffer, &diagnostic)) catch |err|
+        failAssembling(err, .{ .path = source_path, .line = diagnostic.line, .kind = kind }, &diagnostic, layout);
     const programs = assembled.programs;
     // arrayForth 3 and colorForth know the GA144's ROM words only
-    if (colorforth or blocks or std.mem.endsWith(u8, source_path, ".af")) for (programs) |program| {
+    if (kind != .ga) for (programs) |program| {
         if (spec.node(program.node).rom != gasim.Spec.ga144.node(program.node).rom)
             fatal("{s}: node {f} has another ROM than the GA144's {d:0>3}, and arrayForth 3 and colorForth programs are assembled for the GA144's ROMs", .{ source_path, Chip.nodeName(program.node), program.node % Chip.Layout.chip_numbers });
     };
-    if (assembled.first_difference) |first| std.log.warn("{f}: arrayForth 2 noted {x:0>3} here, where gasim is at {x:0>3}, and {d} more gray numbers differ", .{
-        Where{ .path = source_path, .line = first.line, .kind = .colorforth },
-        first.noted,
-        first.found,
-        assembled.feedback_differs - 1,
-    });
-    for (programs) |program| if (program.unsettled_add) |add| std.log.warn("{f}: '{s}' runs straight after an opcode that changes S or T, which on a real chip needs a . between (DB001 2.3.3){s}", .{
-        Where{ .path = source_path, .line = add.line, .kind = if (blocks) .blocks else if (colorforth) .colorforth else .text },
-        add.token,
-        if (program.unsettled_adds > 1) ", as do others in its node" else "",
-    });
-    if (assembled.unresolved_then) |line| std.log.warn("{f}: then has nothing to resolve, which arrayForth 2 went past", .{
-        Where{ .path = source_path, .line = line, .kind = .colorforth },
-    });
-    if (listing) {
-        var buffer: [4096]u8 = undefined;
-        var file_writer: Io.File.Writer = .init(.stdout(), io, &buffer);
-        const writer = &file_writer.interface;
-        for (programs, 0..) |program, n| {
-            if (n > 0) try writer.writeByte('\n');
-            if (program.bin) |bin| try writer.print("bin {d} ", .{bin});
-            try writer.print("node {f}\n", .{Chip.nodeName(program.node)});
-            try gasim.disassembler.listing(writer, program, source);
-        }
-        for (assembled.descriptors) |descriptor| try writer.print("\n{f}", .{descriptor});
-        try writer.flush();
-        return 0;
-    }
-    // boot descriptors say what to load into nodes and how to start them,
-    // as a stream's frame does even if it describes no node. Without them,
-    // each program in its node's own bin is loaded and started at its
-    // entry, and code saved in other bins is not loaded.
-    //
-    // Streams and pF/144's nucleus sent one after another, as block 1665
-    // sends them, are not yet (ROADMAP step 6).
-    if (assembled.sends().len > 0)
-        fatal("{s} sends streams or pF/144's nucleus with !STREAM, !stream or !NUCLEUS, which gasim doesn't send yet", .{source_path});
-    // the parts of a stream set nodes up one after another, and /ROOT and
-    // FORWARD are for the root's ROM, which only the STREAMER's stream
-    // does, through 708's UART, 300's synchronous line or 705's flash
-    const flash_boot = boot and assembled.stream != null and assembled.stream.?.root == 705;
-    const sync_boot = boot and assembled.stream != null and assembled.stream.?.root == 300 and uart_node == null;
-    if (boot and assembled.stream != null and assembled.stream.?.root == 207)
-        fatal("--boot: {s}'s stream is for node 207, which pF/144's snorkel sends, and gasim does not run pF/144", .{source_path});
-    // a board's pins are the board's, and its serial port the root it
-    // boots from
-    if (boot and assembled.stream != null and assembled.stream.?.root == 300 and board != null)
-        fatal("--boot clocks {s}'s stream into node 300's pins itself, which --board leaves to the board", .{source_path});
-    if (assembled.stream) |*s| if (s.root == 207 and s.frame_count > 1)
-        fatal("{s}'s stream from node 207 has several frames, which pF/144's snorkel sends, and gasim sets up the nodes of only one", .{source_path});
-    if (assembled.stream) |*s| if ((s.part_count != s.frame_count or s.frame_count > 1) and !(boot and (uart_node != null or flash_boot or sync_boot)))
-        fatal("{s}'s stream has several frames, or /ROOT or FORWARD, which only --boot sends to the root's ROM, with --uart 708, a --board's flash for 705, or 300's synchronous line", .{source_path});
-    // the flash is not in the chip's snapshots, which the interface
-    // restarts from
-    if (flash_boot and (command == .tui or command == .aforth)) fatal("--boot from a board's flash needs run", .{});
-    if (sync_boot and (command == .tui or command == .aforth)) fatal("--boot through node 300's synchronous line needs run", .{});
-    const descriptors = if (assembled.descriptors.len > 0 or assembled.stream != null) assembled.descriptors else own: {
-        var count: usize = 0;
-        for (programs) |program| if (program.bin == null) {
-            descriptor_buffer[count] = .ofProgram(program);
-            count += 1;
-        };
-        break :own descriptor_buffer[0..count];
-    };
+    warnAssembled(assembled, source_path, kind);
+    if (command == .listing) return writeListing(io, assembled, source.text);
+
+    // how it gets into the chip. Without boot descriptors, each program in
+    // its node's own bin is loaded and started at its entry.
+    const start = startOf(o, assembled, uart_node, board != null, source_path);
+    const descriptors = if (assembled.descriptors.len > 0 or assembled.stream != null) assembled.descriptors else gasim.boot.ownDescriptors(programs, descriptor_buffer);
     for (descriptors) |descriptor| if (layout.index(descriptor.node) == null)
         fatal("{s}: node {f} is not in {f}", .{ source_path, Chip.nodeName(descriptor.node), layout });
-
-    if (roms == null and loaded == null) for (descriptors) |descriptor| {
-        for (descriptor.loads[0..descriptor.load_count]) |part| {
-            const program = gasim.boot.findBin(programs, part.bin) orelse continue;
-            if (program.rom_word) |word|
-                fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .kind = if (blocks) .blocks else if (colorforth) .colorforth else .text }, word.token });
-        }
-        if (descriptor.p & 0x180 == 0x080)
-            fatal("{s}: node {f} starts in ROM at {x:0>3}, which is not loaded (see --rom)", .{ source_path, Chip.nodeName(descriptor.node), descriptor.p });
+    if (roms == null and loaded == null) if (gasim.boot.romUse(descriptors, programs)) |use| switch (use) {
+        .word => |word| fatal("{f}: '{s}' is in ROM, which is not loaded (see --rom)", .{ Where{ .path = source_path, .line = word.line, .kind = kind }, word.token }),
+        .start => |descriptor| fatal("{s}: node {f} starts in ROM at {x:0>3}, which is not loaded (see --rom)", .{ source_path, Chip.nodeName(descriptor.node), descriptor.p }),
     };
-
-    for (breakpoints[0..breakpoints_len]) |b| {
-        const index = layout.index(b.node) orelse
-            fatal("breakpoint node {f} is not in {f}", .{ Chip.nodeName(b.node), layout });
-        // the same breakpoint twice is still set
-        chip.breakpoints.insert(.init(index, b.address)) catch unreachable;
-    }
-
-    for (watches[0..watches_len]) |w| {
-        const index = layout.index(w.node) orelse
-            fatal("watch node {f} is not in {f}", .{ Chip.nodeName(w.node), layout });
-        for ([_]bool{ false, true }) |write| {
-            if (!(if (write) w.write else w.read)) continue;
-            chip.watches.insert(.{ .index = index, .direction = w.direction, .write = write }) catch
-                fatal("more than {d} watches", .{Chip.max_watches});
-        }
-    }
+    setStops(&chip, o);
+    const loading: Loading = .{ .path = source_path, .assembled = assembled, .descriptors = descriptors, .spec = &spec, .layout = layout, .rom = roms != null };
 
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     // the node's output, which an object says with --json
     const run_output = if (o.json) &captured.writer else &stdout_file_writer.interface;
-    var uart: gasim.Uart = .init(uart_baud, run_output);
-    // the serial ports on ptys, each with its UART, read on its own thread
-    // as stdin is, ringing the doorbell that a run waiting for any input
-    // waits on
-    var pty_devices: [pty_ports.len]Pty = undefined;
-    var pty_uarts: [pty_ports.len]gasim.Uart = undefined;
-    var pty_inputs: [pty_ports.len]Io.Queue(u8) = undefined;
-    var pty_input_buffers: [pty_ports.len][1024]u8 = undefined;
-    var pty_output_buffers: [pty_ports.len][1024]u8 = undefined;
-    var pty_queue_buffers: [pty_ports.len][4096]u8 = undefined;
-    var pty_read_buffers: [pty_ports.len][1024]u8 = undefined;
-    var pty_readers: [pty_ports.len]Io.File.Reader = undefined;
+    var uart: gasim.Uart = .init(wiring.uart_baud, run_output);
+    var ptys: Ptys = undefined;
+    ptys.open(io, arena, o.pty_ports[0..o.pty_len]);
+    defer ptys.close(io);
     var doorbell_buffer: [64]u8 = undefined;
     var doorbell: Io.Queue(u8) = .init(&doorbell_buffer);
-    for (ptys, 0..) |p, k| {
-        pty_devices[k] = Pty.open(io, arena, &pty_output_buffers[k], &pty_queue_buffers[k]) catch |err| fatal("--pty {s}: {t}", .{ p.name, err });
-        pty_inputs[k] = .init(&pty_input_buffers[k]);
-        pty_readers[k] = .initStreaming(pty_devices[k].master, io, &pty_read_buffers[k]);
-    }
-    defer for (pty_devices[0..pty_len]) |*device| device.close(io);
     var feeder: Chip.Feeder = .{ .words = &.{} };
     var sync: gasim.Sync = .init(&.{});
-    if (flash_boot) {
-        // packed for the board's flash, which 705's ROM reads it from
-        const b = board orelse fatal("--boot: {s}'s stream is for node 705, which boots from a board's SPI flash (see --board)", .{source_path});
-        const pins = b.flash orelse fatal("--boot: {s}'s stream is for node 705, which boots from an SPI flash, and {s} has none", .{ source_path, b.name });
-        if (flash_path != null) fatal("--boot puts {s}'s stream in the flash, so --flash cannot", .{source_path});
-        if (!std.meta.eql(pins.data_in.ref(), Chip.PinRef{ .node = 705, .pin = 17 }))
-            fatal("--boot: {s}'s flash sends on {f}.{d}, not 705.17, which 705's ROM reads", .{ b.name, Chip.nodeName(pins.data_in.ref().node), pins.data_in.pin });
-        if (spec.node(705).rom != .spi_boot) fatal("--boot needs node 705 to have an SPI boot ROM, as the GA144's does", .{});
-        if (roms == null) fatal("--boot needs a ROM, for node 705 to boot from (see --rom)", .{});
-        for (b.pulls) |pull| if (pull.high and std.meta.eql(pull.terminal().ref(), pins.data_in.ref()) and b.jumperOn(pull.jumper, settings[0..settings_len]))
-            fatal("--boot: {s} holds 705.17 high{s}{s}, so 705 does not boot from the flash", .{ b.name, if (pull.jumper != null) " through " else "", pull.jumper orelse "" });
-        const words = layOut(arena, layout, assembled, source_path);
-        const packed_stream = gasim.streamer.pack(words, try arena.alloc(u8, (words.len * 18 + 15) / 16 * 2)) catch
-            fatal("--boot: {s}'s stream is too long for the STREAMER to pack", .{source_path});
-        flash = .init(packed_stream);
-    } else if (boot and uart_node != null) {
-        const root = uart_node.?;
-        // gasim's boot stream sets up nodes of the chip it goes to, where
-        // the STREAMER's paths can go on to another
-        if (assembled.stream == null) for (descriptors) |descriptor| if (descriptor.node / Chip.Layout.chip_numbers != root / Chip.Layout.chip_numbers)
-            fatal("--boot through node {f} boots its chip, not node {f}", .{ Chip.nodeName(root), Chip.nodeName(descriptor.node) });
-        if (spec.node(root).rom != .async_boot)
-            fatal("--boot with {s} needs a node whose ROM boots from its pins, as 708's does, not node {f}", .{ uart_option, Chip.nodeName(root) });
-        if (roms == null) fatal("--boot needs a ROM, for node {f} to boot from (see --rom)", .{Chip.nodeName(root)});
-        // laid out as arrayForth 3's STREAMER does, for a STREAM[ ]STREAM
-        const words = if (assembled.stream) |*s| streamer: {
-            if (root != s.root) fatal("--boot: {s}'s stream is for node {f}, not the --uart node {f}", .{ source_path, Chip.nodeName(s.root), Chip.nodeName(root) });
-            break :streamer layOut(arena, layout, assembled, source_path);
-        } else gasim: {
-            const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors) + 3 * (descriptors.len + 2));
-            break :gasim gasim.boot.asyncStream(init.gpa, layout, root, descriptors, programs, buffer) catch |err| switch (err) {
-                error.NoSuchNode => fatal("--uart node {f} is not in {f}", .{ Chip.nodeName(root), layout }),
-                error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
-                error.RootTooLong => fatal("--boot: node {f}'s program leaves no room in its RAM for the code that sets it up", .{Chip.nodeName(root)}),
-                else => |e| return e,
-            };
-        };
-        uart.preload = gasim.boot.asyncBytes(words, try arena.alloc(u8, 3 * words.len));
-    } else if (sync_boot) {
-        // clocked into 300's pins, as the EVB002's host 300 would its
-        // target's, whose pins are the board's
-        if (console_node == 300 and console_port == .left) fatal("--boot clocks the stream into node 300's wakeup pin, which its left port reads, so the console cannot use it", .{});
-        if (spec.node(300).rom != .sync_boot) fatal("--boot needs node 300 to have a sync boot ROM, as the GA144's does", .{});
-        if (roms == null) fatal("--boot needs a ROM, for node 300 to boot from (see --rom)", .{});
-        sync = .init(layOut(arena, layout, assembled, source_path));
-        chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
-            fatal("--boot needs node 300's pins 17 and 1, free for its synchronous line ({t})", .{err});
-    } else if (boot) {
-        if (console_node == 1 and console_port == .up) fatal("--boot streams into node 001's up port, so the console cannot use it", .{});
-        if (spec.node(1).rom != .serdes_boot) fatal("--boot needs node 001 to have a SERDES boot ROM, as the GA144's does", .{});
-        if (roms == null) fatal("--boot needs a ROM, for node 001 to boot from (see --rom)", .{});
-        for (descriptors) |descriptor| if (descriptor.node >= Chip.Layout.chip_numbers)
-            fatal("--boot through node 001 boots its chip, not node {f}", .{Chip.nodeName(descriptor.node)});
-        const buffer = try arena.alloc(gasim.Word, gasim.boot.maxLen(layout, descriptors));
-        feeder.words = gasim.boot.stream(init.gpa, layout, 1, .up, descriptors, programs, buffer) catch |err| switch (err) {
-            error.NoSuchNode => fatal("--boot needs node 001, which is not in {f}", .{layout}),
-            error.StreamTooLong => fatal("--boot: the boot stream is too long for a node to copy on", .{}),
-            error.NoSuchBin => fatal("{s}: a node loads a bin that was not saved", .{source_path}),
-            else => |e| return e,
-        };
-        chip.attachFeeder(&feeder, 1, .up) catch fatal("--boot needs node 001's up port to face off the chip", .{});
-    } else for (descriptors) |descriptor| chip.setUp(descriptor, programs) catch |err| switch (err) {
-        error.NoSuchBin => fatal("{s}: node {f} loads a bin that was not saved", .{ source_path, Chip.nodeName(descriptor.node) }),
-        error.NoSuchNode => unreachable,
-    };
+    switch (start) {
+        .flash => flash = .init(try flashStream(arena, o, board, &loading)),
+        .uart => uart.preload = try uartStream(init.gpa, arena, &loading, uart_node.?, uart_option),
+        .sync => {
+            sync = .init(syncStream(arena, o, &loading));
+            chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
+                fatal("--boot needs node 300's pins 17 and 1, free for its synchronous line ({t})", .{err});
+        },
+        .serdes => {
+            feeder.words = try serdesStream(init.gpa, arena, o, &loading);
+            chip.attachFeeder(&feeder, 1, .up) catch fatal("--boot needs node 001's up port to face off the chip", .{});
+        },
+        .direct => for (descriptors) |descriptor| chip.setUp(descriptor, programs) catch |err| switch (err) {
+            error.NoSuchBin => fatal("{s}: node {f} loads a bin that was not saved", .{ source_path, Chip.nodeName(descriptor.node) }),
+            error.NoSuchNode => unreachable,
+        },
+    }
 
     // what a snapshot says was going on, which reading it fills in
     if (loaded) |l| {
@@ -747,6 +1057,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
             fatal("the snapshot's synchronous line needs node 300's pins 17 and 1 ({t})", .{err});
     }
 
+    // the console, or the UART, and what else is on the board
     var stdin_buffer: [1024]u8 = undefined;
     const input_file: Io.File = switch (o.input) {
         .file => |p| Io.Dir.cwd().openFile(io, p, .{}) catch |err| fatal("--input {s}: {t}", .{ p, err }),
@@ -767,45 +1078,13 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
             else => run_output,
         },
     };
-    var flash_attached = false;
-    var attached_sram: ?*gasim.Sram = null;
-    if (board) |b| {
-        var fault: gasim.Board.Fault = .none;
-        var attachments: [Chip.max_uarts]gasim.Board.Attachment = undefined;
-        var count: usize = 0;
-        if (serial) |s| {
-            attachments[0] = .{ .uart = &uart, .port = s };
-            count = 1;
-        }
-        for (ptys, 0..) |p, k| {
-            const s = b.serialPort(p.name).?;
-            pty_uarts[k] = .init(s.baud, &pty_devices[k].writer);
-            pty_uarts[k].input = .{ .io = io, .queue = &pty_inputs[k] };
-            attachments[count] = .{ .uart = &pty_uarts[k], .port = s };
-            count += 1;
-        }
-        b.apply(&chip, attachments[0..count], settings[0..settings_len], &fault) catch |err| switch (fault) {
-            .none => fatal("{s}: {t}", .{ board_path.?, err }),
-            .name => |name| fatal("{s}: port {s}: {t}", .{ board_path.?, name, err }),
-            .pin => |pin| fatal("{s}: {f}.{d}: {t}", .{ board_path.?, Chip.nodeName(pin.node), pin.pin, err }),
-            .node => |node| fatal("{s}: {f}: {t}", .{ board_path.?, Chip.nodeName(node), err }),
-            .link => |link| fatal("{s}: SERDES {f} to {f}: {t}", .{ board_path.?, Chip.nodeName(link[0]), Chip.nodeName(link[1]), err }),
-        };
-        flash_attached = flash_path != null or flash_boot or (loaded != null and loaded.?.machine.flash);
-        if (flash_attached) b.attachFlash(&chip, &flash, settings[0..settings_len]) catch |err|
-            fatal("{s}: the SPI flash's pins: {t}", .{ board_path.?, err });
-        // the SRAM, zeroed, which is not in the chip's snapshots, so only
-        // for run, as a board of more than one chip such as the EVB002 is
-        if (b.sram) |m| if (if (loaded) |l| l.machine.sram else command != .tui and command != .aforth) {
-            const sram = try arena.create(gasim.Sram);
-            attached_sram = sram;
-            const words = try arena.alloc(u16, m.words);
-            @memset(words, 0);
-            sram.* = .init(words);
-            b.attachSram(&chip, sram, settings[0..settings_len]) catch |err|
-                fatal("{s}: the SRAM: {t}", .{ board_path.?, err });
-        };
-    }
+    const flash_attached = board != null and (o.flash_path != null or start == .flash or (loaded != null and loaded.?.machine.flash));
+    // the SRAM is not in the chip's snapshots, so only for run, as a board
+    // of more than one chip such as the EVB002 is
+    const attached_sram = if (board) |b|
+        try attachBoard(io, arena, o, b, &chip, serial, &uart, &ptys, if (flash_attached) &flash else null, if (loaded) |l| l.machine.sram else !interactive)
+    else
+        null;
     if (uart_node) |node| {
         uart.input = .{ .io = io, .queue = &input };
         if (board == null) chip.attachUart(&uart, node) catch |err| switch (err) {
@@ -814,40 +1093,40 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         };
         // booting from ROM waits for pin 17 through the port facing off the
         // chip, up on the top and bottom rows and left on the others
-        if ((boot or path == null) and loaded == null) {
+        if ((o.boot or o.path == null) and loaded == null) {
             if (spec.node(node).rom != .async_boot)
                 fatal("{s} without a program boots node {f} from its ROM, which is not an asynchronous boot ROM, as 708's is", .{ uart_option, Chip.nodeName(node) });
             if (chip.nodes[layout.index(node).?].wake_port == null)
                 fatal("node {f} has no port facing off the chip that pin 17 could wake it through to boot: up on the top and bottom rows, left on the others", .{Chip.nodeName(node)});
         }
-    } else if (pty_len == 0) chip.attachConsole(&console, console_node, console_port) catch |err| switch (err) {
-        error.NoSuchNode => fatal("console node {f} is not in {f}", .{ Chip.nodeName(console_node), layout }),
-        error.PortConnected => fatal("console port {t} of node {f} is connected to another node", .{ console_port, Chip.nodeName(console_node) }),
+    } else if (o.pty_len == 0) chip.attachConsole(&console, o.console_node, o.console_port) catch |err| switch (err) {
+        error.NoSuchNode => fatal("console node {f} is not in {f}", .{ Chip.nodeName(o.console_node), layout }),
+        error.PortConnected => fatal("console port {t} of node {f} is connected to another node", .{ o.console_port, Chip.nodeName(o.console_node) }),
     };
 
     const devices: gasim.snapshot.Devices = .{ .flash = if (flash_attached) &flash else null, .sram = attached_sram };
     if (loaded) |l| gasim.snapshot.readChip(l.reader, arena, &chip, devices) catch |err|
         fatal("{s}: {t}", .{ given.from.?, err });
     // the machine, as a snapshot says it
-    const settings_saved = try arena.alloc(gasim.snapshot.Machine.Setting, settings_len);
-    for (settings_saved, settings[0..settings_len]) |*saved, setting| saved.* = .{ .name = setting.name, .on = setting.on };
-    const machine: gasim.snapshot.Machine = .{
-        .board = board_path orelse "",
+    const settings_saved = try arena.alloc(gasim.snapshot.Machine.Setting, settings.len);
+    for (settings_saved, settings) |*saved, setting| saved.* = .{ .name = setting.name, .on = setting.on };
+    const saving: Saving = .{ .devices = devices, .machine = .{
+        .board = o.board_path orelse "",
         .board_text = board_text,
         .chip_text = chip_text,
-        .rows = if (layout_given) |l| l.rows else 0,
-        .columns = if (layout_given) |l| l.columns else 0,
+        .rows = if (o.layout) |l| l.rows else 0,
+        .columns = if (o.layout) |l| l.columns else 0,
         .settings = settings_saved,
-        .console_node = console_node,
-        .console_port = console_port,
+        .console_node = o.console_node,
+        .console_port = o.console_port,
         .uart_node = if (board == null) uart_node else null,
-        .uart_baud = uart_baud,
-        .usb = usb orelse "",
+        .uart_baud = wiring.uart_baud,
+        .usb = o.usb orelse "",
         .feeder = chip.feeder != null,
         .sync = chip.sync != null,
         .flash = flash_attached,
         .sram = attached_sram != null,
-    };
+    } };
     // input for a session goes with its snapshot, after what it has kept
     const session_input = (command == .run or command == .step) and (o.from != null or o.to != null);
     if (session_input and o.input != .none) {
@@ -857,75 +1136,41 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         } else console.preload = try std.mem.concat(arena, u8, &.{ console.preload, more });
     }
 
-    if (command == .start) {
-        try writeSnapshot(io, arena, o.to.?, machine, &chip, devices);
-        if (o.json) try writeStarted(&stdout_file_writer.interface, o.to.?);
-        return 0;
-    }
-    if (command == .show) {
-        try show(arena, &stdout_file_writer.interface, &chip, o);
-        return 0;
-    }
-
-    if (command == .aforth) {
-        const edit = try Io.File.stdin().isTty(io) and try Io.File.stdout().isTty(io) and o.lines_len == 0;
-        var stderr_lines_buffer: [1024]u8 = undefined;
-        var stderr_lines: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_lines_buffer);
-        var errors: Io.Writer.Allocating = .init(arena);
-        const failed = try aforth.run(io, arena, &chip, session.?, &diagnostic, aforth_out, .{
-            .edit = edit,
-            .history = historyPath(io, arena, init.environ_map),
-            .lines = o.lines[0..o.lines_len],
-            .errors = if (o.json) &errors.writer else if (edit) aforth_out else &stderr_lines.interface,
-            .settle = loaded == null,
-        });
-        if (o.to) |p| try writeSnapshot(io, arena, p, machine, &chip, devices);
-        if (o.json) {
-            var jw: std.json.Stringify = .{ .writer = &aforth_writer.interface };
-            try jw.beginObject();
-            try jw.objectField("stop");
-            try jw.write(if (failed) "error" else "done");
-            try jw.objectField("output");
-            try report.bytes(&jw, aforth_captured.written());
-            try jw.objectField("console");
-            try report.bytes(&jw, captured.written());
-            try jw.objectField("errors");
-            try report.bytes(&jw, errors.written());
-            if (o.to) |p| {
-                try jw.objectField("snapshot");
-                try report.bytes(&jw, p);
-            }
-            try jw.endObject();
-            try aforth_writer.interface.writeByte('\n');
-            try aforth_writer.interface.flush();
-        }
-        return if (failed) report.status_error else 0;
+    // what the command does with the chip
+    switch (command) {
+        .start => {
+            try saving.write(io, arena, o.to.?, &chip);
+            if (o.json) try writeStarted(&stdout_file_writer.interface, o.to.?);
+            return 0;
+        },
+        .show => {
+            try show(arena, &stdout_file_writer.interface, &chip, o);
+            return 0;
+        },
+        .aforth => return runAforth(init, arena, o, &chip, session.?, &diagnostic, &aforth_writer.interface, &aforth_captured, &captured, saving, loaded == null),
+        .tui => {
+            // a snapshot alone has no source
+            const source_map: ?gasim.SourceMap = if (o.path != null) try .init(arena, layout, programs, descriptors, file, source_path, switch (kind) {
+                .ga, .af => .text,
+                .blk => .blocks,
+                .cf => .colorforth,
+            }) else null;
+            try tui.run(io, init.gpa, init.environ_map, &chip, .{
+                .source_map = if (source_map) |*map| map else null,
+                .source_path = source_path,
+                .console = &console,
+                .console_node = o.console_node,
+                .console_port = o.console_port,
+                .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
+                // without a .cf file, on a new file of blocks, to name when it is saved
+                .colorforth = try editColorForth(arena, source.colorforth orelse try newColorForth(arena), if (kind == .cf) source_path else null),
+            });
+            return 0;
+        },
+        else => {},
     }
 
-    if (command == .tui) {
-        // a snapshot alone has no source
-        const source_map: ?gasim.SourceMap = if (path != null) try .init(
-            arena,
-            layout,
-            programs,
-            descriptors,
-            file,
-            source_path,
-            if (colorforth) .colorforth else if (blocks) .blocks else .text,
-        ) else null;
-        try tui.run(io, init.gpa, init.environ_map, &chip, .{
-            .source_map = if (source_map) |*map| map else null,
-            .source_path = source_path,
-            .console = &console,
-            .console_node = console_node,
-            .console_port = console_port,
-            .forth = .{ .session = session.?, .output = &forth_output, .diagnostic = &diagnostic, .arena = arena },
-            // without a .cf file, on a new file of blocks, to name when it is saved
-            .colorforth = try editColorForth(arena, colorforth_blocks orelse try newColorForth(arena), if (colorforth) source_path else null),
-        });
-        return 0;
-    }
-
+    // run, or step
     var stderr_buffer: [4096]u8 = undefined;
     // streaming, as std.log writes to stderr too: a positional writer would
     // write over its lines when stderr is a file
@@ -933,7 +1178,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     var trace_buffer: [4096]u8 = undefined;
     var trace_file_writer: Io.File.Writer = undefined;
     if (o.trace_file) |p| trace_file_writer = .initStreaming(Io.Dir.cwd().createFile(io, p, .{}) catch |err| fatal("--trace-file {s}: {t}", .{ p, err }), io, &trace_buffer);
-    if (trace) chip.trace = if (o.trace_file != null) &trace_file_writer.interface else &stderr_file_writer.interface;
+    if (o.trace) chip.trace = if (o.trace_file != null) &trace_file_writer.interface else &stderr_file_writer.interface;
     defer if (o.trace_file != null) trace_file_writer.interface.flush() catch {};
     chip.trace_json = o.json;
     if (o.trace_node) |node| chip.trace_only = layout.index(node) orelse
@@ -963,42 +1208,33 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     // read stdin on its own thread, so the chip runs while it waits for
     // input, unless nothing is on it, as reading it in the background would
     // stop gasim
-    const stdin_used = !(board != null and serial == null and pty_len > 0) and o.input != .none and !session_input;
+    const stdin_used = !(board != null and serial == null and o.pty_len > 0) and o.input != .none and !session_input;
     if (o.input == .none or session_input) input.close(io);
-    var reading = if (stdin_used) io.concurrent(readRinging, .{ io, &stdin_file_reader.interface, &input, if (pty_len > 0) &doorbell else null }) catch |err|
+    var reading = if (stdin_used) io.concurrent(readRinging, .{ io, &stdin_file_reader.interface, &input, if (o.pty_len > 0) &doorbell else null }) catch |err|
         fatal("cannot read input concurrently: {t}", .{err}) else null;
     errdefer if (reading) |*r| r.cancel(io) catch {};
-    var pty_reading: [pty_ports.len]Io.Future((error{ReadFailed} || Io.Cancelable)!void) = undefined;
-    var pty_writing: [pty_ports.len]Io.Future((Io.File.Writer.Error || Io.QueueClosedError)!void) = undefined;
-    for (ptys, 0..) |p, k| {
-        pty_reading[k] = io.concurrent(readRinging, .{ io, &pty_readers[k].interface, &pty_inputs[k], &doorbell }) catch |err|
-            fatal("cannot read input concurrently: {t}", .{err});
-        pty_writing[k] = io.concurrent(Pty.writeOut, .{&pty_devices[k]}) catch |err|
-            fatal("cannot write output concurrently: {t}", .{err});
-        std.log.info("port {s}: {s}", .{ p.name, pty_devices[k].path });
-    }
-    defer for (pty_reading[0..pty_len]) |*future| future.cancel(io) catch {};
-    defer for (pty_writing[0..pty_len]) |*future| future.cancel(io) catch {};
+    ptys.start(io, &doorbell);
+    defer ptys.stop(io);
     // a signal ends the run as it would otherwise, through a pipe, as it
     // can only ring the doorbell or end the input from outside the handler
     var watching: ?Io.Future((error{ReadFailed} || Io.Cancelable)!void) = null;
     var pipe_buffer: [1]u8 = undefined;
     var pipe_reader: Io.File.Reader = undefined;
     if (comptime Pty.supported) {
-        if (pty_len > 0) chip.doorbell = .{ .io = io, .queue = &doorbell };
+        if (o.pty_len > 0) chip.doorbell = .{ .io = io, .queue = &doorbell };
         var fds: [2]posix.fd_t = undefined;
         if (std.c.pipe(&fds) != 0) fatal("cannot make a pipe for ctrl+c", .{});
         pipe_reader = .initStreaming(.{ .handle = fds[0], .flags = .{ .nonblocking = false } }, io, &pipe_buffer);
-        watching = io.concurrent(endOnInterrupt, .{ &pipe_reader.interface, io, if (pty_len > 0) &doorbell else null, &input }) catch |err|
+        watching = io.concurrent(endOnInterrupt, .{ &pipe_reader.interface, io, if (o.pty_len > 0) &doorbell else null, &input }) catch |err|
             fatal("cannot read input concurrently: {t}", .{err});
         interrupt_pipe = fds[1];
     }
     defer if (watching) |*w| w.cancel(io) catch {};
     // the links last, after everything that could fail, removed at the end
     // of the run, or by ctrl+c
-    for (ptys, 0..) |p, k| if (p.link) |link| {
-        makeLink(io, link, pty_devices[k].path);
-        links[links_len] = .{ .link = try arena.dupeSentinel(u8, link, 0), .target = pty_devices[k].path };
+    for (ptys.ports, 0..) |p, k| if (p.link) |link| {
+        makeLink(io, link, ptys.devices[k].path);
+        links[links_len] = .{ .link = try arena.dupeSentinel(u8, link, 0), .target = ptys.devices[k].path };
         links_len += 1;
     };
     defer removeLinks();
@@ -1017,8 +1253,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         }
     }
     const elapsed = started.durationTo(.now(io, .awake));
-    for (ptys, 0..) |p, k| if (pty_devices[k].dropped > 0)
-        std.log.warn("port {s}: {d} bytes were dropped, as nothing read them from {s}", .{ p.name, pty_devices[k].dropped, pty_devices[k].path });
+    ptys.warnDropped();
     // stops a read blocked waiting for input that will no longer be taken
     if (reading) |*r| r.cancel(io) catch |err| switch (err) {
         error.Canceled => {},
@@ -1035,70 +1270,10 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     // after what was traced up to it
     stderr_file_writer.interface.flush() catch {};
 
-    if (o.to) |p| try writeSnapshot(io, arena, p, machine, &chip, devices);
+    if (o.to) |p| try saving.write(io, arena, p, &chip);
 
-    if (o.json) {
-        const seconds = @as(f64, @floatFromInt(elapsed.toNanoseconds())) / 1e9;
-        const writer = &stdout_file_writer.interface;
-        var jw: std.json.Stringify = .{ .writer = writer };
-        try jw.beginObject();
-        try report.stopFields(&jw, &chip, stop);
-        try jw.objectField("steps");
-        try jw.write(chip.steps);
-        try jw.objectField("time_ps");
-        try jw.write(report.chipTime(&chip));
-        try jw.objectField("output");
-        try report.bytes(&jw, captured.written());
-        if (stepped.last) |i| {
-            try jw.objectField("stepped");
-            try report.nodeNumber(&jw, layout.nodeNumber(i));
-        }
-        if (o.to) |p| {
-            try jw.objectField("snapshot");
-            try report.bytes(&jw, p);
-        }
-        if (stats) {
-            try jw.objectField("seconds");
-            try jw.write(seconds);
-        }
-        if (why) {
-            try jw.objectField("waiting");
-            try report.waiting(&jw, &chip);
-        }
-        if (chip.hazard_count > 0) {
-            try jw.objectField("hazards");
-            try report.hazards(&jw, &chip);
-            try jw.objectField("hazard_count");
-            try jw.write(chip.hazard_count);
-        }
-        if (o.show != .none) {
-            try jw.objectField("nodes");
-            try jw.beginArray();
-            switch (o.show) {
-                .none => {},
-                .all => for (0..chip.nodes.len) |i| try report.node(&jw, &chip, @intCast(i)),
-                .nodes => |nodes| for (nodes) |node| try report.node(&jw, &chip, layout.index(node).?),
-            }
-            try jw.endArray();
-        }
-        try jw.endObject();
-        try writer.writeByte('\n');
-        try writer.flush();
-    } else {
-        if (stats) logStats(chip, elapsed);
-        if (chip.hit) |hit| {
-            std.log.info("{f}", .{hit.describe(layout)});
-            logRegisters(&chip.nodes[hit.index()]);
-        }
-        if (stepped.last) |i| std.log.info("stepped node {f}", .{Chip.nodeName(layout.nodeNumber(i))});
-        if (stop == .limit) std.log.info("stopped at a limit, after {d} steps and {d} ps of the chip's time", .{ chip.steps, report.chipTime(&chip) });
-        if (why) logWaiting(chip);
-        switch (o.show) {
-            .none => {},
-            .all => for (0..chip.nodes.len) |i| logNode(&chip, @intCast(i)),
-            .nodes => |nodes| for (nodes) |node| logNode(&chip, layout.index(node).?),
-        }
-    }
+    const ended: Ended = .{ .stop = stop, .stepped = stepped, .elapsed = elapsed };
+    if (o.json) try writeEnded(&stdout_file_writer.interface, o, &chip, ended, captured.written()) else logEnded(o, &chip, ended);
     if (chip.wiring.contention) |c| logContention(chip, c);
     logHazards(&chip);
     if (stop == .settled) {
@@ -1110,7 +1285,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
             }
         } else if (!console.used) {
             // most likely the console is on a port the program does not use
-            std.log.warn("node {f} never used the console on its {t} port", .{ Chip.nodeName(console_node), console_port });
+            std.log.warn("node {f} never used the console on its {t} port", .{ Chip.nodeName(o.console_node), o.console_port });
         }
     }
     return stop.status(interrupt_signal.load(.monotonic));
@@ -1441,7 +1616,7 @@ fn readRom(io: Io, arena: Allocator, environ: *const std.process.Environ.Map, pa
     const roms = arena.create([144]ga144.NodeRom) catch fatal("out of memory", .{});
     var diagnostic: assembler.Diagnostic = .{};
     const assembled = gasim.rom.assemble(arena, text, roms, &diagnostic) catch |err| {
-        const where: Where = .{ .path = disk, .line = diagnostic.line, .kind = .blocks };
+        const where: Where = .{ .path = disk, .line = diagnostic.line, .kind = .blk };
         // arrayForth 3 found where it is usually installed is only used if
         // it assembles
         if (path == null) {
@@ -1599,13 +1774,13 @@ fn loadSession(
 const Where = struct {
     path: []const u8,
     line: usize,
-    kind: enum { text, blocks, colorforth },
+    kind: Kind,
 
     pub fn format(self: Where, writer: *Io.Writer) Io.Writer.Error!void {
         switch (self.kind) {
-            .text => try writer.print("{s}:{d}", .{ self.path, self.line }),
-            .blocks => try writer.print("{s}: block {d} line {d}", .{ self.path, (self.line -| 1) / 16, (self.line -| 1) % 16 }),
-            .colorforth => {
+            .ga, .af => try writer.print("{s}:{d}", .{ self.path, self.line }),
+            .blk => try writer.print("{s}: block {d} line {d}", .{ self.path, (self.line -| 1) / 16, (self.line -| 1) % 16 }),
+            .cf => {
                 const place = gasim.colorforth.place(self.line);
                 try writer.print("{s}: block {d} word {d}", .{ self.path, place.block, place.token });
             },
@@ -1622,7 +1797,7 @@ fn assemble(
     descriptors: []gasim.boot.Descriptor,
     diagnostic: *assembler.Diagnostic,
 ) gasim.arrayforth.Error!gasim.arrayforth.Assembled {
-    if (std.mem.endsWith(u8, path, ".af")) return gasim.arrayforth.assembleNodes(source, programs, descriptors, diagnostic);
+    if (Kind.ofPath(path) == .af) return gasim.arrayforth.assembleNodes(source, programs, descriptors, diagnostic);
     return .{ .programs = try assembler.assembleNodesFor(spec, source, programs, diagnostic), .descriptors = &.{} };
 }
 
@@ -1713,6 +1888,7 @@ const assembler = gasim.assembler;
 const Chip = gasim.Chip;
 const Console = gasim.Console;
 const Direction = gasim.Direction;
+const Kind = gasim.Sim.Kind;
 const ga144 = gasim.ga144;
 const ioName = gasim.disassembler.ioName;
 const aforth = @import("aforth.zig");

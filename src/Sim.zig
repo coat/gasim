@@ -1,7 +1,7 @@
-//! What the web version runs: a GA144 with a console on node 000's up port,
-//! an arrayForth 3 session acting on it, the colorForth editor, and the
-//! chip's history to go back through. `main.zig` exports it to JavaScript;
-//! here it is plain Zig, so it is tested natively.
+//! A GA144 to load a file into, run, and look at: a console on node 000's
+//! up port, an arrayForth 3 session acting on the chip, the colorForth
+//! editor, and the chip's history to go back through. The web version
+//! exports it to JavaScript (`web/main.zig`), and the GUI draws it.
 //!
 //! It keeps pointers to its own fields, so it must not move once `init`.
 
@@ -26,14 +26,8 @@ sources: std.heap.ArenaAllocator,
 source_map: ?SourceMap = null,
 /// the chip as it was set up, which `reset` goes back to
 start: Chip.Snapshot,
-/// the chip before each step or run, the oldest first, with one more saved
-/// before it is kept, as the TUI keeps them
-history: [history_capacity + 1]?Chip.Snapshot = @splat(null),
-/// what each snapshot in `history` was saved before
-causes: [history_capacity + 1]Cause = @splat(.run),
-history_start: usize = 0,
-history_len: usize = 0,
-pending: bool = false,
+/// the chip before each step or run, to go back to
+history: History = .{},
 editor: Editor = undefined,
 /// the editor's file, with room to grow
 editor_blocks: []u8 = &.{},
@@ -63,6 +57,13 @@ pub const Kind = enum(u8) {
     blk,
     /// colorForth blocks, or an arrayForth 2 image
     cf,
+
+    /// what the file at `path` holds, which is gasim's assembler unless its
+    /// extension says otherwise
+    pub fn ofPath(path: []const u8) Kind {
+        inline for (.{ Kind.af, Kind.blk, Kind.cf }) |kind| if (std.mem.endsWith(u8, path, "." ++ @tagName(kind))) return kind;
+        return .ga;
+    }
 };
 
 /// why `run` stopped
@@ -77,19 +78,8 @@ pub const Stop = enum(u8) {
     hit,
 };
 
-/// what the chip was saved before, in the history
-pub const Cause = enum(u8) {
-    step,
-    round,
-    node,
-    run,
-    /// a line at the prompt
-    line,
-    reset,
-    compile,
-    /// a step of one opcode of a node
-    slot,
-};
+pub const Cause = History.Cause;
+pub const Moment = History.Moment;
 
 pub fn init(self: *Sim, gpa: Allocator) Allocator.Error!void {
     self.* = .{
@@ -111,6 +101,8 @@ pub fn init(self: *Sim, gpa: Allocator) Allocator.Error!void {
     errdefer gpa.free(self.descriptors);
     self.start = try .init(gpa, layout);
     errdefer self.start.deinit(gpa);
+    self.history = try .init(gpa, history_capacity);
+    errdefer self.history.deinit(gpa);
     self.editor_blocks = try gpa.alloc(u8, editor_capacity * colorforth.block_size);
     @memset(self.editor_blocks, 0);
     self.editor.open(self.editor_blocks, 1);
@@ -124,7 +116,7 @@ pub fn deinit(self: *Sim) void {
     if (self.source_map) |*map| map.deinit(gpa);
     self.chip.deinit(gpa);
     self.start.deinit(gpa);
-    for (&self.history) |*snapshot| if (snapshot.*) |*s| s.deinit(gpa);
+    self.history.deinit(gpa);
     if (self.roms) |roms| gpa.free(roms);
     gpa.free(self.programs);
     gpa.free(self.descriptors);
@@ -190,7 +182,7 @@ pub fn load(self: *Sim, kind: Kind, file: []const u8, loads: []const u32) error{
     _ = self.sources.reset(.retain_capacity);
     self.forth_out.clearRetainingCapacity();
     self.console_out.clearRetainingCapacity();
-    self.forgetHistory();
+    self.history.forget();
 
     const source = try self.sources.allocator().dupe(u8, file);
     if (kind == .cf) try self.openEditor(source);
@@ -252,23 +244,13 @@ fn setUp(self: *Sim, kind: Kind, assembled: arrayforth.Assembled) error{ LoadFai
         return self.fail("the stream from node 207 has several frames, which pF/144's snorkel sends, and gasim sets up the nodes of only one", .{});
     if (assembled.stream) |*s| if (s.part_count != s.frame_count or s.frame_count > 1)
         return self.fail("the stream has several frames, or /ROOT or FORWARD, which only gasim run --boot sends to the root's ROM, with --uart 708, a --board's flash for 705, or 300's synchronous line", .{});
-    const descriptors = if (assembled.descriptors.len > 0) assembled.descriptors else own: {
-        var count: usize = 0;
-        for (programs) |program| if (program.bin == null) {
-            self.descriptors[count] = .ofProgram(program);
-            count += 1;
-        };
-        break :own self.descriptors[0..count];
-    };
-    if (self.roms == null) for (descriptors) |descriptor| {
-        for (descriptor.loads[0..descriptor.load_count]) |part| {
-            const program = boot.findBin(programs, part.bin) orelse continue;
-            if (program.rom_word) |word| {
-                self.diagnostic = word;
-                return self.failAt(kind, error.MissingRom);
-            }
-        }
-        if (descriptor.p & 0x180 == 0x080) return self.fail("node {d:0>3} starts in ROM at {x:0>3}, which is not loaded", .{ descriptor.node, descriptor.p });
+    const descriptors = if (assembled.descriptors.len > 0) assembled.descriptors else boot.ownDescriptors(programs, self.descriptors);
+    if (self.roms == null) if (boot.romUse(descriptors, programs)) |use| switch (use) {
+        .word => |word| {
+            self.diagnostic = word;
+            return self.failAt(kind, error.MissingRom);
+        },
+        .start => |descriptor| return self.fail("node {d:0>3} starts in ROM at {x:0>3}, which is not loaded", .{ descriptor.node, descriptor.p }),
     };
     for (descriptors) |descriptor| self.chip.setUp(descriptor, programs) catch |err| switch (err) {
         error.NoSuchNode => return self.fail("node {d:0>3} is not on the chip", .{descriptor.node}),
@@ -387,54 +369,27 @@ pub fn reset(self: *Sim) void {
 /// Saves the chip, before stepping or running it, to go back to if it
 /// changes
 pub fn remember(self: *Sim, cause: Cause) void {
-    self.keepPending();
-    const index = self.historyIndex(self.history_len);
-    const snapshot = &self.history[index];
-    if (snapshot.* == null) snapshot.* = Chip.Snapshot.init(self.gpa, layout) catch return;
-    self.chip.save(&snapshot.*.?);
-    self.causes[index] = cause;
-    self.pending = true;
-}
-
-/// keeps the snapshot saved last, unless nothing has changed since
-fn keepPending(self: *Sim) void {
-    if (!self.pending) return;
-    self.pending = false;
-    if (self.chip.matches(&self.history[self.historyIndex(self.history_len)].?)) return;
-    if (self.history_len == history_capacity) {
-        self.history_start = self.historyIndex(1);
-    } else self.history_len += 1;
+    // without the memory, there is only less to go back to
+    self.history.remember(self.gpa, &self.chip, cause) catch {};
 }
 
 /// Goes back to before the last step or run. Returns false with nothing to
 /// go back to.
 pub fn back(self: *Sim) bool {
-    self.keepPending();
-    if (self.history_len == 0) return false;
-    self.history_len -= 1;
-    self.chip.restore(&self.history[self.historyIndex(self.history_len)].?);
-    return true;
+    return self.history.back(&self.chip);
 }
 
 /// how many steps and runs there are to go back through
 pub fn historyLen(self: *Sim) usize {
-    self.keepPending();
-    return self.history_len;
+    self.history.keep(&self.chip);
+    return self.history.len;
 }
 
 /// Goes back to before the `n`th step or run kept, the oldest 0, forgetting
 /// those after it. Returns false if there is no such step.
 pub fn backTo(self: *Sim, n: usize) bool {
-    if (n >= self.historyLen()) return false;
-    while (self.history_len > n) _ = self.back();
-    return true;
+    return self.history.backTo(&self.chip, n);
 }
-
-pub const Moment = struct {
-    /// the steps taken by then
-    steps: u64,
-    cause: Cause,
-};
 
 /// Writes the steps and runs to go back through into `out` as JSON, the
 /// oldest first
@@ -448,21 +403,8 @@ pub fn historyView(self: *Sim) error{OutOfMemory}![]const u8 {
 /// the steps and runs to go back through, the oldest first, in `buffer`
 pub fn moments(self: *Sim, buffer: *[history_capacity]Moment) []Moment {
     const len = self.historyLen();
-    for (buffer[0..len], 0..) |*moment, k| {
-        const index = self.historyIndex(k);
-        moment.* = .{ .steps = self.history[index].?.steps, .cause = self.causes[index] };
-    }
+    for (buffer[0..len], 0..) |*moment, k| moment.* = self.history.moment(k);
     return buffer[0..len];
-}
-
-fn historyIndex(self: Sim, i: usize) usize {
-    return (self.history_start + i) % self.history.len;
-}
-
-fn forgetHistory(self: *Sim) void {
-    self.history_start = 0;
-    self.history_len = 0;
-    self.pending = false;
 }
 
 /// Adds a breakpoint, or removes it. Returns whether it is there now.
@@ -520,7 +462,7 @@ pub const Status = enum(u8) {
     reading,
     writing,
 
-    fn of(status: gasim.Computer.Status) Status {
+    fn of(status: f18.Computer.Status) Status {
         return switch (status) {
             .running => .running,
             .code => .code,
@@ -578,7 +520,7 @@ pub fn tilesView(self: *Sim) error{OutOfMemory}![]const u8 {
         };
         var count: usize = 0;
         var waiting_on: ?[]const u8 = null;
-        if (address) |a| if (gasim.port.select(a)) |select| {
+        if (address) |a| if (port.select(a)) |select| {
             var it = select.iterator();
             while (it.next()) |direction| : (count += 1) cardinals[count] = Chip.facing(x, y, direction);
         } else {
@@ -1073,25 +1015,27 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
 const expectStringStartsWith = std.testing.expectStringStartsWith;
 
-const gasim = @import("gasim");
-const arrayforth = gasim.arrayforth;
-const assembler = gasim.assembler;
-const boot = gasim.boot;
-const Chip = gasim.Chip;
-const colorforth = gasim.colorforth;
-const Console = gasim.Console;
-const Direction = gasim.Direction;
-const disassembler = gasim.disassembler;
-const Editor = gasim.Editor;
-const ga144 = gasim.ga144;
-const Spec = gasim.Spec;
-const rom = gasim.rom;
-const Tail = gasim.Tail;
-const Word = gasim.Word;
+const arrayforth = @import("arrayforth.zig");
+const assembler = @import("assembler.zig");
+const boot = @import("boot.zig");
+const Chip = @import("Chip.zig");
+const colorforth = @import("colorforth.zig");
+const Console = @import("Console.zig");
+const port = @import("port.zig");
+const Direction = port.Direction;
+const disassembler = @import("disassembler.zig");
+const Editor = @import("Editor.zig");
+const f18 = @import("f18.zig");
+const ga144 = @import("ga144.zig");
+const History = @import("History.zig");
+const Spec = @import("Spec.zig");
+const rom = @import("rom.zig");
+const Tail = @import("Tail.zig");
+const Word = f18.Word;
 const Diagnostic = arrayforth.Diagnostic;
 const Program = arrayforth.Program;
 const Session = arrayforth.Session;
-const SourceMap = gasim.SourceMap;
+const SourceMap = @import("SourceMap.zig");
 
 fn testSim() !*Sim {
     const sim = try std.testing.allocator.create(Sim);
@@ -1399,4 +1343,12 @@ test "breakpoints stay as a file is loaded again" {
     try expectEqual(.hit, try sim.run(10_000));
     sim.clearBreakpoints();
     try expectEqual(.settled, try sim.run(10_000));
+}
+
+test "a file's extension says what it holds" {
+    try expectEqual(.ga, Kind.ofPath("hello.ga"));
+    try expectEqual(.af, Kind.ofPath("dir.cf/hello.af"));
+    try expectEqual(.blk, Kind.ofPath("pFDISK.blk"));
+    try expectEqual(.cf, Kind.ofPath("hello.cf"));
+    try expectEqual(.ga, Kind.ofPath(""));
 }

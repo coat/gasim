@@ -526,7 +526,8 @@ const expect = std.testing.expect;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 const dvui = @import("dvui");
-const Sim = @import("Sim");
+const gasim = @import("gasim");
+const Sim = gasim.Sim;
 const debug = @import("debug.zig");
 const ui = @import("ui.zig");
 

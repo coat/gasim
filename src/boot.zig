@@ -92,6 +92,39 @@ pub fn findBin(programs: []const Program, bin: u32) ?*const Program {
     return null;
 }
 
+/// Descriptors for a source that has none, into `buffer`: each program in
+/// its node's own bin is loaded and started at its entry, and code saved in
+/// other bins is not loaded
+pub fn ownDescriptors(programs: []const Program, buffer: []Descriptor) []Descriptor {
+    var count: usize = 0;
+    for (programs) |program| if (program.bin == null) {
+        buffer[count] = .ofProgram(program);
+        count += 1;
+    };
+    return buffer[0..count];
+}
+
+/// what code needs of a chip's ROM
+pub const RomUse = union(enum) {
+    /// a program calls or names a word of ROM, here in its source
+    word: assembler.Diagnostic,
+    /// a node starts in ROM
+    start: Descriptor,
+};
+
+/// The first use `descriptors` make of ROM, for a chip that has none
+/// loaded, or null if they make none
+pub fn romUse(descriptors: []const Descriptor, programs: []const Program) ?RomUse {
+    for (descriptors) |descriptor| {
+        for (descriptor.loads[0..descriptor.load_count]) |part| {
+            const program = findBin(programs, part.bin) orelse continue;
+            if (program.rom_word) |word| return .{ .word = word };
+        }
+        if (descriptor.p & 0x180 == 0x080) return .{ .start = descriptor };
+    }
+    return null;
+}
+
 /// Builds a stream that sets up nodes as `descriptors` say, loading RAM from
 /// `programs`, when executed by node `root` from its port `root_port`, into
 /// `buffer`. Uses `gpa` for scratch space.
@@ -1666,6 +1699,23 @@ test "nothing to boot" {
 fn ofPrograms(programs: []const Program, buffer: []Descriptor) []Descriptor {
     for (programs, buffer[0..programs.len]) |program, *descriptor| descriptor.* = .ofProgram(program);
     return buffer[0..programs.len];
+}
+
+test "what a source without descriptors loads, and what it uses of ROM" {
+    var programs: [2]Program = undefined;
+    var diagnostic: assembler.Diagnostic = .{};
+    const assembled = try assembler.assembleNodes("node 0\ndup\nnode 1\nwarm\n", &programs, &diagnostic);
+    var buffer: [2]Descriptor = undefined;
+    const descriptors = ownDescriptors(assembled, &buffer);
+    try expectEqual(2, descriptors.len);
+    try expectEqual(1, descriptors[1].node);
+
+    try expectEqual(null, romUse(descriptors[0..1], assembled));
+    try expectEqualStrings("warm", romUse(descriptors, assembled).?.word.token);
+    // warm, where a node that is not set up starts
+    var in_rom = descriptors[0];
+    in_rom.p = 0xa9;
+    try expectEqual(0, romUse(&.{in_rom}, assembled).?.start.node);
 }
 
 const arrayforth = @import("arrayforth.zig");
