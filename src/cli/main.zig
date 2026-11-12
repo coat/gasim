@@ -6,7 +6,7 @@ const max_source_len = 64 * 1024;
 const max_blocks_len = 64 * 1024 * 1024;
 
 /// symbolic links to ptys, which the end of a run or ctrl+c removes
-var links: [Chip.max_uarts]struct { link: [:0]const u8, target: []const u8 } = undefined;
+var links: [gasim.Board.max_serial]struct { link: [:0]const u8, target: []const u8 } = undefined;
 var links_len: usize = 0;
 /// written by ctrl+c, to ring the doorbell a run with ptys waits on
 var interrupt_pipe: ?posix.fd_t = null;
@@ -180,12 +180,12 @@ fn takeMachine(o: *Options, m: gasim.snapshot.Machine) void {
 
 /// Writes a snapshot beside `path` and then moves it there, as `path` can be
 /// the only copy of what it was read from
-fn writeSnapshot(io: Io, arena: Allocator, path: []const u8, machine: gasim.snapshot.Machine, chip: *const Chip, devices: gasim.snapshot.Devices) !void {
+fn writeSnapshot(io: Io, arena: Allocator, path: []const u8, machine: gasim.snapshot.Machine, chip: *const Chip) !void {
     const temporary = try std.fmt.allocPrint(arena, "{s}.tmp", .{path});
     const file = Io.Dir.cwd().createFile(io, temporary, .{}) catch |err| fatal("{s}: {t}", .{ temporary, err });
     var buffer: [65536]u8 = undefined;
     var file_writer: Io.File.Writer = .initStreaming(file, io, &buffer);
-    gasim.snapshot.write(&file_writer.interface, machine, chip, devices) catch |err| fatal("{s}: {t}", .{ temporary, err });
+    gasim.snapshot.write(&file_writer.interface, machine, chip) catch |err| fatal("{s}: {t}", .{ temporary, err });
     file_writer.interface.flush() catch |err| fatal("{s}: {t}", .{ temporary, err });
     file.close(io);
     Io.Dir.rename(.cwd(), temporary, .cwd(), path, io) catch |err| fatal("{s}: {t}", .{ path, err });
@@ -371,7 +371,7 @@ fn wire(arena: Allocator, o: *const Options, board: ?gasim.Board, from_snapshot:
         if (!b.jumperOn(s.rx.jumper, settings) and !b.jumperOn(s.tx.jumper, settings))
             usage("--jumper leaves both of port {s}'s lines unconnected, so nothing reaches its pty", .{s.name});
     }
-    if (ptys.len == o.pty_ports.len and o.usb != null) usage("more than {d} serial ports, with --usb's", .{Chip.max_uarts});
+    if (ptys.len == o.pty_ports.len and o.usb != null) usage("more than {d} serial ports, with --usb's", .{gasim.Board.max_serial});
     // with ptys, stdin and stdout are on a port only if --usb says
     wiring.serial = port: {
         if (o.usb) |name| break :port b.serialPort(name) orelse usage("--usb {s}: {s} has no such serial port", .{ name, b.name });
@@ -656,7 +656,7 @@ const Ptys = struct {
     reading: [max]Io.Future((error{ReadFailed} || Io.Cancelable)!void),
     writing: [max]Io.Future((Io.File.Writer.Error || Io.QueueClosedError)!void),
 
-    const max = Chip.max_uarts;
+    const max = gasim.Board.max_serial;
 
     fn open(self: *Ptys, io: Io, arena: Allocator, ports: []const Options.Pty) void {
         self.ports = ports;
@@ -718,7 +718,7 @@ fn attachBoard(
     const path = o.board_path.?;
     const settings = o.settings[0..o.settings_len];
     var fault: gasim.Board.Fault = .none;
-    var attachments: [Chip.max_uarts]gasim.Board.Attachment = undefined;
+    var attachments: [gasim.Board.max_serial]gasim.Board.Attachment = undefined;
     var count: usize = 0;
     if (serial) |s| {
         attachments[0] = .{ .uart = uart, .port = s };
@@ -805,10 +805,9 @@ fn runAforth(
 /// what a snapshot of the chip is written with
 const Saving = struct {
     machine: gasim.snapshot.Machine,
-    devices: gasim.snapshot.Devices,
 
     fn write(self: Saving, io: Io, arena: Allocator, path: []const u8, chip: *const Chip) !void {
-        return writeSnapshot(io, arena, path, self.machine, chip, self.devices);
+        return writeSnapshot(io, arena, path, self.machine, chip);
     }
 };
 
@@ -1037,7 +1036,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         .uart => uart.preload = try uartStream(init.gpa, arena, &loading, uart_node.?, uart_option),
         .sync => {
             sync = .init(syncStream(arena, o, &loading));
-            chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
+            sync.attachPins(&chip, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
                 fatal("--boot needs node 300's pins 17 and 1, free for its synchronous line ({t})", .{err});
         },
         .serdes => {
@@ -1053,7 +1052,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     // what a snapshot says was going on, which reading it fills in
     if (loaded) |l| {
         if (l.machine.feeder) chip.attachFeeder(&feeder, 1, .up) catch fatal("the snapshot's boot stream needs node 001's up port", .{});
-        if (l.machine.sync) chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
+        if (l.machine.sync) sync.attachPins(&chip, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }) catch |err|
             fatal("the snapshot's synchronous line needs node 300's pins 17 and 1 ({t})", .{err});
     }
 
@@ -1087,7 +1086,7 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         null;
     if (uart_node) |node| {
         uart.input = .{ .io = io, .queue = &input };
-        if (board == null) chip.attachUart(&uart, node) catch |err| switch (err) {
+        if (board == null) uart.attach(&chip, node) catch |err| switch (err) {
             error.NoSuchNode => fatal("--uart node {f} is not in {f}", .{ Chip.nodeName(node), layout }),
             error.NoPins => fatal("--uart node {f} has no pins 17 and 1", .{Chip.nodeName(node)}),
         };
@@ -1099,18 +1098,20 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
             if (chip.nodes[layout.index(node).?].wake_port == null)
                 fatal("node {f} has no port facing off the chip that pin 17 could wake it through to boot: up on the top and bottom rows, left on the others", .{Chip.nodeName(node)});
         }
-    } else if (o.pty_len == 0) chip.attachConsole(&console, o.console_node, o.console_port) catch |err| switch (err) {
+    } else if (o.pty_len == 0) console.attach(&chip, o.console_node, o.console_port) catch |err| switch (err) {
         error.NoSuchNode => fatal("console node {f} is not in {f}", .{ Chip.nodeName(o.console_node), layout }),
         error.PortConnected => fatal("console port {t} of node {f} is connected to another node", .{ o.console_port, Chip.nodeName(o.console_node) }),
+        error.Full => fatal("the chip has no room for the console, with its other devices", .{}),
     };
 
-    const devices: gasim.snapshot.Devices = .{ .flash = if (flash_attached) &flash else null, .sram = attached_sram };
-    if (loaded) |l| gasim.snapshot.readChip(l.reader, arena, &chip, devices) catch |err|
-        fatal("{s}: {t}", .{ given.from.?, err });
+    if (loaded) |l| gasim.snapshot.readChip(l.reader, arena, &chip) catch |err| switch (err) {
+        error.OtherVersion => fatal("{s}: is a snapshot from another gasim", .{given.from.?}),
+        else => fatal("{s}: {t}", .{ given.from.?, err }),
+    };
     // the machine, as a snapshot says it
     const settings_saved = try arena.alloc(gasim.snapshot.Machine.Setting, settings.len);
     for (settings_saved, settings) |*saved, setting| saved.* = .{ .name = setting.name, .on = setting.on };
-    const saving: Saving = .{ .devices = devices, .machine = .{
+    const saving: Saving = .{ .machine = .{
         .board = o.board_path orelse "",
         .board_text = board_text,
         .chip_text = chip_text,
@@ -1122,17 +1123,21 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
         .uart_node = if (board == null) uart_node else null,
         .uart_baud = wiring.uart_baud,
         .usb = o.usb orelse "",
-        .feeder = chip.feeder != null,
-        .sync = chip.sync != null,
+        .feeder = start == .serdes or (loaded != null and loaded.?.machine.feeder),
+        .sync = start == .sync or (loaded != null and loaded.?.machine.sync),
         .flash = flash_attached,
         .sram = attached_sram != null,
     } };
+    // the first of the devices on the serial lines, if there are any
+    const serial_device: ?Chip.Attached = for (chip.devices.slice()) |d| {
+        if (d.port == null and d.device.waiting != null) break d;
+    } else null;
     // input for a session goes with its snapshot, after what it has kept
     const session_input = (command == .run or command == .step) and (o.from != null or o.to != null);
     if (session_input and o.input != .none) {
         const more = stdin_file_reader.interface.allocRemaining(arena, .unlimited) catch |err| fatal("input: {t}", .{err});
         if (uart_node != null) {
-            try uart.addPreload(arena, more, chip.nodes[chip.uarts.items[0].index].time);
+            try uart.addPreload(arena, more, chip.nodes[serial_device.?.index].time);
         } else console.preload = try std.mem.concat(arena, u8, &.{ console.preload, more });
     }
 
@@ -1195,8 +1200,8 @@ fn simulate(init: std.process.Init, arena: Allocator, given: *const Options) !u8
     defer stderr_file_writer.interface.flush() catch {};
 
     // a run with several UARTs waits on the first's (see `Chip.waitForInput`)
-    interruptible = if (chip.uarts.len > 0)
-        .{ .interrupted = &chip.uarts.items[0].device.interrupted, .waiting = &chip.uarts.items[0].device.waiting }
+    interruptible = if (serial_device) |d|
+        .{ .interrupted = d.device.interrupted.?, .waiting = d.device.waiting.? }
     else
         .{ .interrupted = &console.interrupted, .waiting = &console.waiting };
     if (have_sigint) for ([_]posix.SIG{ .INT, .TERM }) |signal| posix.sigaction(signal, &.{

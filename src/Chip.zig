@@ -19,6 +19,10 @@
 //! Each pin is on a net, alone until wired to other pins or devices (see
 //! `wire`, `pull` and `pins`).
 //!
+//! What is outside the nodes, such as a console, a UART or a flash memory,
+//! is a `Device`. The chip runs and saves each through that interface, and
+//! knows none of them by type.
+//!
 //! Each node keeps its own time, as it executes. A node that waits on a port
 //! catches up with the node it transfers a word with, and the node furthest
 //! behind in time steps next, so that devices on nodes' pins, which work at
@@ -70,21 +74,21 @@ hazard_count: u64 = 0,
 /// that a hazard stops running, as a breakpoint does
 strict: bool = false,
 
-/// the console, and the index of the node it is attached to
-console: ?struct { device: *Console, index: u16 } = null,
-/// words fed into a node, such as a boot stream
-feeder: ?struct { device: *Feeder, index: u16 } = null,
-/// the UARTs on nodes' pins (see `attachUartPins`)
-uarts: UartLinks = .{},
-/// a synchronous line's master on a node's pins (see `attachSyncPins`)
-sync: ?SyncLink = null,
-/// rung by whatever gives the UARTs input, so that a run with more than
-/// one waits for any of them (see `waitForInput`)
-doorbell: ?Console.Queue = null,
+/// what is outside the nodes and runs with them, such as a console or a
+/// UART, in the order attached (see `attachPort` and `attachDevice`)
+devices: Devices = .{},
+/// how many of `devices` take input from outside the run or give output to
+/// it, which `run` looks out for
+interactive: u8 = 0,
+/// how many of `devices` drive a wakeup pin and say when it changes
+wakers: u8 = 0,
+/// rung by whatever gives the devices on pins input, so that a run with
+/// more than one waits for any of them (see `waitForInput`)
+doorbell: ?Device.Queue = null,
 /// when something next happens outside the nodes, for a node waiting on it
-/// while a node earlier in time runs: the UART's line or the synchronous
-/// line's clock changing (see `wakeOnPin`), or a word arriving on a SERDES
-/// link (see `arrivals`)
+/// while a node earlier in time runs: a wakeup pin that a device drives
+/// changing (see `wakeOnPin`), or a word arriving on a SERDES link (see
+/// `arrivals`)
 next_event: ?u64 = null,
 /// the nodes' GPIO pins and the nets that join them to each other and to
 /// devices
@@ -108,25 +112,26 @@ pub const max_serdes = 4;
 pub const max_hazards = 16;
 
 pub const max_resets = 4;
-pub const max_uarts = 4;
+pub const max_devices = 16;
 
-/// A UART on a node's pins. `index` is the node of its rx pin, the one it
-/// drives, or of its tx pin if rx is unconnected; `rx_pin` is the rx pin's
-/// index in `wiring.pins`, if it is connected.
-pub const UartLink = struct { device: *Uart, index: u16, rx_pin: ?u16 };
+/// A device and where it is on the chip
+pub const Attached = struct {
+    device: Device,
+    /// the node it is on, at whose time it is serviced: the node of its
+    /// port, or of a pin of its own
+    index: u16 = 0,
+    /// the port of the node it is on, if it is on one. It is serviced only
+    /// while the port is not idle, and the node is woken when it is.
+    port: ?*Port = null,
+    /// the wakeup pin it drives, as an index in `wiring.pins`
+    wake_pin: ?u16 = null,
+};
 
-/// A synchronous line's master on a node's pins, `clock_pin` being the
-/// index of its clock pin, the node's wakeup pin, in `wiring.pins`
-pub const SyncLink = struct { device: *Sync, index: u16, clock_pin: u16 };
-
-pub const UartLinks = struct {
-    items: [max_uarts]UartLink = undefined,
+pub const Devices = struct {
+    items: [max_devices]Attached = undefined,
     len: u8 = 0,
 
-    pub fn slice(self: anytype) switch (@TypeOf(self)) {
-        *UartLinks => []UartLink,
-        else => []const UartLink,
-    } {
+    pub fn slice(self: *const Devices) []const Attached {
         return self.items[0..self.len];
     }
 };
@@ -334,9 +339,8 @@ pub const Snapshot = struct {
     queue_len: usize = 0,
     steps: u64 = 0,
     started: bool = false,
-    console_port: Port = .{},
-    feeder_port: Port = .{},
-    feeder_next: usize = 0,
+    /// what of each device goes back, in the order of `devices`
+    devices: [max_devices]Device.Saved = @splat(.{}),
     serdes: SerdesLinks = .{},
     resets: ResetLines = .{},
     held: u8 = 0,
@@ -369,8 +373,7 @@ pub const Feeder = struct {
     words: []const Word,
     next: usize = 0,
 
-    /// the feeder's side of the port; the node uses the other one
-    const side: port.Side = .b;
+    const side = Device.side;
 
     /// Writes the next word if the node is reading. Returns false if there
     /// is nothing to do.
@@ -379,6 +382,33 @@ pub const Feeder = struct {
         _ = self.port.write(side, self.words[self.next]);
         self.next += 1;
         return true;
+    }
+
+    pub fn device(self: *Feeder) Device {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    const vtable: Device.VTable = .{
+        .service = serviceDevice,
+        .save = saveDevice,
+        .restore = restoreDevice,
+        .state = .of(Feeder),
+    };
+
+    fn serviceDevice(context: *anyopaque, _: u64, _: bool) Device.ServiceError!bool {
+        const self: *Feeder = @ptrCast(@alignCast(context));
+        return self.service();
+    }
+
+    fn saveDevice(context: *anyopaque) Device.Saved {
+        const self: *Feeder = @ptrCast(@alignCast(context));
+        return .{ .port = self.port, .next = self.next };
+    }
+
+    fn restoreDevice(context: *anyopaque, saved: Device.Saved) void {
+        const self: *Feeder = @ptrCast(@alignCast(context));
+        self.port = saved.port;
+        self.next = saved.next;
     }
 };
 
@@ -675,11 +705,9 @@ pub fn save(self: Chip, snapshot: *Snapshot) void {
     snapshot.held = self.held;
     snapshot.hazards = self.hazards;
     snapshot.hazard_count = self.hazard_count;
-    if (self.console) |console| snapshot.console_port = console.device.port;
-    if (self.feeder) |feeder| {
-        snapshot.feeder_port = feeder.device.port;
-        snapshot.feeder_next = feeder.device.next;
-    }
+    for (self.devices.slice(), 0..) |d, k| if (d.device.vtable.save) |saveDevice| {
+        snapshot.devices[k] = saveDevice(d.device.context);
+    };
 }
 
 /// Goes back to a snapshot saved from this chip
@@ -700,11 +728,9 @@ pub fn restore(self: *Chip, snapshot: *const Snapshot) void {
     self.hazard_count = snapshot.hazard_count;
     // the pins' histories are of the future the chip went back from
     self.wiring.reset();
-    if (self.console) |console| console.device.port = snapshot.console_port;
-    if (self.feeder) |feeder| {
-        feeder.device.port = snapshot.feeder_port;
-        feeder.device.next = snapshot.feeder_next;
-    }
+    for (self.devices.slice(), 0..) |d, k| if (d.device.vtable.restore) |restoreDevice| {
+        restoreDevice(d.device.context, snapshot.devices[k]);
+    };
 }
 
 /// Whether the chip is as it was when saved into a snapshot, not counting
@@ -720,8 +746,9 @@ pub fn matches(self: *const Chip, snapshot: *const Snapshot) bool {
         !std.meta.eql(self.serdes.*, snapshot.serdes) or
         !std.meta.eql(self.resets.*, snapshot.resets) or
         self.held != snapshot.held) return false;
-    if (self.console) |console| if (!std.meta.eql(console.device.port, snapshot.console_port)) return false;
-    if (self.feeder) |feeder| if (!std.meta.eql(feeder.device.port, snapshot.feeder_port) or feeder.device.next != snapshot.feeder_next) return false;
+    for (self.devices.slice(), 0..) |d, k| if (d.device.vtable.save) |saveDevice| {
+        if (!std.meta.eql(saveDevice(d.device.context), snapshot.devices[k])) return false;
+    };
     return true;
 }
 
@@ -865,81 +892,63 @@ pub fn waitsForCode(n: *const Computer) bool {
     return n.state == .fetch and port.select(@bitCast(n.p.address)) != null;
 }
 
-/// Attaches a console to a port of a node that faces off the array
-pub fn attachConsole(self: *Chip, console: *Console, number: u16, direction: Direction) error{ NoSuchNode, PortConnected }!void {
+/// Attaches a device to a port of a node that faces off the array. The
+/// two transfer words through `p`, the device on `Device.side` of it. The
+/// device is serviced only while a transfer is under way, and the node is
+/// woken when the device had something to do.
+pub fn attachPort(self: *Chip, number: u16, direction: Direction, p: *Port, device: Device) error{ NoSuchNode, PortConnected, Full }!void {
     const i = self.layout.index(number) orelse return error.NoSuchNode;
-    if (self.nodes[i].ports[@backingInt(direction)].port != null) return error.PortConnected;
-    console.attach(&self.nodes[i], direction);
-    self.console = .{ .device = console, .index = i };
+    const link = &self.nodes[i].ports[@backingInt(direction)];
+    if (link.port != null) return error.PortConnected;
+    try self.add(.{ .device = device, .index = i, .port = p });
+    link.* = .{ .port = p, .side = Device.side.other() };
 }
 
 /// Attaches a feeder to a port of a node that faces off the array. A node
 /// still waiting for code after reset waits on the feeder too, so attach it
 /// before stepping the chip.
-pub fn attachFeeder(self: *Chip, feeder: *Feeder, number: u16, direction: Direction) error{ NoSuchNode, PortConnected }!void {
-    const i = self.layout.index(number) orelse return error.NoSuchNode;
+pub fn attachFeeder(self: *Chip, feeder: *Feeder, number: u16, direction: Direction) error{ NoSuchNode, PortConnected, Full }!void {
+    try self.attachPort(number, direction, &feeder.port, feeder.device());
+    const i = self.layout.index(number).?;
     const n = &self.nodes[i];
-    const link = &n.ports[@backingInt(direction)];
-    if (link.port != null) return error.PortConnected;
-    link.* = .{ .port = &feeder.port, .side = Feeder.side.other() };
     const ports = self.layout.neighbourPorts(i);
     if (n.p.address == Address.fromWord(port.multiport(ports)))
         n.p.address = Address.fromWord(port.multiport(ports.unionWith(.initOne(direction))));
     if (self.reset_address[i] == Address.fromWord(port.multiport(ports)))
         self.reset_address[i] = Address.fromWord(port.multiport(ports.unionWith(.initOne(direction))));
-    self.feeder = .{ .device = feeder, .index = i };
 }
 
-/// Attaches a UART to the pins of a node, the node driving `uart.tx_pin`
-/// and the UART `uart.rx_pin`
-pub fn attachUart(self: *Chip, uart: *Uart, number: u16) error{ NoSuchNode, NoPins }!void {
-    const i = self.layout.index(number) orelse return error.NoSuchNode;
-    const pins = self.nodes[i].pins;
-    if (pins & uart.rx_pin == 0 or pins & uart.tx_pin == 0) return error.NoPins;
-    self.attachUartPins(uart, .{ .node = number, .pin = @intCast(@ctz(uart.rx_pin)) }, .{ .node = number, .pin = @intCast(@ctz(uart.tx_pin)) }) catch
-        return error.NoPins;
+/// Adds a device that meets its nodes through pins or a bus, to run and be
+/// saved with the chip. Put it on its pins with `attachPin`, and on a bus
+/// with `attachBus`. `pin` is a pin of the node whose time it is serviced
+/// at, if it is serviced. With `wakes`, the device drives that pin, and it
+/// is a wakeup pin: a node waiting on it wakes when the device says it
+/// changes.
+pub fn attachDevice(self: *Chip, device: Device, pin: ?PinRef, wakes: bool) error{ NoSuchPin, Full }!void {
+    const found = if (pin) |p| try self.pinOf(p) else null;
+    try self.add(.{
+        .device = device,
+        .index = if (found) |p| p.node else 0,
+        .wake_pin = if (found) |p| if (wakes) @intCast(p - self.wiring.pins.ptr) else null else null,
+    });
 }
 
-/// Attaches a UART to two pins, which may be of different nodes: it drives
-/// `rx`, which the chip receives on, and listens to `tx`, which it sends
-/// on. Either may be left out, as a board's jumper can leave a line
-/// unconnected.
-pub fn attachUartPins(self: *Chip, uart: *Uart, rx: ?PinRef, tx: ?PinRef) error{ NoSuchPin, TwoDevices, Full }!void {
-    const rx_pin = if (rx) |r| try self.pinOf(r) else null;
-    const tx_pin = if (tx) |t| try self.pinOf(t) else null;
-    const wiring = self.wiring;
-    for ([_]?*gpio.Pin{ rx_pin, tx_pin }) |p| if (p) |pin| if (wiring.nets[pin.net].device != null) return error.TwoDevices;
-    if (rx_pin != null and tx_pin != null and rx_pin.?.net == tx_pin.?.net) return error.TwoDevices;
-    const index = if (rx_pin orelse tx_pin) |p| p.node else return;
-    if (self.uarts.len == max_uarts) return error.Full;
-    self.uarts.items[self.uarts.len] = .{ .device = uart, .index = index, .rx_pin = if (rx_pin) |p| @intCast(p - wiring.pins.ptr) else null };
-    self.uarts.len += 1;
-    if (rx_pin) |p| {
-        uart.rx_pin = p.bit;
-        wiring.nets[p.net].device = uart.rxDevice();
-        wiring.hook(p.node);
-    }
-    if (tx_pin) |p| {
-        uart.tx_pin = p.bit;
-        wiring.nets[p.net].device = uart.txDevice();
-        wiring.hook(p.node);
-    }
+fn add(self: *Chip, attached: Attached) error{Full}!void {
+    if (self.devices.len == max_devices) return error.Full;
+    self.devices.items[self.devices.len] = attached;
+    self.devices.len += 1;
+    if (attached.device.interactive()) self.interactive += 1;
+    if (attached.wake_pin != null and attached.device.vtable.nextEdge != null) self.wakers += 1;
 }
 
-/// Puts a synchronous line's master on two pins: it drives `clock`, which
-/// has to be the wakeup pin, pin 17, of its node, and `data`
-pub fn attachSyncPins(self: *Chip, sync: *Sync, clock: PinRef, data: PinRef) error{ NoSuchPin, TwoDevices, NotWakeupPin }!void {
-    if (clock.pin != 17) return error.NotWakeupPin;
-    const clock_pin = try self.pinOf(clock);
-    const data_pin = try self.pinOf(data);
-    const wiring = self.wiring;
-    if (self.sync != null or clock_pin.net == data_pin.net) return error.TwoDevices;
-    for ([_]*gpio.Pin{ clock_pin, data_pin }) |p| if (wiring.nets[p.net].device != null) return error.TwoDevices;
-    wiring.nets[clock_pin.net].device = sync.clockDevice();
-    wiring.hook(clock_pin.node);
-    wiring.nets[data_pin.net].device = sync.dataDevice();
-    wiring.hook(data_pin.node);
-    self.sync = .{ .device = sync, .index = clock_pin.node, .clock_pin = @intCast(clock_pin - wiring.pins.ptr) };
+/// whether a device is on the net of pin `p` already
+pub fn pinTaken(self: *Chip, p: PinRef) error{NoSuchPin}!bool {
+    return self.wiring.nets[(try self.pinOf(p)).net].device != null;
+}
+
+/// whether two pins are on one net, wired together or the same pin
+pub fn sameNet(self: *Chip, a: PinRef, b: PinRef) error{NoSuchPin}!bool {
+    return (try self.pinOf(a)).net == (try self.pinOf(b)).net;
 }
 
 /// Puts a device on the net of pin `p`, which it listens to or drives
@@ -958,22 +967,6 @@ pub fn attachBus(self: *Chip, number: u16, device: Computer.BusDevice) error{ No
     if (n.bus_device != null) return error.TwoDevices;
     n.bus_device = device;
     device.written(device.context, n);
-}
-
-/// Puts an SPI flash on four pins, any of which can be left unconnected: it
-/// listens to the clock, chip select and data out, and drives data in
-pub fn attachFlashPins(self: *Chip, flash: *Flash, clock: ?PinRef, select: ?PinRef, data_out: ?PinRef, data_in: ?PinRef) error{ NoSuchPin, TwoDevices }!void {
-    var found: [4]?*gpio.Pin = undefined;
-    for ([_]?PinRef{ clock, select, data_out, data_in }, &found) |ref, *pin| pin.* = if (ref) |r| try self.pinOf(r) else null;
-    const wiring = self.wiring;
-    for (found, 0..) |p, k| if (p) |pin| {
-        if (wiring.nets[pin.net].device != null) return error.TwoDevices;
-        for (found[0..k]) |q| if (q) |other| if (other.net == pin.net) return error.TwoDevices;
-    };
-    for (found, [_]gpio.Device{ flash.clockDevice(), flash.selectDevice(), flash.dataOutDevice(), flash.dataInDevice() }) |p, device| if (p) |pin| {
-        wiring.nets[pin.net].device = device;
-        wiring.hook(pin.node);
-    };
 }
 
 /// Links two SERDES nodes, as the EVB002 links host node 701 to target
@@ -1057,14 +1050,6 @@ fn pinOf(self: *Chip, p: PinRef) error{NoSuchPin}!*gpio.Pin {
     return self.wiring.pin(i, @as(u18, 1) << p.pin) orelse error.NoSuchPin;
 }
 
-/// feeds the next word, waking the node that takes it
-fn feed(self: *Chip) bool {
-    const feeder = self.feeder orelse return false;
-    if (!feeder.device.service()) return false;
-    self.wake(feeder.index);
-    return true;
-}
-
 /// Takes as many steps as there are nodes queued, each of the node furthest
 /// behind in time then, which may be the same node again. Returns false
 /// when every node is suspended, and stepping would do nothing.
@@ -1106,14 +1091,13 @@ noinline fn roundAfterStop(self: *Chip) bool {
 /// does (`next_event`)
 noinline fn fireEvents(self: *Chip) void {
     self.next_event = null;
-    if (self.uarts.len > 0) self.wakeOnPins();
-    if (self.sync) |link| _ = self.wakeOnEdge(link.index, 1 << 17, link.clock_pin, link.device, Sync.nextClockEdge);
+    if (self.wakers > 0) self.wakeOnPins();
     if (self.serdes.len > 0) self.arrivals();
 }
 
 /// whether anything outside the nodes happens on its own time
 inline fn hasEvents(self: *const Chip) bool {
-    return self.uarts.len > 0 or self.sync != null or self.serdes.len > 0;
+    return self.wakers > 0 or self.serdes.len > 0;
 }
 
 fn schedule(self: *Chip, time: u64) void {
@@ -1121,27 +1105,31 @@ fn schedule(self: *Chip, time: u64) void {
 }
 
 fn wakeOnPins(self: *Chip) void {
-    for (self.uarts.slice()) |uart| self.wakeOnPin(uart);
+    for (self.devices.slice()) |d| self.wakeOnPin(d);
 }
 
-/// Wakes the node with a UART if it waits on its wakeup pin, and the pin
-/// is already as it waits for, such as when input arrives, or changes before
-/// any node that is running gets there, so the node wakes at its time
-fn wakeOnPin(self: *Chip, uart: UartLink) void {
-    const rx_pin = uart.rx_pin orelse return;
-    if (self.wakeOnEdge(uart.index, uart.device.rx_pin, rx_pin, uart.device, Uart.nextRxEdge)) uart.device.used = true;
+/// Wakes the node whose wakeup pin a device drives, if it waits on the pin,
+/// and the pin is already as it waits for, such as when input arrives, or
+/// changes before any node that is running gets there, so the node wakes
+/// at its time
+fn wakeOnPin(self: *Chip, d: Attached) void {
+    const pin = d.wake_pin orelse return;
+    const nextEdge = d.device.vtable.nextEdge orelse return;
+    if (!self.wakeOnEdge(d.index, pin, d.device.context, nextEdge)) return;
+    if (d.device.vtable.pinRead) |read| read(d.device.context);
 }
 
-/// Wakes node `index` if it waits on its wakeup pin, the pin with io bit
-/// `bit` and index `pin` in `wiring.pins`, and the pin is already as it
-/// waits for, or changes, as `nextEdge` of `device` says, before any node
-/// that is running gets there. Returns whether it woke.
-fn wakeOnEdge(self: *Chip, index: u16, bit: u18, pin: u16, device: anytype, comptime nextEdge: anytype) bool {
+/// Wakes node `index` if it waits on its wakeup pin, the one with index
+/// `pin` in `wiring.pins`, and the pin is already as it waits for, or
+/// changes, as `nextEdge` of the device that drives it says, before any
+/// node that is running gets there. Returns whether it woke.
+fn wakeOnEdge(self: *Chip, index: u16, pin: u16, context: *anyopaque, nextEdge: *const fn (*anyopaque, u64) ?u64) bool {
     const n = &self.nodes[index];
     if (self.queued[index] or !n.waitsOnPin()) return false;
-    if (self.wiring.level(self.wiring.pins[pin].net, n.time)) n.pin_inputs |= bit else n.pin_inputs &= ~bit;
+    const p = &self.wiring.pins[pin];
+    if (self.wiring.level(p.net, n.time)) n.pin_inputs |= p.bit else n.pin_inputs &= ~p.bit;
     if (!n.pinAwake()) {
-        const edge = nextEdge(device, n.time) orelse return false;
+        const edge = nextEdge(context, n.time) orelse return false;
         if (self.queue_len > 0 and self.nodes[self.queue[0]].time < edge) {
             self.schedule(edge);
             return false;
@@ -1446,10 +1434,11 @@ fn resetChip(self: *Chip, chip: u8, time: u64, hold: bool) void {
     for (first..first + per) |i| if (self.nodes[i].shared_pins != 0) self.wakeOnNets(@intCast(i));
 }
 
-/// notes that node `i` read the rx pin of a UART, which uses it
+/// tells the device that drives the wakeup pin of node `i` that the node
+/// read it
 noinline fn pinRead(self: *Chip, i: u16) void {
-    for (self.uarts.slice()) |u| if (u.index == i and u.rx_pin != null) {
-        u.device.used = true;
+    for (self.devices.slice()) |d| if (d.index == i and d.wake_pin != null) {
+        if (d.device.vtable.pinRead) |read| read(d.device.context);
     };
 }
 
@@ -1579,7 +1568,7 @@ fn siftDown(self: *Chip, start: usize) void {
     }
 }
 
-/// rounds without console output after which pending output is flushed
+/// rounds without output from a device after which pending output is flushed
 const flush_after_rounds = 1000;
 
 /// Gives the devices anything they have for their nodes, without waiting
@@ -1607,36 +1596,66 @@ pub fn stepNext(self: *Chip) !?u16 {
 /// for input. Returns false when they had nothing.
 pub inline fn service(self: *Chip) !bool {
     var serviced = false;
-    if (self.console) |console| if (try console.device.service(false)) {
-        self.wake(console.index);
-        serviced = true;
-    };
-    for (self.uarts.slice()) |uart| if (try uart.device.service(self.nodes[uart.index].time)) {
-        serviced = true;
-    };
-    if (self.feed()) serviced = true;
+    for (self.devices.slice()) |d| {
+        if (try self.serviceOne(d, false)) serviced = true;
+    }
     return serviced;
 }
 
-/// Runs until every node is suspended on something the console or UART
-/// cannot complete, a node reaches a breakpoint or makes a watched transfer,
-/// or the console or UART is interrupted. Breakpoints and watches stop the
-/// run at once, with the round unfinished, leaving `hit` set. Reaching
-/// `step_limit` or `time_limit` stops it too, setting `limited`.
+/// Services one device, waking its node if it is on a port of it. Returns
+/// false when it had nothing to do.
+inline fn serviceOne(self: *Chip, d: Attached, wait: bool) !bool {
+    const serviceFn = d.device.vtable.service orelse return false;
+    if (d.port) |p| if (p.state == .idle) return false;
+    if (!try serviceFn(d.device.context, self.nodes[d.index].time, wait)) return false;
+    if (d.port != null) self.wake(d.index);
+    return true;
+}
+
+/// what `run` asks of the devices each round, in one pass over them
+const Polled = struct {
+    /// output written but not yet flushed, before they were serviced and
+    /// after
+    pending: usize = 0,
+    pending_after: usize = 0,
+    interrupted: bool = false,
+};
+
+inline fn poll(self: *Chip) !Polled {
+    var polled: Polled = .{};
+    for (self.devices.slice()) |d| {
+        if (d.device.output) |output| polled.pending += output.end;
+        _ = try self.serviceOne(d, false);
+        if (d.device.output) |output| polled.pending_after += output.end;
+        if (d.device.interrupted) |flag| if (flag.load(.monotonic)) {
+            polled.interrupted = true;
+        };
+    }
+    return polled;
+}
+
+/// Runs until every node is suspended on something no device can complete,
+/// a node reaches a breakpoint or makes a watched transfer, or a device is
+/// interrupted. Breakpoints and watches stop the run at once, with the
+/// round unfinished, leaving `hit` set. Reaching `step_limit` or
+/// `time_limit` stops it too, setting `limited`.
 pub fn run(self: *Chip) !void {
     self.hit = null;
     self.limited = false;
-    if (self.console == null and self.uarts.len == 0) {
-        while (self.hit == null and !self.pastLimit() and (self.feed() or self.step())) {}
+    if (self.interactive == 0) {
+        while (self.hit == null and !self.pastLimit() and (try self.service() or self.step())) {}
         return;
     }
     var quiet_rounds: u16 = 0;
-    while (self.hit == null and !self.pastLimit() and !self.interrupted()) {
-        const pending = self.pendingOutput();
-        _ = try self.service();
+    if (self.interrupted()) return self.flushOutput();
+    while (self.hit == null and !self.pastLimit()) {
+        const polled = try self.poll();
+        // seen in the same pass as the devices are serviced, so they are
+        // serviced once more than they would be if it were checked first
+        if (polled.interrupted) break;
         // flush once output stops for a while, so a busy node does not hold
         // it up while a steady stream of output is still written in blocks
-        if (pending == 0 or self.pendingOutput() != pending) {
+        if (polled.pending == 0 or polled.pending_after != polled.pending) {
             quiet_rounds = 0;
         } else if (quiet_rounds == flush_after_rounds) {
             try self.flushOutput();
@@ -1648,27 +1667,29 @@ pub fn run(self: *Chip) !void {
     try self.flushOutput();
 }
 
-/// Waits for input for a node waiting on the console, or on a UART's pin.
-/// Returns false if no node can take any more. With a doorbell, as for a
-/// board whose serial ports a program may connect to and send on at any
-/// time, waits for it to ring, for input to any UART, which the next round
-/// takes, even with no node waiting for it, until it is closed.
+/// Waits for input for a node waiting on a device on its port, or on a
+/// wakeup pin that a device drives. Returns false if no node can take any
+/// more. With a doorbell, as for a board whose serial ports a program may
+/// connect to and send on at any time, waits for it to ring, for input to
+/// any device on pins, which the next round takes, even with no node
+/// waiting for it, until it is closed.
 fn waitForInput(self: *Chip) !bool {
-    if (self.console) |console| if (try console.device.service(true)) {
-        self.wake(console.index);
-        return true;
+    for (self.devices.slice()) |d| if (d.port != null) {
+        if (try self.serviceOne(d, true)) return true;
     };
-    // without one, only one UART's input can be waited for: that of one
-    // whose node waits on its pin, for input that can reach it on an rx line
+    // without one, only one device's input can be waited for: that of one
+    // whose node waits on the pin it drives, for input that can reach it
     const bell = self.doorbell orelse {
-        for (self.uarts.slice()) |uart| if (uart.rx_pin != null and self.nodes[uart.index].waitsOnPin())
-            return uart.device.waitForInput(self.nodes[uart.index].time);
+        for (self.devices.slice()) |d| if (d.wake_pin != null and d.device.vtable.service != null and self.nodes[d.index].waitsOnPin())
+            return self.serviceOne(d, true);
         return false;
     };
     try self.flushOutput();
-    const first = self.uarts.items[0].device;
-    first.waiting.store(true, .release);
-    defer first.waiting.store(false, .release);
+    const waiting: ?*std.atomic.Value(bool) = for (self.devices.slice()) |d| {
+        if (d.port == null) if (d.device.waiting) |w| break w;
+    } else null;
+    if (waiting) |w| w.store(true, .release);
+    defer if (waiting) |w| w.store(false, .release);
     var ring: [64]u8 = undefined;
     _ = bell.queue.get(bell.io, &ring, 1) catch |err| switch (err) {
         error.Closed => return false,
@@ -1685,22 +1706,12 @@ inline fn pastLimit(self: *Chip) bool {
 }
 
 pub fn interrupted(self: *const Chip) bool {
-    if (self.console) |console| if (console.device.interrupted.load(.monotonic)) return true;
-    for (self.uarts.slice()) |uart| if (uart.device.interrupted.load(.monotonic)) return true;
+    for (self.devices.slice()) |d| if (d.device.interrupted) |flag| if (flag.load(.monotonic)) return true;
     return false;
 }
 
-/// output written but not yet flushed, by the console and UARTs
-fn pendingOutput(self: *const Chip) usize {
-    var pending: usize = 0;
-    if (self.console) |console| pending += console.device.output.end;
-    for (self.uarts.slice()) |uart| pending += uart.device.output.end;
-    return pending;
-}
-
 pub fn flushOutput(self: *Chip) !void {
-    if (self.console) |console| try console.device.output.flush();
-    for (self.uarts.slice()) |uart| try uart.device.output.flush();
+    for (self.devices.slice()) |d| if (d.device.output) |output| try output.flush();
 }
 
 /// Assembles `source` onto a GA144 sized chip with a console on the up port
@@ -1752,7 +1763,7 @@ fn expectRun(chip: *Chip, input: []const u8, expected: []const u8) !void {
     var buffer: [256]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input_queue }, .output = &writer };
-    try chip.attachConsole(&console, 0, .up);
+    try console.attach(chip, 0, .up);
 
     try chip.run();
     try expectEqualStrings(expected, writer.buffered());
@@ -2036,15 +2047,18 @@ test "a chip whose RESET- only a pin's pulldown drives is held from the start" {
     try expect(!released.isHeld(1));
 }
 
-test attachSyncPins {
+test "a synchronous line is attached by its clock, on a wakeup pin" {
     var chip: Chip = try .init(std.testing.allocator, .ga144);
     defer chip.deinit(std.testing.allocator);
     var sync: Sync = .init(&.{});
-    try expectError(error.NotWakeupPin, chip.attachSyncPins(&sync, .{ .node = 300, .pin = 1 }, .{ .node = 300, .pin = 17 }));
-    try expectError(error.NoSuchPin, chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 3 }));
-    try chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 });
-    try expectEqual(chip.layout.index(300).?, chip.sync.?.index);
-    try expectError(error.TwoDevices, chip.attachSyncPins(&sync, .{ .node = 708, .pin = 17 }, .{ .node = 708, .pin = 1 }));
+    try expectError(error.NotWakeupPin, sync.attachPins(&chip, .{ .node = 300, .pin = 1 }, .{ .node = 300, .pin = 17 }));
+    try expectError(error.NoSuchPin, sync.attachPins(&chip, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 3 }));
+    try sync.attachPins(&chip, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 });
+    try expectEqual(chip.layout.index(300).?, chip.devices.items[0].index);
+    try expectEqual(1, chip.wakers);
+    var other: Sync = .init(&.{});
+    try expectError(error.TwoDevices, other.attachPins(&chip, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 }));
+    try expectEqual(1, chip.devices.len);
 }
 
 test attachSerdes {
@@ -2352,16 +2366,16 @@ test "runs until every node is suspended" {
     , "", "\x01\x02");
 }
 
-test attachConsole {
+test "a console is attached to a port that faces off the array" {
     var chip: Chip = try .init(std.testing.allocator, .{ .rows = 1, .columns = 2 });
     defer chip.deinit(std.testing.allocator);
 
     var input: Io.Queue(u8) = .init(&.{});
     var writer: Io.Writer = .fixed(&.{});
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
-    try expectError(error.PortConnected, chip.attachConsole(&console, 0, .right));
-    try expectError(error.NoSuchNode, chip.attachConsole(&console, 100, .up));
-    try chip.attachConsole(&console, 1, .left);
+    try expectError(error.PortConnected, console.attach(&chip, 0, .right));
+    try expectError(error.NoSuchNode, console.attach(&chip, 100, .up));
+    try console.attach(&chip, 1, .left);
 }
 
 test "init frees what it allocated when it runs out of memory" {
@@ -2391,7 +2405,7 @@ test "waits for input that has not arrived" {
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
-    try chip.attachConsole(&console, 0, .up);
+    try console.attach(&chip, 0, .up);
 
     // input arrives once the chip is waiting for it
     var typing = try std.testing.io.concurrent(struct {
@@ -2521,15 +2535,15 @@ test "two nodes driving a net both ways is contention" {
     try expectError(error.NoSuchPin, chip.pull(.{ .node = 0, .pin = 20 }, true));
 }
 
-test attachUart {
+test "a UART is attached to a node with its pins" {
     var chip: Chip = try .init(std.testing.allocator, .ga144);
     defer chip.deinit(std.testing.allocator);
 
     var writer: Io.Writer = .fixed(&.{});
     var uart: Uart = .init(921600, &writer);
-    try expectError(error.NoSuchNode, chip.attachUart(&uart, 999));
-    try expectError(error.NoPins, chip.attachUart(&uart, 410));
-    try chip.attachUart(&uart, 708);
+    try expectError(error.NoSuchNode, uart.attach(&chip, 999));
+    try expectError(error.NoPins, uart.attach(&chip, 410));
+    try uart.attach(&chip, 708);
 }
 
 test "a node waiting on its pin wakes as the line changes" {
@@ -2549,7 +2563,7 @@ test "a node waiting on its pin wakes as the line changes" {
     var uart: Uart = .init(921600, &writer);
     uart.preload = "\x00";
     uart.arrived = 5_000_000;
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
 
     try chip.run();
     const n = chip.node(708).?;
@@ -2571,7 +2585,7 @@ test "pins are read at the node's time, after a unext loop in the same word" {
     var uart: Uart = .init(921600, &writer);
     uart.preload = "\x00";
     uart.arrived = 5_000_000;
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
 
     try chip.run();
     const io: u18 = @bitCast(chip.node(708).?.data_stack.t);
@@ -2588,7 +2602,7 @@ test "pins are driven at the node's time, in a unext loop" {
 
     var writer: Io.Writer = .fixed(&.{});
     var uart: Uart = .init(921600, &writer);
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
 
     try chip.run();
     try expect(uart.receiving.?.start < 100_000);
@@ -2606,7 +2620,7 @@ test "a byte the node sends is received without a write after it" {
     var buffer: [4]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     var uart: Uart = .init(921600, &writer);
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
 
     try chip.run();
     try expectEqualStrings("\xff", writer.buffered());
@@ -2627,7 +2641,7 @@ test "a node that reads its pin once input has arrived uses the UART" {
     var writer: Io.Writer = .fixed(&.{});
     var uart: Uart = .init(921600, &writer);
     uart.preload = "\x00";
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
 
     try chip.run();
     try expect(!chip.node(708).?.waitsOnPin());
@@ -2645,7 +2659,7 @@ test "waits for UART input that has not arrived" {
     var writer: Io.Writer = .fixed(&.{});
     var uart: Uart = .init(921600, &writer);
     uart.input = .{ .io = std.testing.io, .queue = &input };
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
 
     // input arrives once the chip is waiting for it, and its start bit
     // wakes node 708 at once
@@ -2676,7 +2690,7 @@ test advance {
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
-    try chip.attachConsole(&console, 0, .up);
+    try console.attach(&chip, 0, .up);
 
     // the node settles waiting for input, without advance waiting for it
     while (try chip.advance()) {}
@@ -3086,7 +3100,7 @@ test "stops when interrupted" {
     var buffer: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &writer };
-    try chip.attachConsole(&console, 0, .up);
+    try console.attach(&chip, 0, .up);
 
     // run the program up to its endless loop
     for (0..4) |_| {
@@ -3108,7 +3122,7 @@ const testRom = @import("rom.zig").testRom;
 const Console = @import("Console.zig");
 const Uart = @import("Uart.zig");
 const Sync = @import("Sync.zig");
-const Flash = @import("Flash.zig");
+const Device = @import("Device.zig");
 const f18 = @import("f18.zig");
 const Address = f18.Address;
 const Computer = f18.Computer;

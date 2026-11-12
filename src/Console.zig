@@ -30,14 +30,9 @@ const Console = @This();
 /// not what a console was, but where this process has it
 pub const snapshot_skip = .{ "input", "output", "interrupted", "waiting" };
 
-/// a queue of input, closed at the end of it, and the `Io` it is used with
-pub const Queue = struct {
-    io: Io,
-    queue: *Io.Queue(u8),
-};
+pub const Queue = Device.Queue;
 
-/// the console's side of the port; the node uses the other one
-const side: Side = .b;
+const side = Device.side;
 
 /// Copies `reader` into `input` until the end of input, then closes `input`.
 /// Run it concurrently with the chip, so that waiting for input does not
@@ -57,8 +52,42 @@ pub fn readInput(io: Io, reader: *Io.Reader, input: *Io.Queue(u8)) (error{ReadFa
     }
 }
 
-pub fn attach(self: *Console, node: *Computer, direction: Direction) void {
-    node.ports[@backingInt(direction)] = .{ .port = &self.port, .side = side.other() };
+/// Attaches the console to a port of a node that faces off the array
+pub fn attach(self: *Console, chip: *Chip, number: u16, direction: Direction) error{ NoSuchNode, PortConnected, Full }!void {
+    try chip.attachPort(number, direction, &self.port, self.device());
+}
+
+/// the console as a device of the chip
+pub fn device(self: *Console) Device {
+    return .{
+        .context = self,
+        .vtable = &vtable,
+        .output = self.output,
+        .interrupted = &self.interrupted,
+        .waiting = &self.waiting,
+    };
+}
+
+const vtable: Device.VTable = .{
+    .service = serviceDevice,
+    .save = saveDevice,
+    .restore = restoreDevice,
+    .state = .of(Console),
+};
+
+fn serviceDevice(context: *anyopaque, _: u64, wait: bool) Device.ServiceError!bool {
+    const self: *Console = @ptrCast(@alignCast(context));
+    return self.service(wait);
+}
+
+fn saveDevice(context: *anyopaque) Device.Saved {
+    const self: *Console = @ptrCast(@alignCast(context));
+    return .{ .port = self.port };
+}
+
+fn restoreDevice(context: *anyopaque, saved: Device.Saved) void {
+    const self: *Console = @ptrCast(@alignCast(context));
+    self.port = saved.port;
 }
 
 /// Completes a transfer the node is waiting on. Returns false if the node is
@@ -234,7 +263,9 @@ test readInput {
     try expectError(error.Closed, input.get(std.testing.io, &got, 0));
 }
 
+const Chip = @import("Chip.zig");
 const Computer = @import("f18.zig").Computer;
+const Device = @import("Device.zig");
 const ports = @import("port.zig");
 const Direction = ports.Direction;
 const Port = ports.Port;

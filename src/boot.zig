@@ -504,7 +504,7 @@ test "boot node 001 from ROM" {
     var output_buffer: [16]u8 = undefined;
     var output: Io.Writer = .fixed(&output_buffer);
     var console: Console = .{ .input = .{ .io = std.testing.io, .queue = &input }, .output = &output };
-    try chip.attachConsole(&console, 0, .up);
+    try console.attach(&chip, 0, .up);
 
     try chip.run();
     try expectEqualStrings("BOOT ME", output.buffered());
@@ -538,7 +538,7 @@ test "boot node 708 from ROM through a UART" {
     var output: Io.Writer = .fixed(&output_buffer);
     var uart: Uart = .init(921600, &output);
     uart.preload = asyncBytes(frames, &bytes);
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
     try chip.run();
 
     try expectEqualStrings("Hi", output.buffered());
@@ -572,7 +572,7 @@ test "boot node 708 from input that arrives while it waits on its pin" {
 
     var output: Io.Writer = .fixed(&.{});
     var uart: Uart = .init(921600, &output);
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
     // with no input, node 708 waits on its pin
     try chip.run();
     try expect(chip.node(708).?.waitsOnPin());
@@ -615,7 +615,7 @@ test "node 708 takes another stream once it has booted only its neighbours" {
     var input_buffer: [second_bytes.len]u8 = undefined;
     var input = try Console.testInput(&input_buffer, asyncBytes(second[0 .. 3 + assembled[1].len], &second_bytes));
     uart.input = .{ .io = std.testing.io, .queue = &input };
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
     try chip.run();
     try expectEqual(6, chip.node(608).?.data_stack.t);
     try expectEqual(5, chip.node(708).?.data_stack.t);
@@ -1467,7 +1467,7 @@ fn expectBootsAsDescribed(roms: []const ga144.NodeRom, checked: []const Descript
     var flash: Flash = .init(if (from == .flash) from.flash else &.{});
     if (from == .flash) try Board.evb002.attachFlash(&chip, &flash, settings);
     var sync: Sync = .init(if (from == .sync) from.sync else &.{});
-    if (from == .sync) try chip.attachSyncPins(&sync, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 });
+    if (from == .sync) try sync.attachPins(&chip, .{ .node = 300, .pin = 17 }, .{ .node = 300, .pin = 1 });
     var snorkel: Snorkel = .{ .words = if (from == .snorkel) from.snorkel.words else &.{} };
     if (from == .snorkel) for (from.snorkel.set_up) |d| try chip.setUp(d, programs);
     try Board.evb002.attachSram(&chip, &sram, settings);

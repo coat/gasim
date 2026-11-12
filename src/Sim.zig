@@ -130,7 +130,7 @@ pub fn deinit(self: *Sim) void {
 
 fn attach(self: *Sim) void {
     self.console = .{ .output = &self.console_out.writer };
-    self.chip.attachConsole(&self.console, console_node, console_port) catch unreachable;
+    self.console.attach(&self.chip, console_node, console_port) catch unreachable;
     self.chip.trace = if (self.trace) |t| &t.writer else null;
 }
 
