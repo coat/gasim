@@ -22,7 +22,7 @@ test "uart" {
     var buffer: [32]u8 = undefined;
     var output: std.Io.Writer = .fixed(&buffer);
     var uart: gasim.Uart = .init(921600, &output);
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
     try chip.run();
     try expectEqualStrings("Hello, world!\n", output.buffered());
 }
@@ -41,7 +41,7 @@ test "hello-2x2 on the chip of a chip file" {
     var buffer: [32]u8 = undefined;
     var output: std.Io.Writer = .fixed(&buffer);
     var uart: gasim.Uart = .init(921600, &output);
-    try chip.attachUart(&uart, 100);
+    try uart.attach(&chip, 100);
     try chip.run();
     try expectEqualStrings("Hello, world!\n", output.buffered());
 }

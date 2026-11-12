@@ -3341,7 +3341,7 @@ const TestTui = struct {
         self.input = .init(&self.input_buffer);
         self.output = .fixed(&self.output_buffer);
         self.console = .{ .input = .{ .io = std.testing.io, .queue = &self.input }, .output = &self.output };
-        try self.chip.attachConsole(&self.console, 0, .up);
+        try self.console.attach(&self.chip, 0, .up);
         self.screen = try .init(gpa, .{ .rows = 30, .cols = 120, .x_pixel = 0, .y_pixel = 0 });
         self.tui = .init(std.testing.io, gpa, &self.chip, .{ .source_path = "test.ga", .console = &self.console, .console_node = 0, .console_port = .up, .source_map = &self.source_map });
         // keeping two

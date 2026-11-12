@@ -13,7 +13,7 @@
 //! It sends on its own time from `start`, with no flow control, as 1901
 //! does, so a node must keep up. A node waiting on the clock, its wakeup
 //! pin, as node 300's ROM does for the first word, wakes on its edges
-//! (`Chip.attachSyncPins`).
+//! (`attachPins`).
 
 words: []const Word,
 /// picoseconds each level of the clock, or each bit, is held
@@ -33,6 +33,30 @@ const word_halves = 1 + 4 * 9;
 
 pub fn init(words: []const Word) Sync {
     return .{ .words = words };
+}
+
+/// Puts the master on two pins: it drives `clock`, which has to be the
+/// wakeup pin, pin 17, of its node, and `data`
+pub fn attachPins(self: *Sync, chip: *Chip, clock: Chip.PinRef, data: Chip.PinRef) error{ NoSuchPin, TwoDevices, NotWakeupPin, Full }!void {
+    if (clock.pin != 17) return error.NotWakeupPin;
+    // a pin there is not, before one that is taken
+    const taken = [2]bool{ try chip.pinTaken(clock), try chip.pinTaken(data) };
+    if (taken[0] or taken[1] or try chip.sameNet(clock, data)) return error.TwoDevices;
+    try chip.attachDevice(self.device(), clock, true);
+    chip.attachPin(clock, self.clockDevice()) catch unreachable;
+    chip.attachPin(data, self.dataDevice()) catch unreachable;
+}
+
+/// the master as a device of the chip
+pub fn device(self: *Sync) Device {
+    return .{ .context = self, .vtable = &vtable };
+}
+
+const vtable: Device.VTable = .{ .nextEdge = nextEdge, .state = .of(Sync) };
+
+fn nextEdge(context: *anyopaque, time: u64) ?u64 {
+    const self: *Sync = @ptrCast(@alignCast(context));
+    return self.nextClockEdge(time);
 }
 
 pub fn clockDevice(self: *Sync) pins.Device {
@@ -118,6 +142,8 @@ test "a word's bits, two to each clock cycle, high bits first" {
     try std.testing.expectEqual(null, sync.nextClockEdge(10 + 2 * 37 * 10));
 }
 
+const Chip = @import("Chip.zig");
+const Device = @import("Device.zig");
 const pins = @import("pins.zig");
 const Word = @import("f18.zig").Word;
 

@@ -155,6 +155,11 @@ a node is saved without any more code.
   compile.
 - The file starts with a hash of those fields. gasim refuses a snapshot from
   a version with other fields, rather than misread it.
+- Each device attached to the chip follows, in the order attached, after a
+  hash of its own fields. A device says how it is written through
+  `Device.State` in `src/Device.zig`, so a new device needs no code in
+  `src/snapshot.zig`. A file is refused if a device's fields are not those
+  of the device it is read into.
 - The chip's own fields are written by hand, because most are not state.
   When they change, `format_version` goes up.
 - gasim writes a file beside its path, then moves it into place. So

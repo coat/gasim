@@ -13,6 +13,7 @@ pub const boot = @import("boot.zig");
 pub const Board = @import("Board.zig");
 pub const Chip = @import("Chip.zig");
 pub const Console = @import("Console.zig");
+pub const Device = @import("Device.zig");
 pub const Editor = @import("Editor.zig");
 pub const Tail = @import("Tail.zig");
 pub const Serdes = @import("Serdes.zig");
@@ -44,6 +45,7 @@ test {
     _ = @import("Chip.zig");
     _ = @import("colorforth.zig");
     _ = @import("Console.zig");
+    _ = @import("Device.zig");
     _ = @import("Editor.zig");
     _ = @import("disassembler.zig");
     _ = @import("examples.zig");

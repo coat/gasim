@@ -37,6 +37,31 @@ pub fn init(contents: []const u8) Flash {
     return .{ .contents = contents };
 }
 
+/// Puts the flash on four pins, any of which can be left unconnected: it
+/// listens to the clock, chip select and data out, and drives data in
+pub fn attachPins(self: *Flash, chip: *Chip, clock: ?Chip.PinRef, select: ?Chip.PinRef, data_out: ?Chip.PinRef, data_in: ?Chip.PinRef) error{ NoSuchPin, TwoDevices, Full }!void {
+    const refs = [_]?Chip.PinRef{ clock, select, data_out, data_in };
+    // a pin there is not, before one that is taken
+    for (refs) |ref| if (ref) |p| {
+        _ = try chip.pinTaken(p);
+    };
+    for (refs, 0..) |ref, k| if (ref) |p| {
+        if (try chip.pinTaken(p)) return error.TwoDevices;
+        for (refs[0..k]) |other| if (other) |q| if (try chip.sameNet(p, q)) return error.TwoDevices;
+    };
+    try chip.attachDevice(self.device(), null, false);
+    for (refs, [_]pins.Device{ self.clockDevice(), self.selectDevice(), self.dataOutDevice(), self.dataInDevice() }) |ref, pin_device| if (ref) |p| {
+        chip.attachPin(p, pin_device) catch unreachable;
+    };
+}
+
+/// the flash as a device of the chip
+pub fn device(self: *Flash) Device {
+    return .{ .context = self, .vtable = &vtable };
+}
+
+const vtable: Device.VTable = .{ .state = .of(Flash) };
+
 pub fn clockDevice(self: *Flash) pins.Device {
     return .{ .context = self, .changed = clockChanged };
 }
@@ -173,6 +198,8 @@ test "a read sends the bytes from its address, high bits first, from each fallin
     try std.testing.expectEqual(null, flash.next_bit);
 }
 
+const Chip = @import("Chip.zig");
+const Device = @import("Device.zig");
 const pins = @import("pins.zig");
 const Word = @import("f18.zig").Word;
 

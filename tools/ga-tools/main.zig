@@ -76,7 +76,7 @@ fn check(io: Io, gpa: Allocator, arena: Allocator, ga: []const u8, program: []co
     var output: Io.Writer.Allocating = .init(arena);
     var uart: Uart = .init(baud, &output.writer);
     uart.preload = compiled.bootstream.stream;
-    try chip.attachUart(&uart, 708);
+    try uart.attach(&chip, 708);
     // as Chip.run does, but with no input to wait for, and stopping a
     // program that never settles: twice the stream's time, and a tenth of
     // a second for the program, is plenty
