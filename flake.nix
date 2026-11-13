@@ -31,7 +31,7 @@
                 # zig build bench, where poop is not
                 hyperfine
               ]
-              ++ (pkgs.lib.optionals pkgs.stdenv.isLinux [elfkickers kcov poop]);
+              ++ (pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [elfkickers kcov poop]);
           };
 
           formatter.${system} = pkgs.alejandra;
