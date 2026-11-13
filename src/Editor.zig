@@ -93,6 +93,19 @@ pub fn startsLine(self: Editor, i: usize) bool {
     return i == 0 or colorforth.startsLine(self.tokens[i - 1], self.tokens[i]);
 }
 
+/// The tokens of a block other than the one being edited, to show beside it,
+/// decoded into `buffer`. This is null if there is no such block, or if the
+/// block is not colorForth source, which the editor could not edit.
+pub fn peek(self: *const Editor, block: usize, buffer: *[cells_per_block]Token) ?[]const Token {
+    std.debug.assert(block != self.block);
+    if (block >= self.capacity()) return null;
+    const bytes = self.blocks[block * block_size ..][0..block_size];
+    const tokens = colorforth.decode(bytes, buffer) catch return null;
+    var encoded: [block_size]u8 = undefined;
+    colorforth.encode(tokens, &encoded) catch return null;
+    return if (std.mem.eql(u8, bytes, &encoded)) tokens else null;
+}
+
 /// Moves to another block, leaving the one being edited as it is
 pub fn goTo(self: *Editor, block: usize) Error!void {
     if (block >= self.capacity()) return error.NoSuchBlock;
@@ -972,6 +985,22 @@ test "the rest of the key map" {
 test describe {
     try expectEqualStrings("the block is full", describe(error.BlockFull));
     try expectEqualStrings("there is no such block", describe(error.NoSuchBlock));
+}
+
+test peek {
+    const editor, const bytes = try testEditor(3);
+    defer freeEditor(editor, bytes);
+    _ = try keys(editor, "1gia b");
+    _ = try editor.key(.{ .code = .escape });
+    try editor.goTo(0);
+    var buffer: [cells_per_block]Token = undefined;
+    try expectEqual(2, editor.peek(1, &buffer).?.len);
+    try expectEqual(0, editor.peek(2, &buffer).?.len);
+    try expectEqual(null, editor.peek(3, &buffer));
+    // a block that is not source
+    bytes[2 * block_size] = 1;
+    bytes[2 * block_size + 8] = 0x12;
+    try expectEqual(null, editor.peek(2, &buffer));
 }
 
 test moveTo {

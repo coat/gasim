@@ -9,6 +9,12 @@ arrayForth 2 images such as `OkadWork.cf`.
 chip's panels, and `alt+6` to come back to the editor. Without a `.cf` file,
 the editor starts a new file of blocks.
 
+The editor shows two blocks at a time, in two panes: an even block on top,
+and the odd block after it below. By convention, the odd block holds
+comments on the even one, as in `OkadWork.cf`. The pane of the block you are
+editing has the focus, so `1g` moves to the bottom pane. Drag the border
+between the panes to resize them.
+
 The editor is inspired by AshleyF's [Color](https://github.com/AshleyF/Color)
 editor, and works like vim. The cursor is always on a word. Keys move
 between words and blocks. Press `i`, `a` or `o` to start typing.
@@ -33,8 +39,10 @@ an arrayForth 2 image.
 | `h` `l`, `b` `w` | move to the word before or after |
 | `j` `k` | move to the next or previous red name |
 | `0` `$` | move to the first or last word |
-| `[` `]` | move to the block before or after |
+| `[` `]` | move to the pair of blocks before or after, staying in the same pane |
 | `256g` | move to block 256 |
+| `ctrl+j` `ctrl+k` | move to the bottom or top pane, even while typing. `alt` works too. |
+| `-` `+` | shorten or lengthen the pane with the focus |
 | `i` `a` | type a word before or after the cursor |
 | `o` `O` | type a new red name on a line below or above |
 | `x` `X` | delete the word, or the one before it |

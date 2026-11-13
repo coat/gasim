@@ -83,7 +83,11 @@ const Screen = enum { chip, editor };
 
 /// the border between the left panels and the node panel, or the one above
 /// a panel in the left column, by its place in `Tui.stacked`
-const Border = union(enum) { columns, rows: usize };
+/// a word of a block, where the editor's cursor was
+const EditorPlace = struct { block: usize, cursor: usize };
+
+/// a border between panels, or between the editor's two blocks
+const Border = union(enum) { columns, rows: usize, editor };
 
 /// a panel in the left column, where it was last drawn
 const Stacked = struct { panel: Panel, top: u16, height: u16 };
@@ -198,7 +202,9 @@ const help: []const struct { []const u8, []const Hint } = &.{
         .{ "h l, b w", "the word before or after" },
         .{ "j k", "the next or previous red name" },
         .{ "0 $", "the first or last word" },
-        .{ "[ ], 256g", "the block before or after, or block 256" },
+        .{ "[ ], 256g", "the pair of blocks before or after, in the same pane, or block 256" },
+        .{ "ctrl+j k, alt+j k", "the odd block below, or the even block above, even while typing" },
+        .{ "- +", "shorten or lengthen the pane with the focus, or drag the border" },
         .{ "i a", "type a word before or after the cursor" },
         .{ "o O", "type a new red name on a line below or above" },
         .{ "x X", "delete the word, or the one before it" },
@@ -439,8 +445,25 @@ const Tui = struct {
     /// quitting was asked for with unsaved blocks, and asking again quits
     quit_asked: bool = false,
     quit_confirmed: bool = false,
-    /// the first row of the editor's block in view
-    editor_scroll: u16 = 0,
+    /// The editor shows a pair of blocks, the even one in the top pane and
+    /// the odd one, which by convention holds comments on it, below. The
+    /// pane of the block being edited has the focus.
+    /// the first row of each pane's block in view
+    editor_scroll: [2]u16 = .{ 0, 0 },
+    /// the block each pane last had the focus in, and the word the cursor
+    /// was on there, to go back to
+    editor_cursor: [2]?EditorPlace = .{ null, null },
+    /// the even block of the pair last shown, whose scrolling another pair
+    /// forgets
+    editor_pair: usize = 0,
+    /// rows of the top pane, as the user chose, rather than half
+    editor_split: ?u16 = null,
+    /// the row of the bottom pane's top border, and the panes inside their
+    /// borders, as last drawn, for the mouse
+    editor_border: ?u16 = null,
+    editor_panes: [2]?vaxis.Window = .{ null, null },
+    /// the block of the pane without the focus, decoded to show
+    peek_tokens: [gasim.colorforth.cells_per_block]gasim.colorforth.Token = undefined,
     /// a command typed after `:`, while there is one
     command: [256]u8 = undefined,
     command_len: ?u16 = null,
@@ -1109,6 +1132,14 @@ const Tui = struct {
         // a key with a name, or the text typed, a character at a time
         var chars: []const u8 = &.{};
         var named: ?Editor.Key = null;
+        // alt or ctrl with k and j, the pane above or below, as alt moves
+        // between the chip's panels, even while typing
+        for ("kj", [_]u1{ 0, 1 }) |letter, pane| {
+            if (k.matches(letter, .{ .alt = true }) or k.matches(letter, .{ .ctrl = true })) {
+                self.focusPane(pane);
+                return true;
+            }
+        }
         if (k.mods.alt or k.mods.super or k.mods.hyper or k.mods.meta) return true;
         if (k.mods.ctrl) {
             if (k.codepoint < 0x80) named = .{ .code = .{ .char = @intCast(k.codepoint) }, .ctrl = true };
@@ -1125,9 +1156,46 @@ const Tui = struct {
             self.startCommand("");
             return true;
         }
+        // [ ] and pgup pgdn move to the pair before or after, staying in the
+        // pane, rather than to the next block, which may be in the other one
+        if (editor.mode == .normal) {
+            const before = (named != null and named.?.code == .page_up and !named.?.ctrl) or (named == null and std.mem.eql(u8, chars, "["));
+            const after = (named != null and named.?.code == .page_down and !named.?.ctrl) or (named == null and std.mem.eql(u8, chars, "]"));
+            if (before or after) {
+                editor.prefix = null;
+                if (before and editor.block < 2) return true;
+                editor.goTo(if (before) editor.block - 2 else editor.block + 2) catch |err| self.fail(Editor.describe(err));
+                return true;
+            }
+        }
+        // - and + shorten or lengthen the pane with the focus
+        if (editor.mode == .normal and named == null and chars.len == 1 and std.mem.indexOfScalar(u8, "-+=", chars[0]) != null) {
+            editor.prefix = null;
+            const rows: i32 = if (chars[0] == '-') -1 else 1;
+            // as drawn, which a split too big for the terminal is not
+            const top = self.editor_border orelse return true;
+            self.editor_split = @intCast(@max(@as(i32, top) + if (editor.block % 2 == 0) rows else -rows, 0));
+            return true;
+        }
         if (named) |one| return self.editorAction(editor, one);
         for (chars) |c| if (!self.editorAction(editor, .char(c))) return false;
         return true;
+    }
+
+    /// Moves to the block of the top pane (0) or the bottom one (1), at the
+    /// word the cursor was on there, finishing any word being typed
+    fn focusPane(self: *Tui, pane: u1) void {
+        const editor = self.options.colorforth.?.editor;
+        const from = editor.block % 2;
+        if (from == pane) return;
+        editor.prefix = null;
+        editor.escape() catch |err| return self.fail(Editor.describe(err));
+        const left: EditorPlace = .{ .block = editor.block, .cursor = editor.cursor };
+        editor.goTo(editor.block - from + pane) catch |err| return self.fail(Editor.describe(err));
+        self.editor_cursor[from] = left;
+        if (self.editor_cursor[pane]) |place| if (place.block == editor.block) {
+            editor.cursor = @min(place.cursor, editor.len -| 1);
+        };
     }
 
     /// the editor's name for a key, unless it is a character
@@ -1291,7 +1359,8 @@ const Tui = struct {
         self.name(path);
         cf.compressed = compressed != null;
         self.forgetCompiled();
-        self.editor_scroll = 0;
+        self.editor_scroll = .{ 0, 0 };
+        self.editor_cursor = .{ null, null };
         self.say(if (compressed != null)
             "decompressed, and saved uncompressed"
         else if (!found)
@@ -1308,7 +1377,8 @@ const Tui = struct {
         cf.path = null;
         cf.compressed = false;
         self.forgetCompiled();
-        self.editor_scroll = 0;
+        self.editor_scroll = .{ 0, 0 };
+        self.editor_cursor = .{ null, null };
         self.say("a new file of blocks");
     }
 
@@ -1933,6 +2003,11 @@ const Tui = struct {
             self.ask("drag the border, or tap where it should go");
             return;
         }
+        // a click on a pane moves to its block
+        if (self.screen == .editor) {
+            for (self.editor_panes, [_]u1{ 0, 1 }) |w, pane| if (w) |inside| if (inside.hasMouse(m) != null) self.focusPane(pane);
+            return;
+        }
 
         for ([_]Panel{ .map, .console, .forth, .debug, .node }) |panel| {
             const w = self.windows.get(panel) orelse continue;
@@ -1971,6 +2046,10 @@ const Tui = struct {
 
     /// the border between panels under the mouse
     fn onBorder(self: Tui, m: vaxis.Mouse) ?Border {
+        if (self.screen == .editor) {
+            const row = self.editor_border orelse return null;
+            return if (m.row == row or m.row + 1 == row) .editor else null;
+        }
         if (self.column_border) |column| if (m.col == column or m.col + 1 == column) return .columns;
         if (self.column_border != null and m.col >= self.column_border.?) return null;
         for (self.stacked[0..self.stacked_len], 0..) |stacked, n| {
@@ -1983,6 +2062,7 @@ const Tui = struct {
         switch (border) {
             .columns => self.left_width = @intCast(@max(m.col, 0)),
             .rows => |n| self.moveRow(n, @intCast(@max(m.row, 0))),
+            .editor => self.editor_split = @intCast(@max(m.row, 0)),
         }
     }
 
@@ -2247,6 +2327,8 @@ const Tui = struct {
         self.memory_window = null;
         self.column_border = null;
         self.stacked_len = 0;
+        self.editor_border = null;
+        self.editor_panes = .{ null, null };
         if (win.width < 30 or win.height < 8) {
             _ = win.printSegment(.{ .text = "The terminal is too small" }, .{});
             return;
@@ -2837,44 +2919,83 @@ const Tui = struct {
         }
     }
 
-    /// Draws the block being edited, with its tokens in their colors and
-    /// laid out as colorForth shows them
+    /// Draws a pair of blocks, the even one above the odd one, with their
+    /// tokens in their colors and laid out as colorForth shows them
     fn drawEditor(self: *Tui, win: vaxis.Window) void {
         const cf = self.options.colorforth.?;
         const editor = cf.editor;
         const body_height = win.height - 1;
-        const inside = win.child(.{ .height = body_height, .border = .{ .where = .all, .style = colors.focused } });
+        const pair = editor.block - editor.block % 2;
+        if (pair != self.editor_pair) {
+            self.editor_pair = pair;
+            self.editor_scroll = .{ 0, 0 };
+        }
+        // however the cursor got here, as Ng and undo move between panes too
+        self.editor_cursor[editor.block % 2] = .{ .block = editor.block, .cursor = editor.cursor };
+        // each pane keeps a row inside its border
+        const top_height = std.math.clamp(self.editor_split orelse body_height / 2, 3, body_height - 3);
+        self.editor_border = top_height;
         const file = if (cf.path) |path| std.fs.path.basename(path) else "new file";
-        const title = self.print("6 colorforth  block {d}{s}  {s}", .{ editor.block, if (editor.unsaved()) " +" else "", file });
-        _ = win.child(.{ .x_off = 2, .width = win.width -| 3, .height = 1 }).printSegment(.{ .text = title, .style = .{ .bold = true } }, .{ .wrap = .none });
+        const titles = [2][]const u8{
+            self.print("6 colorforth  block {d}{s}  {s}", .{ pair, if (editor.unsaved()) " +" else "", file }),
+            self.print("block {d}", .{pair + 1}),
+        };
+        for ([_]u1{ 0, 1 }, [_]u16{ 0, top_height }, [_]u16{ top_height, body_height - top_height }) |pane, y, height| {
+            const focused = editor.block % 2 == pane;
+            const inside = win.child(.{ .y_off = y, .height = height, .border = .{ .where = .all, .style = if (focused) colors.focused else colors.dim } });
+            _ = win.child(.{ .x_off = 2, .y_off = y, .width = win.width -| 3, .height = 1 }).printSegment(.{ .text = titles[pane], .style = .{ .bold = true } }, .{ .wrap = .none });
+            self.editor_panes[pane] = inside;
+            if (focused) self.drawEditedBlock(inside) else self.drawPeekedBlock(inside, pair + pane);
+        }
+        self.drawEditorStatus(win.child(.{ .y_off = body_height, .height = 1 }));
+    }
 
+    /// Draws the block being edited, keeping the cursor in view
+    fn drawEditedBlock(self: *Tui, inside: vaxis.Window) void {
+        const editor = self.options.colorforth.?.editor;
         if (editor.read_only) {
             _ = inside.printSegment(.{ .text = "This block is not colorForth source, such as the kernel of an arrayForth 2 image, so it cannot be edited.", .style = colors.dim }, .{});
         } else if (editor.len == 0) {
             _ = inside.printSegment(.{ .text = "An empty block: i to type into it", .style = colors.dim }, .{});
         } else {
-            // keep the cursor in view
-            const row = self.layoutBlock(inside, false);
-            if (row < self.editor_scroll) self.editor_scroll = row;
-            if (row >= self.editor_scroll + inside.height) self.editor_scroll = row + 1 - inside.height;
-            _ = self.layoutBlock(inside, true);
+            const scroll = &self.editor_scroll[editor.block % 2];
+            const tokens = editor.tokens[0..editor.len];
+            const row = self.layoutBlock(inside, tokens, editor.cursor, editor.mode == .insert, scroll.*, false);
+            if (row < scroll.*) scroll.* = row;
+            if (row >= scroll.* + inside.height) scroll.* = row + 1 - inside.height;
+            _ = self.layoutBlock(inside, tokens, editor.cursor, editor.mode == .insert, scroll.*, true);
         }
-        self.drawEditorStatus(win.child(.{ .y_off = body_height, .height = 1 }));
     }
 
-    /// Lays out the block's tokens in `win`, from the row scrolled to,
-    /// drawing them if `drawing`, and returns the row of the cursor
-    fn layoutBlock(self: *Tui, win: vaxis.Window, drawing: bool) u16 {
+    /// Draws the block of the pane without the focus, as it was last scrolled
+    fn drawPeekedBlock(self: *Tui, inside: vaxis.Window, block: usize) void {
         const editor = self.options.colorforth.?.editor;
+        const tokens = editor.peek(block, &self.peek_tokens) orelse {
+            const text = if (block >= editor.capacity()) "There is no such block." else "This block is not colorForth source, so it cannot be edited.";
+            _ = inside.printSegment(.{ .text = text, .style = colors.dim }, .{});
+            return;
+        };
+        if (tokens.len == 0) {
+            _ = inside.printSegment(.{ .text = "An empty block", .style = colors.dim }, .{});
+            return;
+        }
+        _ = self.layoutBlock(inside, tokens, null, false, self.editor_scroll[block % 2], true);
+    }
+
+    /// Lays out tokens in `win`, from the row `scroll`, drawing them if
+    /// `drawing`, and returns the row of the cursor, if there is one, which
+    /// is on a token being typed if `typing`
+    fn layoutBlock(self: *Tui, win: vaxis.Window, tokens: []const gasim.colorforth.Token, cursor: ?usize, typing_at_cursor: bool, scroll: u16, drawing: bool) u16 {
         var x: u16 = 0;
         var y: u16 = 0;
         var cursor_row: u16 = 0;
-        for (editor.tokens[0..editor.len], 0..) |*token, i| {
-            if (i > 0 and editor.startsLine(i) and x > 0) {
+        for (tokens, 0..) |*token, i| {
+            if (i > 0 and gasim.colorforth.startsLine(tokens[i - 1], token.*) and x > 0) {
                 x = 0;
                 y += 1;
             }
-            const typing = editor.mode == .insert and i == editor.cursor;
+            const at_cursor = cursor != null and i == cursor.?;
+            const typing = typing_at_cursor and at_cursor;
             const text = if (typing) token.text() else self.print("{f}", .{token.*});
             const value = if (token.tag == .variable) self.print(" {d}", .{token.value}) else "";
             const hidden = token.tag == .format and !self.show_format and !typing;
@@ -2883,11 +3004,11 @@ const Tui = struct {
                 x = 0;
                 y += 1;
             }
-            if (i == editor.cursor) cursor_row = y;
-            if (drawing and !hidden and y >= self.editor_scroll and y - self.editor_scroll < win.height) {
-                const row = y - self.editor_scroll;
+            if (at_cursor) cursor_row = y;
+            if (drawing and !hidden and y >= scroll and y - scroll < win.height) {
+                const row = y - scroll;
                 var style = tokenStyle(token.tag.color());
-                if (i == editor.cursor) {
+                if (at_cursor) {
                     if (typing) style.ul_style = .single else style.reverse = true;
                 }
                 _ = win.print(&.{
@@ -2916,7 +3037,7 @@ const Tui = struct {
         const hints: []const Hint = if (editor.mode == .insert)
             &.{ .{ "space", "next word" }, .{ "enter", "new line" }, .{ "esc", "done" }, .{ "ctrl+r y g w t v b", "color" } }
         else
-            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "block" }, .{ "L", "compile" }, .{ "s", "save" }, .{ ":", "command" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
+            &.{ .{ "i a o", "type" }, .{ "x y p", "cut copy put" }, .{ "u U", "undo redo" }, .{ "R Y G W C M B", "color" }, .{ "[ ] Ng", "blocks" }, .{ "ctrl+j k", "pane" }, .{ "L", "compile" }, .{ "s", "save" }, .{ ":", "command" }, .{ "f", "blue words" }, .{ "alt+1", "chip" }, .{ "q", "quit" } };
         var state: [3]vaxis.Segment = undefined;
         var len: usize = 0;
         state[len] = if (editor.mode == .insert)
@@ -4964,13 +5085,17 @@ test "the colorForth editor, on a screen of its own" {
     try expectEqual(.execute, editor.tokens[3].tag);
     try expect(try t.shows(0, "block 0 +"));
     try expect(try t.shows(29, "4/256 cells"));
-    // a count before g goes to a block, rather than the keys of the map
+    // a count before g goes to a block, rather than the keys of the map,
+    // and block 1 is in the pane below
     try t.press('1');
     try t.press('g');
-    try expect(try t.shows(0, "block 1 +"));
+    try expectEqual(1, editor.block);
+    try expect(try t.shows(14, "block 1"));
     try expect(t.tui.shown.contains(.map));
     // named keys, and not keys with alt, or text pasted in normal mode
     try t.press(vaxis.Key.page_up);
+    try expectEqual(1, editor.block);
+    try t.pressWith('k', .{ .ctrl = true });
     try expect(try t.shows(0, "block 0 +"));
     try t.press(vaxis.Key.end);
     try expectEqual(3, editor.cursor);
@@ -4995,6 +5120,100 @@ test "the colorForth editor, on a screen of its own" {
     try t.press('q');
     try expect(try t.shows(29, "q again quits"));
     try expect(!try t.tui.handle(.{ .key_press = .{ .codepoint = 'q', .text = "q" } }));
+}
+
+test "the editor shows a pair of blocks, the odd one below" {
+    var t: TestTui = .{ .chip = undefined };
+    try t.init("");
+    defer t.deinit();
+    const editor = try std.testing.allocator.create(Editor);
+    defer std.testing.allocator.destroy(editor);
+    var blocks: [3 * gasim.colorforth.block_size]u8 = @splat(0);
+    editor.open(&blocks, 3);
+    t.tui.options.colorforth = .{ .editor = editor, .path = "test.cf", .compressed = false };
+    t.tui.screen = .editor;
+    t.draw();
+
+    // half each, the bottom pane's border on row 14
+    try expect(try t.shows(0, "6 colorforth  block 0  test.cf"));
+    try expect(try t.shows(14, "block 1"));
+    try expect(try t.shows(15, "An empty block"));
+    for ("ia b c") |c| try t.press(c);
+    // ctrl+j finishes the word being typed, and moves to the block below
+    try t.pressWith('j', .{ .ctrl = true });
+    try expectEqual(1, editor.block);
+    try expectEqual(.normal, editor.mode);
+    try expect(try t.shows(1, "a b c"));
+    for ("icomment") |c| try t.press(c);
+    try t.press(vaxis.Key.escape);
+    // alt+k goes back, to the word the cursor was on
+    try t.pressWith('k', .{ .alt = true });
+    try expectEqual(0, editor.block);
+    try expectEqual(2, editor.cursor);
+    try expect(try t.shows(15, "comment"));
+    try t.press('h');
+    try t.pressWith('j', .{ .ctrl = true });
+    try t.pressWith('k', .{ .ctrl = true });
+    try expectEqual(1, editor.cursor);
+    // and when the pane changes another way, such as with a count and g,
+    // which ctrl+j forgets
+    try t.press('l');
+    try t.press('1');
+    try t.press('g');
+    try t.press('2');
+    try t.pressWith('k', .{ .ctrl = true });
+    try expectEqual(2, editor.cursor);
+    try expectEqual(null, editor.prefix);
+
+    // - and + move the border, as the focused pane is shortened or
+    // lengthened, and so does dragging it
+    try t.press('+');
+    try expect(try t.shows(15, "block 1"));
+    try t.pressWith('j', .{ .ctrl = true });
+    try t.press('+');
+    try t.press('+');
+    try expect(try t.shows(13, "block 1"));
+    try t.click(1, 13, .press);
+    try t.click(1, 20, .drag);
+    try t.click(1, 20, .release);
+    try expect(try t.shows(20, "block 1"));
+    // but each pane keeps a row
+    try t.click(1, 20, .press);
+    try t.click(1, 0, .drag);
+    try t.click(1, 0, .release);
+    try expect(try t.shows(3, "block 1"));
+    // a terminal too small to draw the panes takes no clicks on them
+    t.tui.draw(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = 6, .screen = &t.screen });
+    try expect(try t.tui.handle(.{ .mouse = .{ .col = 1, .row = 3, .button = .left, .mods = .{}, .type = .press } }));
+    try expectEqual(null, t.tui.dragging);
+    t.draw();
+
+    // a click on a pane moves to its block
+    try t.click(5, 1, .press);
+    try expectEqual(0, editor.block);
+    try t.click(5, 10, .press);
+    try expectEqual(1, editor.block);
+
+    // [ and ] move by a pair, staying in the pane, and there is no pair
+    // before the first
+    try t.press('[');
+    try expectEqual(1, editor.block);
+    try t.press(']');
+    try expect(try t.shows(29, "there is no such block"));
+    try expectEqual(1, editor.block);
+    try t.pressWith('k', .{ .ctrl = true });
+    // the next pair has block 3 below it, which the file cannot hold
+    try t.press(']');
+    try expectEqual(2, editor.block);
+    try t.press(vaxis.Key.page_up);
+    try expectEqual(0, editor.block);
+    try t.press(vaxis.Key.page_down);
+    try expectEqual(2, editor.block);
+    try expect(try t.shows(0, "block 2 +"));
+    try expect(try t.shows(4, "There is no such block"));
+    try t.pressWith('j', .{ .ctrl = true });
+    try expectEqual(2, editor.block);
+    try expect(try t.shows(29, "there is no such block"));
 }
 
 test "compiling colorForth in the editor starts the chip again with its code" {
