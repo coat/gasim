@@ -1,12 +1,15 @@
-// The colorForth editor: the blocks of the file, the block being edited as
-// colored words, the selected node beside it, and a bar of colors and what
-// the editor is doing. Keys go to Editor.key through a hidden input, which
-// on-screen keyboards and input methods type into too.
+// The colorForth editor: the blocks of the file, a pair of blocks as
+// colored words, the even one above the odd one, the selected node beside
+// them, and a bar of colors and what the editor is doing. Keys go to
+// Editor.key through a hidden input, which on-screen keyboards and input
+// methods type into too.
 
 import {
-  state, editorKey, editorGoTo, editorMoveTo, saveEditor, compileEditor, newEditorFile, toggleFormat, toggleMarks, canPick,
+  state, editorKey, editorGoTo, editorMoveTo, editorFocusPane, saveEditor, compileEditor, newEditorFile, toggleFormat, toggleMarks,
+  canPick,
 } from '../state.js';
 import { NodePanel } from './node.js';
+import { layout, gutter } from '../layout.js';
 
 const { m } = window;
 
@@ -38,8 +41,8 @@ const named = {
   Backspace: 'backspace',
 };
 
-/** letters of the colors with ctrl, and ctrl+s to save */
-const ctrlLetters = 'rygwtvbs';
+/** letters of the colors with ctrl, ctrl+s to save, and ctrl+j and k for the pane below or above */
+const ctrlLetters = 'rygwtvbsjk';
 
 /**
  * The editor's key for a key event, as [key, ctrl], or null for keys that
@@ -82,19 +85,43 @@ function lines(view) {
   return rows.map((row, n) => m('.cf-line', { key: n }, row.length > 0 ? row : m('span.cf-empty', ' ')));
 }
 
+/** a pane's block: the block being edited, or the other block of the pair */
+function pane(which) {
+  const view = state.editor;
+  const editing = view.pane === which;
+  const block = view.pair + (which === 'bottom' ? 1 : 0);
+  // the other block has no cursor
+  const shown = editing ? view : { ...view.other, mode: 'normal', cursor: -1 };
+  const empty = !editing && !view.other.exists ? 'There is no such block'
+    : !editing && view.other.read_only ? 'This block is not colorForth source' : null;
+  // not .editing, which is the editor's panel, and no key, as the pair's
+  // other children have none
+  return m('section.cf-pane', { class: editing ? 'focused' : '' }, [
+    m('header.cf-pane-head', `Block ${block}`),
+    m('.cf-block', {
+      class: [shown.read_only ? 'read-only' : '', editing ? view.mode : ''].join(' '),
+      'data-pane': which,
+    }, empty ? m('p.muted', empty) : lines(shown)),
+  ]);
+}
+
 const Block = {
   view() {
     const view = state.editor;
-    const focus = (dom) => dom.closest('.cf-block').querySelector('input').focus({ preventScroll: true });
-    return m('.cf-block', {
-      class: [view.read_only ? 'read-only' : '', view.mode].join(' '),
+    return m('.cf-pair', {
+      style: { '--odd-height': `${layout.pair}%` },
       onclick: (e) => {
+        const block = e.target.closest('.cf-block');
         const word = e.target.closest('.cf');
-        if (word) editorMoveTo(Number(word.dataset.i));
+        const i = word ? Number(word.dataset.i) : null;
+        // the other pane's block, and its word
+        if (block && block.dataset.pane !== state.editor.pane) editorFocusPane(block.dataset.pane, i);
+        else if (word) editorMoveTo(i);
         else e.redraw = false;
-        focus(e.target);
+        e.currentTarget.querySelector('input.keys').focus({ preventScroll: true });
       },
     }, [
+      // outside the panes, so that it keeps the focus as the pane changes
       m('input.keys[autocomplete=off][autocapitalize=off][spellcheck=false]', {
         'aria-label': `Block ${view.block}, ${view.mode === 'insert' ? 'typing' : 'moving'}`,
         oncreate: (vnode) => vnode.dom.focus({ preventScroll: true }),
@@ -114,7 +141,9 @@ const Block = {
           e.target.value = '';
         },
       }),
-      lines(view),
+      pane('top'),
+      gutter('pair', false, 15, 85),
+      pane('bottom'),
     ]);
   },
 };
@@ -162,7 +191,7 @@ function colorBar() {
     view.prefix !== null ? m('span.prefix', view.prefix) : null,
     m('span.hints.muted', view.mode === 'insert'
       ? 'space: next word · enter: new line · esc: done'
-      : 'i a o: type · x y p: cut copy put · u U: undo redo · [ ]: blocks · L: compile · ctrl+s: save'),
+      : 'i a o: type · x y p: cut copy put · u U: undo redo · [ ]: blocks · ctrl+j k: pane · L: compile · ctrl+s: save'),
   ]);
 }
 
@@ -178,8 +207,8 @@ export const EditorView = {
           m('span.muted.file', file ? `${file.name}${view.unsaved ? ' (not saved)' : ''}` : 'a new file'),
           view.read_only ? m('span.badge', 'not source') : null,
           m('.actions', [
-            m('button.secondary.outline', { onclick: () => editorGoTo(view.block - 1), disabled: view.block === 0, title: 'The block before ([)' }, 'Before'),
-            m('button.secondary.outline', { onclick: () => editorGoTo(view.block + 1), disabled: view.block + 1 >= view.capacity, title: 'The block after (])' }, 'After'),
+            m('button.secondary.outline', { onclick: () => editorGoTo(view.block - 2), disabled: view.block < 2, title: 'The pair of blocks before, in the same pane ([)' }, 'Before'),
+            m('button.secondary.outline', { onclick: () => editorGoTo(view.block + 2), disabled: view.block + 2 >= view.capacity, title: 'The pair of blocks after, in the same pane (])' }, 'After'),
             m('label.toggle', { title: 'Show blue words, which lay out the block (f)' }, [
               m('input[type=checkbox][role=switch]', { checked: state.showFormat, onchange: toggleFormat }), 'Blue',
             ]),

@@ -39,6 +39,8 @@ pub const Panes = struct {
     dock: f32 = 0.75,
     /// of the blocks list beside the block, in the editor
     blocks: f32 = 0.25,
+    /// of the even block above the odd one, in the editor
+    pair: f32 = 0.5,
 };
 pub var panes: Panes = .{};
 

@@ -11,6 +11,10 @@
 //! lets a block's tokens take more cells than it has. Blocks that are not
 //! colorForth source, such as the kernel of an arrayForth 2 image, cannot
 //! be edited, as they would not encode back the same.
+//!
+//! Front ends show a pair of blocks, in two panes: an even block on top,
+//! and below it the odd block after it, which by convention holds comments
+//! on it. The pane of the block being edited has the focus.
 
 const Editor = @This();
 
@@ -37,8 +41,17 @@ clipboard: [clipboard_capacity]Token = undefined,
 clipboard_len: usize = 0,
 undos: Snapshots = .{},
 redos: Snapshots = .{},
+/// the block each pane last showed with the focus, and the word the cursor
+/// was on there, to go back to
+places: [2]?Place = .{ null, null },
 
 pub const Mode = enum { normal, insert };
+
+/// a word of a block, where the cursor was
+pub const Place = struct { block: usize, cursor: usize };
+
+/// a pane of the pair of blocks shown
+pub const Pane = enum(u1) { top, bottom };
 
 pub const Error = error{
     /// the block has no room for another cell
@@ -91,6 +104,52 @@ pub fn cells(self: Editor) usize {
 /// whether a token starts a line, as colorForth shows a block
 pub fn startsLine(self: Editor, i: usize) bool {
     return i == 0 or colorforth.startsLine(self.tokens[i - 1], self.tokens[i]);
+}
+
+/// the even block of the pair shown, at the top
+pub fn pair(self: Editor) usize {
+    return self.block - self.block % 2;
+}
+
+/// the pane of the block being edited
+pub fn pane(self: Editor) Pane {
+    return @fromBackingInt(@intCast(self.block % 2));
+}
+
+/// the block of the pane without the focus
+pub fn otherBlock(self: Editor) usize {
+    return self.block ^ 1;
+}
+
+/// Moves to the block of a pane, at the word the cursor was on there,
+/// finishing any word being typed and forgetting a count typed
+pub fn focusPane(self: *Editor, to: Pane) Error!void {
+    self.prefix = null;
+    if (self.pane() == to) return;
+    try self.escape();
+    try self.goTo(self.pair() + @backingInt(to));
+    if (self.places[@backingInt(to)]) |place| if (place.block == self.block) {
+        self.cursor = @min(place.cursor, self.len -| 1);
+    };
+}
+
+/// Moves to the pair of blocks before or after, staying in the same pane
+pub fn nextPair(self: *Editor, after: bool) Error!void {
+    if (after) return self.goTo(self.block + 2);
+    if (self.block >= 2) try self.goTo(self.block - 2);
+}
+
+/// The tokens of a block other than the one being edited, to show beside it,
+/// decoded into `buffer`. This is null if there is no such block, or if the
+/// block is not colorForth source, which the editor could not edit.
+pub fn peek(self: *const Editor, block: usize, buffer: *[cells_per_block]Token) ?[]const Token {
+    std.debug.assert(block != self.block);
+    if (block >= self.capacity()) return null;
+    const bytes = self.blocks[block * block_size ..][0..block_size];
+    const tokens = colorforth.decode(bytes, buffer) catch return null;
+    var encoded: [block_size]u8 = undefined;
+    colorforth.encode(tokens, &encoded) catch return null;
+    return if (std.mem.eql(u8, bytes, &encoded)) tokens else null;
 }
 
 /// Moves to another block, leaving the one being edited as it is
@@ -366,6 +425,8 @@ pub const Action = enum {
 /// Handles a key as the editor's key map has it: vim-like moving and
 /// editing in normal mode, typing in insert mode, and colors with ctrl, or
 /// with shift in normal mode. A number typed before `g` is a block to go to.
+/// `[` `]` move by a pair of blocks, and ctrl+j and ctrl+k to the pane below
+/// or above.
 pub fn key(self: *Editor, k: Key) Error!Action {
     if (k.ctrl) {
         const c = switch (k.code) {
@@ -374,6 +435,9 @@ pub fn key(self: *Editor, k: Key) Error!Action {
         };
         // a color, as it is typed or afterwards
         if (colorOfKey("rygwtvb", c)) |color| try self.setColor(color);
+        // the pane below or above, as typed too
+        if (c == 'j') try self.focusPane(.bottom);
+        if (c == 'k') try self.focusPane(.top);
         if (c == 's') {
             try self.escape();
             return .save;
@@ -407,8 +471,8 @@ pub fn key(self: *Editor, k: Key) Error!Action {
         .up => self.previousDefinition(),
         .home => self.first(),
         .end => self.last(),
-        .page_down => try self.goTo(self.block + 1),
-        .page_up => if (self.block > 0) try self.goTo(self.block - 1),
+        .page_down => try self.nextPair(true),
+        .page_up => try self.nextPair(false),
         .escape, .enter, .backspace => {},
         .char => |c| {
             if (colorOfKey("RYGWCMB", c)) |color| try self.setColor(color);
@@ -419,8 +483,8 @@ pub fn key(self: *Editor, k: Key) Error!Action {
                 'k' => self.previousDefinition(),
                 '0' => self.first(),
                 '$' => self.last(),
-                ']' => try self.goTo(self.block + 1),
-                '[' => if (self.block > 0) try self.goTo(self.block - 1),
+                ']' => try self.nextPair(true),
+                '[' => try self.nextPair(false),
                 'g' => if (prefix) |block| try self.goTo(block) else self.first(),
                 'i' => try self.insert(false),
                 'a' => try self.insert(true),
@@ -574,6 +638,7 @@ fn flush(self: *Editor) void {
 
 /// decodes a block, which can be edited if it encodes back the same
 fn load(self: *Editor, block: usize) void {
+    self.places[self.block % 2] = .{ .block = self.block, .cursor = self.cursor };
     self.block = block;
     self.cursor = 0;
     self.mode = .normal;
@@ -878,8 +943,13 @@ test key {
     _ = try keys(editor, "2g");
     try expectEqual(2, editor.block);
     try expectEqual(null, editor.prefix);
+    // [ ] and pgup pgdn move by a pair, in the same pane
     _ = try editor.key(.{ .code = .page_up });
-    try expectEqual(1, editor.block);
+    try expectEqual(0, editor.block);
+    _ = try keys(editor, "[");
+    try expectEqual(0, editor.block);
+    _ = try keys(editor, "]");
+    try expectEqual(2, editor.block);
     _ = try keys(editor, "[");
     _ = try keys(editor, "$g");
     try expectEqual(0, editor.cursor);
@@ -972,6 +1042,68 @@ test "the rest of the key map" {
 test describe {
     try expectEqualStrings("the block is full", describe(error.BlockFull));
     try expectEqualStrings("there is no such block", describe(error.NoSuchBlock));
+}
+
+test focusPane {
+    const editor, const bytes = try testEditor(3);
+    defer freeEditor(editor, bytes);
+    _ = try keys(editor, "ia b c");
+    // ctrl+j finishes the word being typed, and forgets a count
+    _ = try editor.key(.{ .code = .{ .char = 'j' }, .ctrl = true });
+    try expectEqual(1, editor.block);
+    try expectEqual(.bottom, editor.pane());
+    try expectEqual(.normal, editor.mode);
+    _ = try keys(editor, "ix y");
+    _ = try editor.key(.{ .code = .escape });
+    // back to the word the cursor was on, however the pane changed, such
+    // as with a count and g
+    _ = try keys(editor, "h");
+    try editor.goTo(0);
+    _ = try keys(editor, "$1g");
+    _ = try editor.key(.{ .code = .{ .char = 'k' }, .ctrl = true });
+    try expectEqual(0, editor.block);
+    try expectEqual(2, editor.cursor);
+    _ = try keys(editor, "3");
+    _ = try editor.key(.{ .code = .{ .char = 'j' }, .ctrl = true });
+    try expectEqual(1, editor.block);
+    try expectEqual(0, editor.cursor);
+    try expectEqual(null, editor.prefix);
+    _ = try editor.key(.{ .code = .{ .char = 'j' }, .ctrl = true });
+    try expectEqual(1, editor.block);
+    // and undo, which goes back to the block it changed
+    try editor.focusPane(.top);
+    _ = try keys(editor, "h");
+    try editor.focusPane(.bottom);
+    try editor.focusPane(.top);
+    editor.undo();
+    try expectEqual(1, editor.block);
+    try editor.focusPane(.top);
+    try expectEqual(1, editor.cursor);
+    // the pair after has no block 3
+    try editor.nextPair(true);
+    try expectEqual(2, editor.pair());
+    try expectEqual(3, editor.otherBlock());
+    try expectError(error.NoSuchBlock, editor.focusPane(.bottom));
+    // a word that cannot be finished stays, with the pane
+    _ = try keys(editor, "i$1");
+    try expectError(error.HexWord, editor.focusPane(.bottom));
+    try expectEqual(.insert, editor.mode);
+}
+
+test peek {
+    const editor, const bytes = try testEditor(3);
+    defer freeEditor(editor, bytes);
+    _ = try keys(editor, "1gia b");
+    _ = try editor.key(.{ .code = .escape });
+    try editor.goTo(0);
+    var buffer: [cells_per_block]Token = undefined;
+    try expectEqual(2, editor.peek(1, &buffer).?.len);
+    try expectEqual(0, editor.peek(2, &buffer).?.len);
+    try expectEqual(null, editor.peek(3, &buffer));
+    // a block that is not source
+    bytes[2 * block_size] = 1;
+    bytes[2 * block_size + 8] = 0x12;
+    try expectEqual(null, editor.peek(2, &buffer));
 }
 
 test moveTo {

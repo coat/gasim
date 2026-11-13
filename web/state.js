@@ -689,6 +689,17 @@ export function editorGoTo(block) {
   refreshEditor();
 }
 
+/**
+ * Moves to the block of a pane, 'top' or 'bottom', and to its word at `i`,
+ * if one is given.
+ */
+export function editorFocusPane(pane, i = null) {
+  const error = state.gasim.editorFocusPane(pane);
+  if (error) state.message = sentence(error);
+  else if (i !== null) state.gasim.editorMoveTo(i);
+  refreshEditor();
+}
+
 export function editorMoveTo(i) {
   state.gasim.editorMoveTo(i);
   refreshEditor();

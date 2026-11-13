@@ -1789,20 +1789,57 @@ dialog .actions {
 
 .editing .panel-body {
   padding: 0;
+  /* each pane's block scrolls on its own */
+  overflow: hidden;
   background: var(--cf-background);
+}
+
+/* the even block above the odd one, with a border between them to drag */
+.cf-pair {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) var(--gutter-size) minmax(0, var(--odd-height));
+  height: 100%;
+}
+
+.cf-pair > .gutter {
+  touch-action: none;
+  cursor: row-resize;
+  background: var(--border);
+}
+
+.cf-pair > .gutter:hover,
+.cf-pair > .gutter:focus-visible {
+  background: var(--muted);
+  outline: none;
+}
+
+.cf-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.cf-pane-head {
+  padding: 0.25rem 1rem 0;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--muted);
 }
 
 .cf-block {
   position: relative;
-  min-height: 100%;
-  padding: 0.75rem 1rem;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.5rem 1rem 0.75rem;
   font-family: var(--mono);
   font-size: 0.9375rem;
   line-height: 1.6;
   cursor: text;
 }
 
-.cf-block:focus-within {
+.cf-pair:has(.keys:focus) .cf-pane.focused .cf-block {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
 }
@@ -1812,7 +1849,7 @@ dialog .actions {
 }
 
 /* the input that keys go through, there to be typed into but not seen */
-.cf-block .keys {
+.cf-pair .keys {
   position: absolute;
   top: 0;
   left: 0;

@@ -1,7 +1,7 @@
 //! The colorForth editor, after the web version's: the blocks of the file
-//! to search and go to, the block being edited as colored words, and a bar
-//! of colors and what the editor is doing. `Editor.zig` is the model; keys
-//! go to it as the TUI's do.
+//! to search and go to, a pair of blocks as colored words, the even one
+//! above the odd one, and a bar of colors and what the editor is doing.
+//! `Editor.zig` is the model; keys go to it as the TUI's do.
 
 /// show blue words, which lay out the block
 pub var show_format = false;
@@ -20,7 +20,8 @@ var stale = true;
 /// New was pressed with the blocks not saved, and pressing it again starts
 /// a new file anyway
 var confirm_new = false;
-/// the block, to give keys to, and the search, as of this frame
+/// the block being edited, to give keys to, and the search, as of this
+/// frame
 pub var block_id: ?dvui.Id = null;
 pub var search_id: ?dvui.Id = null;
 /// focus the block next frame, as when the editor is opened
@@ -76,7 +77,12 @@ pub fn draw() void {
         var panel = dvui.box(@src(), .{}, .{ .expand = .both });
         defer panel.deinit();
         head(view);
-        block(view);
+        {
+            var pair = dvui.paned(@src(), .{ .direction = .vertical, .collapsed_size = 0, .split_ratio = &ui.panes.pair }, .{ .expand = .both });
+            defer pair.deinit();
+            if (pair.showFirst()) block(view, .top);
+            if (pair.showSecond()) block(view, .bottom);
+        }
         colorBar(view);
     }
 }
@@ -163,8 +169,9 @@ fn head(view: Sim.EditorView) void {
 
     var actions = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .gravity_y = 0.5 });
     defer actions.deinit();
-    if (dock.button(@src(), "Before", view.block > 0)) goTo(view.block - 1);
-    if (dock.button(@src(), "After", view.block + 1 < view.capacity)) goTo(view.block + 1);
+    // the pair before or after, in the same pane, as [ and ]
+    if (dock.button(@src(), "Before", view.block >= 2)) goTo(view.block - 2);
+    if (dock.button(@src(), "After", view.block + 2 < view.capacity)) goTo(view.block + 2);
     _ = dvui.checkbox(@src(), &show_format, "Blue", .{ .gravity_y = 0.5 });
     _ = dvui.checkbox(@src(), &show_marks, "Marks", .{ .gravity_y = 0.5 });
     if (dvui.button(@src(), "New", .{}, .{})) newFile(view);
@@ -267,9 +274,23 @@ fn mark(color: Color) []const u8 {
 /// where a word is drawn, in the block's own coordinates
 const Placed = struct { i: usize, x: f32, y: f32, w: f32, mark: []const u8 };
 
-/// The block's words in lines, as colorForth shows a block, keys going to
-/// the editor while it has focus, and a click moving the cursor to a word
-fn block(view: Sim.EditorView) void {
+/// A pane's block, its words in lines as colorForth shows a block. The
+/// block being edited takes keys while it has focus, and a click moves the
+/// cursor to a word, in the other pane's block too.
+fn block(view: Sim.EditorView, pane: Editor.Pane) void {
+    const editing = pane == view.pane;
+    const tokens = if (editing) view.tokens else view.other.tokens;
+    // nowhere, in the other pane
+    const cursor = if (editing) view.cursor else std.math.maxInt(usize);
+    var panel = dvui.box(@src(), .{}, .{ .expand = .both, .id_extra = @backingInt(pane) });
+    defer panel.deinit();
+    dvui.label(@src(), "Block {d}", .{view.pair + @backingInt(pane)}, .{
+        .font = .theme(.mono),
+        .color_text = .{ .color = dock.muted() },
+        .padding = .{ .x = 8, .y = 2, .w = 8, .h = 2 },
+        .tag = if (pane == .top) "pane-top" else "pane-bottom",
+    });
+
     const arena = dvui.currentWindow().arena();
     const font: dvui.Font = blk: {
         const mono: dvui.Font = .theme(.mono);
@@ -285,14 +306,14 @@ fn block(view: Sim.EditorView) void {
     var line: usize = 0;
     var widest: f32 = 0;
     var lines: usize = 1;
-    for (view.tokens, 0..) |t, i| {
+    for (tokens, 0..) |t, i| {
         defer previous = t.color;
         if (t.line != line) {
             line = t.line;
             x = pad;
             lines = t.line + 1;
         }
-        const here = i == view.cursor;
+        const here = i == cursor;
         if (t.color == .blue and !show_format and !here) continue;
         const m = if (show_marks and (previous != t.color or t.color == .red or t.color == .magenta)) mark(t.color) else "";
         var w = font.textSize(m).w + font.textSize(t.text).w;
@@ -310,17 +331,21 @@ fn block(view: Sim.EditorView) void {
     var box = dvui.box(@src(), .{}, .{
         .expand = .both,
         .min_size_content = .{ .w = widest + pad, .h = @as(f32, @floatFromInt(lines)) * char.h + pad },
-        .tag = "block",
+        .tag = if (editing) "block" else "other-block",
     });
     defer box.deinit();
     const id = box.data().id;
-    block_id = id;
-    if (focus_block) {
+    // the pane being edited now, which a click on the pane above or in the
+    // blocks list may have changed since `view` was read
+    const current = pane == ui.sim.editor.pane();
+    if (current) block_id = id;
+    if (current and focus_block) {
         dvui.focusWidget(id, null, null);
         focus_block = false;
     }
     const rs = box.data().contentRectScale();
-    const focused = dvui.focusedWidgetId() == id;
+    // not the pane left, which keeps the focus for a frame
+    const focused = current and dvui.focusedWidgetId() == id;
     if (focused) dvui.wantTextInput(box.data().borderRectScale().r.toNatural());
 
     for (dvui.events()) |*e| {
@@ -328,7 +353,15 @@ fn block(view: Sim.EditorView) void {
         switch (e.evt) {
             .mouse => |m| if (m.action == .press and m.button.pointer()) {
                 e.handle(@src(), box.data());
-                dvui.focusWidget(id, null, e.num);
+                // to the other pane's block, which then takes the keys
+                if (!current) {
+                    ui.sim.focusPane(pane) catch {
+                        ui.say("{s}", .{ui.sim.out.written()});
+                        continue;
+                    };
+                    focus_block = true;
+                    stale = true;
+                } else dvui.focusWidget(id, null, e.num);
                 const p = rs.pointFromPhysical(m.p);
                 for (placed.items) |w| if (p.x >= w.x and p.x < w.x + w.w + char.w and p.y >= w.y and p.y < w.y + char.h) {
                     ui.sim.editor.moveTo(w.i) catch {};
@@ -351,13 +384,13 @@ fn block(view: Sim.EditorView) void {
     }
     // what the keys did, drawn this frame
     const after = ui.sim.editing(arena) catch return;
-    if (after.tokens.len != view.tokens.len or after.cursor != view.cursor or after.mode != view.mode) dvui.refresh(null, @src(), id);
+    if (after.block != view.block or after.tokens.len != view.tokens.len or after.cursor != view.cursor or after.mode != view.mode) dvui.refresh(null, @src(), id);
 
     const border = dvui.themeGet().color(if (focused) .highlight else .content, if (focused) .fill else .border);
     rs.r.stroke(.all(0), .{ .thickness = rs.s, .color = .{ .color = border } });
     for (placed.items) |w| {
-        const t = view.tokens[w.i];
-        const here = w.i == view.cursor;
+        const t = tokens[w.i];
+        const here = w.i == cursor;
         const typing_here = here and view.mode == .insert;
         if (here and !typing_here) rs.rectToPhysical(.{ .x = w.x - 2, .y = w.y, .w = w.w + 4, .h = char.h }).fill(.all(3 * rs.s), .{ .color = .{ .color = palette.cursor } });
         const color = palette.of(t.color);
@@ -376,7 +409,16 @@ fn block(view: Sim.EditorView) void {
         // the caret, after what is typed
         if (typing_here and focused) rs.rectToPhysical(.{ .x = at + 1, .y = w.y + 2, .w = 2, .h = char.h - 4 }).fill(.all(0), .{ .color = .{ .color = color } });
     }
-    if (view.tokens.len == 0 and !focused) text(rs, font, pad, pad / 2, "Click here, then i to type", dock.muted());
+    if (tokens.len > 0 or focused) return;
+    const empty = if (editing)
+        "Click here, then i to type"
+    else if (!view.other.exists)
+        "There is no such block"
+    else if (view.other.read_only)
+        "This block is not colorForth source"
+    else
+        "An empty block: click here to type into it";
+    text(rs, font, pad, pad / 2, empty, dock.muted());
 }
 
 fn text(rs: dvui.RectScale, font: dvui.Font, x: f32, y: f32, s: []const u8, color: dvui.Color) void {
@@ -392,6 +434,9 @@ fn keyOf(k: dvui.Event.Key) ?Editor.Key {
         const letter: u8 = switch (k.code) {
             .r => 'r',
             .y => 'y',
+            // the pane below or above
+            .j => 'j',
+            .k => 'k',
             .g => 'g',
             .w => 'w',
             .t => 't',
@@ -422,6 +467,11 @@ fn keyOf(k: dvui.Event.Key) ?Editor.Key {
 pub fn key(k: Editor.Key) void {
     confirm_new = false;
     stale = true;
+    const pane = ui.sim.editor.pane();
+    // the other pane's block takes the keys, after ctrl+j or Ng
+    defer if (ui.sim.editor.pane() != pane) {
+        focus_block = true;
+    };
     const action = ui.sim.editorKey(k) catch return ui.say("{s}", .{ui.sim.out.written()});
     switch (action) {
         .none => {},
@@ -466,7 +516,7 @@ fn colorBar(view: Sim.EditorView) void {
     const hints = if (view.mode == .insert)
         "space: next word · enter: new line · esc: done"
     else
-        "i a o: type · x y p: cut copy put · u U: undo redo · [ ]: blocks · L: compile · ctrl+s: save";
+        "i a o: type · x y p: cut copy put · u U: undo redo · [ ]: blocks · ctrl+j k: pane · L: compile · ctrl+s: save";
     dvui.labelNoFmt(@src(), hints, .{}, .{ .gravity_y = 0.5, .gravity_x = 1, .color_text = .{ .color = dock.muted() } });
 }
 
@@ -598,4 +648,48 @@ test "the blocks list searches the blocks" {
     try expect(!matches(.{ .block = 3, .read_only = false, .empty = false, .text = "dup" }, "swap"));
     try click("block-0");
     try expectEqual(0, ui.sim.editor.block);
+}
+
+test "the editor shows a pair of blocks, the odd one below" {
+    var w = try testing.init(.{ .window_size = .{ .w = 1400, .h = 900 } });
+    defer w.deinit();
+    try ui.startWith(ui.upcase);
+    defer ui.stop();
+    try testing.settle(ui.frame);
+    try click("view-editor");
+    try testing.writeText("i");
+    try testing.settle(ui.frame);
+    try testing.writeText("dup");
+    try testing.settle(ui.frame);
+
+    // ctrl+j finishes the word, and the block below takes the keys
+    try testing.pressKey(.j, .lcontrol);
+    try testing.settle(ui.frame);
+    try expectEqual(1, ui.sim.editor.block);
+    try testing.writeText("i");
+    try testing.settle(ui.frame);
+    try testing.writeText("note");
+    try testing.settle(ui.frame);
+    try testing.pressKey(.escape, .none);
+    try testing.settle(ui.frame);
+    const arena = dvui.currentWindow().arena();
+    var view = try ui.sim.editing(arena);
+    try expectEqual(.bottom, view.pane);
+    try expectEqualStrings("dup", view.other.tokens[0].text);
+    try ui.saveImage(&w, "editor-pair.png");
+
+    // alt+k, as alt does what ctrl does, and a click on the other pane
+    try testing.pressKey(.k, .lalt);
+    try testing.settle(ui.frame);
+    try expectEqual(0, ui.sim.editor.block);
+    try click("other-block");
+    try expectEqual(1, ui.sim.editor.block);
+    try expectEqual(block_id, dvui.focusedWidgetId());
+    view = try ui.sim.editing(dvui.currentWindow().arena());
+    try expectEqualStrings("dup", view.other.tokens[0].text);
+    // and back to the pane above, drawn before the one left, which the keys
+    // go to as well
+    try click("other-block");
+    try expectEqual(0, ui.sim.editor.block);
+    try expectEqual(block_id, dvui.focusedWidgetId());
 }
