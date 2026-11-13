@@ -142,21 +142,39 @@ pub fn draw() void {
     var panel = dvui.box(@src(), .{}, .{ .expand = .both });
     defer panel.deinit();
     {
-        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 } });
+        // the tabs, and what acts on the tab shown at the right, outside
+        // the tabs' focus group, so that tab reaches it and the arrows do
+        // not; the tabs' line, which the tab shown opens onto, goes on
+        // under it
+        var head = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 4, .y = 2, .w = 4 } });
         defer head.deinit();
-        for (std.enums.values(Tab)) |which| tabButton(which);
-        var actions = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_x = 1, .gravity_y = 0.5 });
-        defer actions.deinit();
-        switch (tab) {
-            .forth => if (button(@src(), "Clear", entries.items.len > 0)) clearEntries(),
-            .console => {
-                dvui.label(@src(), "node {d:0>3}, {t} port", .{ Sim.console_node, Sim.console_port }, .{ .color_text = .{ .color = muted() }, .gravity_y = 0.5 });
-                if (button(@src(), "Clear", console.items.len > 0)) console.clearRetainingCapacity();
-            },
-            .trace => debug.traceHead(),
-            .breakpoints => debug.breakpointsHead(),
-            .history => debug.historyHead(),
+        var tabs_line: dvui.Rect.Physical = undefined;
+        var line_color: dvui.ColorOrGradient = undefined;
+        {
+            var tabs = dvui.tabs(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .gravity_y = 1, .background = false });
+            defer tabs.deinit();
+            for (std.enums.values(Tab)) |which| addTab(tabs, which);
+            tabs_line = tabs.scroll.data().contentRectScale().r;
+            line_color = tabs.scroll.data().options.color(.border);
         }
+        {
+            var actions = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .margin = .{ .h = 2 } });
+            defer actions.deinit();
+            switch (tab) {
+                .forth => if (button(@src(), "Clear", entries.items.len > 0)) clearEntries(),
+                .console => {
+                    dvui.label(@src(), "node {d:0>3}, {t} port", .{ Sim.console_node, Sim.console_port }, .{ .color_text = .{ .color = muted() }, .gravity_y = 0.5 });
+                    if (button(@src(), "Clear", console.items.len > 0)) console.clearRetainingCapacity();
+                },
+                .trace => debug.traceHead(),
+                .breakpoints => debug.breakpointsHead(),
+                .history => debug.historyHead(),
+            }
+        }
+        // where TabsWidget draws its own
+        if (dvui.currentWindow().snap_to_pixels) tabs_line.y = @floor(tabs_line.y) - 0.5;
+        const end = head.data().contentRectScale().r;
+        dvui.Path.stroke(.{ .points = &.{ tabs_line.bottomRight(), .{ .x = end.x + end.w, .y = tabs_line.y + tabs_line.h } } }, .{ .thickness = 1, .color = line_color });
     }
     // only the entries drawn this frame can have focus
     forth_id = null;
@@ -171,7 +189,7 @@ pub fn draw() void {
     }
 }
 
-fn tabButton(which: Tab) void {
+fn addTab(tabs: *dvui.TabsWidget, which: Tab) void {
     const label, const tag = switch (which) {
         .forth => .{ "aForth", "tab-forth" },
         .console => .{ if (unseen) "Console \u{2022}" else "Console", "tab-console" },
@@ -179,10 +197,11 @@ fn tabButton(which: Tab) void {
         .breakpoints => .{ "Breakpoints", "tab-breakpoints" },
         .history => .{ "History", "tab-history" },
     };
-    const opts: dvui.Options = .{ .id_extra = @backingInt(which), .style = if (tab == which) .highlight else .control, .tag = tag };
-    if (dvui.button(@src(), label, .{}, opts)) {
+    if (tabs.addTabLabel(tab == which, label, .{ .tag = tag })) {
         tab = which;
         if (which == .console) unseen = false;
+        // the tabs' focus group would keep the arrows, which select nodes
+        dvui.focusWidget(null, null, null);
     }
 }
 
@@ -523,6 +542,7 @@ pub fn follow(si: *dvui.ScrollInfo, f: *Follow) void {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 const dvui = @import("dvui");
@@ -601,4 +621,21 @@ test "the console gives a line to the node, and shows what it writes" {
     try testing.settle(ui.frame);
     try expectEqualStrings("HI THERE\n", console.items);
     try ui.saveImage(&w, "console.png");
+}
+
+test "a tab clicked leaves the arrows to the map" {
+    var w = try testing.init(.{ .window_size = .{ .w = 1400, .h = 900 } });
+    defer w.deinit();
+    try ui.startWith(ui.upcase);
+    defer ui.stop();
+    try testing.settle(ui.frame);
+    try testing.moveTo("tab-trace");
+    try testing.click(.left);
+    try testing.settle(ui.frame);
+    try expectEqual(.trace, tab);
+    const before = ui.selected;
+    try testing.pressKey(.right, .none);
+    try testing.settle(ui.frame);
+    try expectEqual(.trace, tab);
+    try expect(ui.selected != before);
 }
