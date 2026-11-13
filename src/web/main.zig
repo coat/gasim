@@ -225,6 +225,13 @@ export fn editorMoveTo(i: usize) void {
     sim.editor.moveTo(i) catch {};
 }
 
+/// Moves the editor to the block of the top pane (0) or the bottom one (1),
+/// as ctrl+k and ctrl+j do. On an error, `out` says what.
+export fn editorFocusPane(pane: u8) bool {
+    sim.focusPane(if (pane == 0) .top else .bottom) catch return false;
+    return true;
+}
+
 export fn editorGoTo(block: usize) bool {
     sim.editor.goTo(block) catch return false;
     return true;

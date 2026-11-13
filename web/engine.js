@@ -183,6 +183,8 @@ export async function loadEngine(url = 'gasim.wasm') {
     editor: () => json(x.editorView()),
     editorMoveTo: (i) => x.editorMoveTo(i),
     editorGoTo: (block) => !!x.editorGoTo(block),
+    /** Moves to the block of a pane, 'top' or 'bottom'; returns null, or why it could not. */
+    editorFocusPane: (pane) => (x.editorFocusPane(pane === 'bottom' ? 1 : 0) ? null : why()),
     /** The editor's file to save, as a copy. */
     editorContents() {
       const n = x.editorContents();

@@ -56,3 +56,20 @@ Deno.test('tiles show what each node waits on', async () => {
   assertEquals(tiles.length, 144);
   assertEquals(tiles[0].doing, 'run');
 });
+
+Deno.test('the editor shows a pair of blocks, the odd one below', async () => {
+  const g = await engine();
+  for (const c of 'idup') g.editorKey(c);
+  // ctrl+j finishes the word, and moves to the block below
+  assertEquals(g.editorKey('j', true), 'none');
+  let view = g.editor();
+  assertEquals([view.block, view.pair, view.pane], [1, 0, 'bottom']);
+  assertEquals(view.other.tokens.map((t) => t.text), ['dup']);
+  // and a pane can be chosen, as clicking it does
+  assertEquals(g.editorFocusPane('top'), null);
+  view = g.editor();
+  assertEquals([view.block, view.other.block, view.other.exists], [0, 1, true]);
+  // ] moves by a pair, in the same pane
+  g.editorKey(']');
+  assertEquals(g.editor().block, 2);
+});

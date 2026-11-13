@@ -12,8 +12,9 @@ the editor starts a new file of blocks.
 The editor shows two blocks at a time, in two panes: an even block on top,
 and the odd block after it below. By convention, the odd block holds
 comments on the even one, as in `OkadWork.cf`. The pane of the block you are
-editing has the focus, so `1g` moves to the bottom pane. Drag the border
-between the panes to resize them.
+editing has the focus, so `1g` moves to the bottom pane. Click a pane to
+move to its block, and drag the border between the panes to resize them.
+The GUI and the web version show the two blocks in the same way.
 
 The editor is inspired by AshleyF's [Color](https://github.com/AshleyF/Color)
 editor, and works like vim. The cursor is always on a word. Keys move
@@ -41,8 +42,8 @@ an arrayForth 2 image.
 | `0` `$` | move to the first or last word |
 | `[` `]` | move to the pair of blocks before or after, staying in the same pane |
 | `256g` | move to block 256 |
-| `ctrl+j` `ctrl+k` | move to the bottom or top pane, even while typing. `alt` works too. |
-| `-` `+` | shorten or lengthen the pane with the focus |
+| `ctrl+j` `ctrl+k` | move to the bottom or top pane, even while typing. `alt` works too, as in a browser that keeps `ctrl+j` for itself. |
+| `-` `+` | in the TUI, shorten or lengthen the pane with the focus |
 | `i` `a` | type a word before or after the cursor |
 | `o` `O` | type a new red name on a line below or above |
 | `x` `X` | delete the word, or the one before it |

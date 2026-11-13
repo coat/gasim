@@ -83,9 +83,6 @@ const Screen = enum { chip, editor };
 
 /// the border between the left panels and the node panel, or the one above
 /// a panel in the left column, by its place in `Tui.stacked`
-/// a word of a block, where the editor's cursor was
-const EditorPlace = struct { block: usize, cursor: usize };
-
 /// a border between panels, or between the editor's two blocks
 const Border = union(enum) { columns, rows: usize, editor };
 
@@ -445,14 +442,9 @@ const Tui = struct {
     /// quitting was asked for with unsaved blocks, and asking again quits
     quit_asked: bool = false,
     quit_confirmed: bool = false,
-    /// The editor shows a pair of blocks, the even one in the top pane and
-    /// the odd one, which by convention holds comments on it, below. The
-    /// pane of the block being edited has the focus.
-    /// the first row of each pane's block in view
+    /// the first row in view of the block in each of the editor's panes, as
+    /// `Editor` has them
     editor_scroll: [2]u16 = .{ 0, 0 },
-    /// the block each pane last had the focus in, and the word the cursor
-    /// was on there, to go back to
-    editor_cursor: [2]?EditorPlace = .{ null, null },
     /// the even block of the pair last shown, whose scrolling another pair
     /// forgets
     editor_pair: usize = 0,
@@ -1134,7 +1126,7 @@ const Tui = struct {
         var named: ?Editor.Key = null;
         // alt or ctrl with k and j, the pane above or below, as alt moves
         // between the chip's panels, even while typing
-        for ("kj", [_]u1{ 0, 1 }) |letter, pane| {
+        for ("kj", [_]Editor.Pane{ .top, .bottom }) |letter, pane| {
             if (k.matches(letter, .{ .alt = true }) or k.matches(letter, .{ .ctrl = true })) {
                 self.focusPane(pane);
                 return true;
@@ -1156,25 +1148,13 @@ const Tui = struct {
             self.startCommand("");
             return true;
         }
-        // [ ] and pgup pgdn move to the pair before or after, staying in the
-        // pane, rather than to the next block, which may be in the other one
-        if (editor.mode == .normal) {
-            const before = (named != null and named.?.code == .page_up and !named.?.ctrl) or (named == null and std.mem.eql(u8, chars, "["));
-            const after = (named != null and named.?.code == .page_down and !named.?.ctrl) or (named == null and std.mem.eql(u8, chars, "]"));
-            if (before or after) {
-                editor.prefix = null;
-                if (before and editor.block < 2) return true;
-                editor.goTo(if (before) editor.block - 2 else editor.block + 2) catch |err| self.fail(Editor.describe(err));
-                return true;
-            }
-        }
         // - and + shorten or lengthen the pane with the focus
         if (editor.mode == .normal and named == null and chars.len == 1 and std.mem.indexOfScalar(u8, "-+=", chars[0]) != null) {
             editor.prefix = null;
             const rows: i32 = if (chars[0] == '-') -1 else 1;
             // as drawn, which a split too big for the terminal is not
             const top = self.editor_border orelse return true;
-            self.editor_split = @intCast(@max(@as(i32, top) + if (editor.block % 2 == 0) rows else -rows, 0));
+            self.editor_split = @intCast(@max(@as(i32, top) + if (editor.pane() == .top) rows else -rows, 0));
             return true;
         }
         if (named) |one| return self.editorAction(editor, one);
@@ -1182,20 +1162,9 @@ const Tui = struct {
         return true;
     }
 
-    /// Moves to the block of the top pane (0) or the bottom one (1), at the
-    /// word the cursor was on there, finishing any word being typed
-    fn focusPane(self: *Tui, pane: u1) void {
-        const editor = self.options.colorforth.?.editor;
-        const from = editor.block % 2;
-        if (from == pane) return;
-        editor.prefix = null;
-        editor.escape() catch |err| return self.fail(Editor.describe(err));
-        const left: EditorPlace = .{ .block = editor.block, .cursor = editor.cursor };
-        editor.goTo(editor.block - from + pane) catch |err| return self.fail(Editor.describe(err));
-        self.editor_cursor[from] = left;
-        if (self.editor_cursor[pane]) |place| if (place.block == editor.block) {
-            editor.cursor = @min(place.cursor, editor.len -| 1);
-        };
+    /// Moves to the block of a pane, saying why it cannot
+    fn focusPane(self: *Tui, pane: Editor.Pane) void {
+        self.options.colorforth.?.editor.focusPane(pane) catch |err| self.fail(Editor.describe(err));
     }
 
     /// the editor's name for a key, unless it is a character
@@ -1360,7 +1329,6 @@ const Tui = struct {
         cf.compressed = compressed != null;
         self.forgetCompiled();
         self.editor_scroll = .{ 0, 0 };
-        self.editor_cursor = .{ null, null };
         self.say(if (compressed != null)
             "decompressed, and saved uncompressed"
         else if (!found)
@@ -1378,7 +1346,6 @@ const Tui = struct {
         cf.compressed = false;
         self.forgetCompiled();
         self.editor_scroll = .{ 0, 0 };
-        self.editor_cursor = .{ null, null };
         self.say("a new file of blocks");
     }
 
@@ -2005,7 +1972,7 @@ const Tui = struct {
         }
         // a click on a pane moves to its block
         if (self.screen == .editor) {
-            for (self.editor_panes, [_]u1{ 0, 1 }) |w, pane| if (w) |inside| if (inside.hasMouse(m) != null) self.focusPane(pane);
+            for (self.editor_panes, [_]Editor.Pane{ .top, .bottom }) |w, pane| if (w) |inside| if (inside.hasMouse(m) != null) self.focusPane(pane);
             return;
         }
 
@@ -2925,13 +2892,11 @@ const Tui = struct {
         const cf = self.options.colorforth.?;
         const editor = cf.editor;
         const body_height = win.height - 1;
-        const pair = editor.block - editor.block % 2;
+        const pair = editor.pair();
         if (pair != self.editor_pair) {
             self.editor_pair = pair;
             self.editor_scroll = .{ 0, 0 };
         }
-        // however the cursor got here, as Ng and undo move between panes too
-        self.editor_cursor[editor.block % 2] = .{ .block = editor.block, .cursor = editor.cursor };
         // each pane keeps a row inside its border
         const top_height = std.math.clamp(self.editor_split orelse body_height / 2, 3, body_height - 3);
         self.editor_border = top_height;
@@ -2941,7 +2906,7 @@ const Tui = struct {
             self.print("block {d}", .{pair + 1}),
         };
         for ([_]u1{ 0, 1 }, [_]u16{ 0, top_height }, [_]u16{ top_height, body_height - top_height }) |pane, y, height| {
-            const focused = editor.block % 2 == pane;
+            const focused = @backingInt(editor.pane()) == pane;
             const inside = win.child(.{ .y_off = y, .height = height, .border = .{ .where = .all, .style = if (focused) colors.focused else colors.dim } });
             _ = win.child(.{ .x_off = 2, .y_off = y, .width = win.width -| 3, .height = 1 }).printSegment(.{ .text = titles[pane], .style = .{ .bold = true } }, .{ .wrap = .none });
             self.editor_panes[pane] = inside;
@@ -2958,7 +2923,7 @@ const Tui = struct {
         } else if (editor.len == 0) {
             _ = inside.printSegment(.{ .text = "An empty block: i to type into it", .style = colors.dim }, .{});
         } else {
-            const scroll = &self.editor_scroll[editor.block % 2];
+            const scroll = &self.editor_scroll[@backingInt(editor.pane())];
             const tokens = editor.tokens[0..editor.len];
             const row = self.layoutBlock(inside, tokens, editor.cursor, editor.mode == .insert, scroll.*, false);
             if (row < scroll.*) scroll.* = row;

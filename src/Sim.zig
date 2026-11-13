@@ -858,6 +858,16 @@ pub fn editorKey(self: *Sim, k: Editor.Key) Editor.Error!Editor.Action {
     };
 }
 
+/// Moves the editor to the block of a pane, or returns the error, whose
+/// message is in `out`
+pub fn focusPane(self: *Sim, pane: Editor.Pane) Editor.Error!void {
+    self.editor.focusPane(pane) catch |err| {
+        self.out.clearRetainingCapacity();
+        self.out.writer.writeAll(Editor.describe(err)) catch {};
+        return err;
+    };
+}
+
 /// Compiles the block being edited, and the blocks it loads, and starts the
 /// chip again as it was set up, with the code compiled so far, the block's
 /// replacing what it compiled before, as `L` does in the TUI. `out` says
@@ -953,8 +963,24 @@ pub const TokenView = struct {
     line: usize,
 };
 
+/// the block of the pane without the focus, which is not being edited
+pub const OtherView = struct {
+    block: usize,
+    /// whether the editor can hold the block
+    exists: bool,
+    /// not colorForth source, such as an arrayForth 2 kernel's
+    read_only: bool,
+    tokens: []const TokenView,
+};
+
+/// The pair of blocks the editor shows, the block being edited in
+/// `pane`, and the other block in the other pane
 pub const EditorView = struct {
     block: usize,
+    /// the even block, in the top pane
+    pair: usize,
+    pane: Editor.Pane,
+    other: OtherView,
     blocks: usize,
     capacity: usize,
     mode: Editor.Mode,
@@ -976,22 +1002,24 @@ pub fn editorView(self: *Sim) error{OutOfMemory}![]const u8 {
     return self.out.written();
 }
 
-/// The block being edited, its words' text allocated with `a`
+/// The block being edited and the other block of its pair, their words'
+/// text allocated with `a`
 pub fn editing(self: *Sim, a: Allocator) error{OutOfMemory}!EditorView {
     const editor = &self.editor;
-    const tokens = try a.alloc(TokenView, editor.len);
-    var lines: colorforth.Lines = .{};
-    for (editor.tokens[0..editor.len], tokens, 0..) |*token, *view, i| {
-        const typing = editor.mode == .insert and i == editor.cursor;
-        view.* = .{
-            .text = if (typing) token.text() else try std.fmt.allocPrint(a, "{f}", .{token.*}),
-            .color = token.tag.color(),
-            .value = if (token.tag == .variable) token.value else null,
-            .line = lines.of(token.*),
-        };
-    }
+    const typing: ?usize = if (editor.mode == .insert) editor.cursor else null;
+    var buffer: [colorforth.cells_per_block]colorforth.Token = undefined;
+    const other = editor.otherBlock();
+    const peeked = editor.peek(other, &buffer);
     return .{
         .block = editor.block,
+        .pair = editor.pair(),
+        .pane = editor.pane(),
+        .other = .{
+            .block = other,
+            .exists = other < editor.capacity(),
+            .read_only = other < editor.capacity() and peeked == null,
+            .tokens = try tokenViews(a, peeked orelse &.{}, null),
+        },
         .blocks = editor.count,
         .capacity = editor.capacity(),
         .mode = editor.mode,
@@ -1001,8 +1029,23 @@ pub fn editing(self: *Sim, a: Allocator) error{OutOfMemory}!EditorView {
         .read_only = editor.read_only,
         .unsaved = editor.unsaved(),
         .compressed = self.editor_compressed,
-        .tokens = tokens,
+        .tokens = try tokenViews(a, editor.tokens[0..editor.len], typing),
     };
+}
+
+/// tokens to show, the one at `typing` as it is being typed
+fn tokenViews(a: Allocator, tokens: []const colorforth.Token, typing: ?usize) error{OutOfMemory}![]const TokenView {
+    const views = try a.alloc(TokenView, tokens.len);
+    var lines: colorforth.Lines = .{};
+    for (tokens, views, 0..) |*token, *view, i| {
+        view.* = .{
+            .text = if (typing == i) token.text() else try std.fmt.allocPrint(a, "{f}", .{token.*}),
+            .color = token.tag.color(),
+            .value = if (token.tag == .variable) token.value else null,
+            .line = lines.of(token.*),
+        };
+    }
+    return views;
 }
 
 const std = @import("std");
@@ -1237,6 +1280,21 @@ test "editing colorForth, and loading what was typed" {
     try expectEqualStrings("red", tokens[5].object.get("color").?.string);
     try expectEqual(1, tokens[5].object.get("line").?.integer);
     try expect(view.value.object.get("unsaved").?.bool);
+
+    // the pair's other block, below, which ctrl+j moves to
+    try expectEqualStrings("top", view.value.object.get("pane").?.string);
+    const other = view.value.object.get("other").?.object;
+    try expectEqual(1, other.get("block").?.integer);
+    try expect(other.get("exists").?.bool);
+    try sim.focusPane(.bottom);
+    _ = try sim.editorKey(.char('i'));
+    for ("note") |c| _ = try sim.editorKey(.char(c));
+    _ = try sim.editorKey(ctrl.key('k'));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const both = try sim.editing(arena.allocator());
+    try expectEqual(.top, both.pane);
+    try expectEqualStrings("note", both.other.tokens[0].text);
 
     const file = try std.testing.allocator.dupe(u8, sim.editor.contents());
     defer std.testing.allocator.free(file);
