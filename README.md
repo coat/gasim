@@ -187,6 +187,7 @@ the GUI, the web version, tests and fuzzing, and
 
 See [Contributing](CONTRIBUTING.md) for how to write docs, code comments,
 commits and pull requests. gasim uses plain language (ISO 24495-1).
+[Architecture](ARCHITECTURE.md) explains how the code fits together.
 
 ## Prior art
 
